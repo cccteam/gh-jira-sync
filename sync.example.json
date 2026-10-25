@@ -10,5 +10,6 @@
   "max_operations": 20,
   "max_pages": 100,
   "full_rescan_hours": 24,
-  "jira_create_fields": {}
+  "jira_create_fields": {},
+  "status_sync": null
 }

@@ -1,0 +1,104 @@
+name: gh-jira-sync
+# Reusable workflow: call it from any repository to run one sync deployment.
+# Each deployment needs its own config file and its own state branch.
+on:
+  workflow_call:
+    inputs:
+      config:
+        description: Path to the sync configuration in the calling repository
+        type: string
+        default: sync.json
+      state-branch:
+        description: Dedicated state branch in the calling repository (sync-state or sync-state-<name>)
+        type: string
+        default: sync-state
+      apply:
+        description: Apply remote changes (otherwise dry-run)
+        type: boolean
+        default: false
+      initialize:
+        description: Allow first-run state initialization
+        type: boolean
+        default: false
+      tool-ref:
+        description: Ref of cccteam/gh-jira-sync to build; pin it to the same ref as `uses:`
+        type: string
+        default: main
+    secrets:
+      jira-email:
+        description: Jira Cloud service account email
+        required: true
+      jira-api-token:
+        description: API token for that account
+        required: true
+      github-token:
+        description: >-
+          Token with issue read/write on the configured repository. Defaults to the
+          caller's GITHUB_TOKEN, which only covers the calling repository.
+        required: false
+      tool-token:
+        description: >-
+          Token with read access to cccteam/gh-jira-sync, needed while that repository
+          is private and the caller is another repository.
+        required: false
+
+jobs:
+  sync:
+    # Only trusted default-branch code may run with secrets. Scheduled runs always use
+    # the default branch, and their event payload carries no repository details.
+    if: >-
+      github.event_name == 'schedule' ||
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # One writer per state branch; never cancel a run mid-journal.
+    concurrency:
+      group: gh-jira-sync-${{ github.repository }}-${{ inputs.state-branch }}
+      cancel-in-progress: false
+    steps:
+      # The calling repository: its config, and the remote that holds the state branch.
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: cccteam/gh-jira-sync
+          ref: ${{ inputs.tool-ref }}
+          path: .gh-jira-sync-tool
+          token: ${{ secrets.tool-token || github.token }}
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: .gh-jira-sync-tool/go.mod
+          cache: false
+      # Built before any sync secret is in the environment.
+      - name: Build
+        run: |
+          go build -C .gh-jira-sync-tool -o "$RUNNER_TEMP/gh-jira-sync" .
+          rm -rf .gh-jira-sync-tool
+      - name: Reconcile
+        env:
+          GH_TOKEN: ${{ secrets.github-token || github.token }}
+          JIRA_EMAIL: ${{ secrets.jira-email }}
+          JIRA_API_TOKEN: ${{ secrets.jira-api-token }}
+          APPLY: ${{ inputs.apply }}
+          INITIALIZE: ${{ inputs.initialize }}
+          CONFIG: ${{ inputs.config }}
+          BRANCH: ${{ inputs.state-branch }}
+        run: |
+          args=(--config "$CONFIG" --git-state-branch "$BRANCH"
+                --state "$RUNNER_TEMP/state/state.json" --report "$RUNNER_TEMP/sync-report.json")
+          if [ "$APPLY" = true ]; then args+=(--apply); fi
+          if [ "$INITIALIZE" = true ]; then args+=(--init-state); fi
+          "$RUNNER_TEMP/gh-jira-sync" "${args[@]}"
+      - name: Show report
+        if: always()
+        env:
+          BRANCH: ${{ inputs.state-branch }}
+        run: |
+          if [ -f "$RUNNER_TEMP/sync-report.json" ]; then
+            {
+              echo "### gh-jira-sync: $BRANCH"
+              echo '```json'
+              cat "$RUNNER_TEMP/sync-report.json"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi

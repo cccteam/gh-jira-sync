@@ -55,11 +55,13 @@ const (
 	KindAcknowledged   Kind = "acknowledged"
 	KindUnchanged      Kind = "unchanged"
 	KindReconciled     Kind = "reconciled"
+	KindSyncStatus     Kind = "sync_status"   // close or reopen one side to match the other
+	KindStatusAgreed   Kind = "status_agreed" // both sides agree; record that as the baseline
 )
 
 // writes reports kinds that perform a remote write and count against max_operations.
 func (k Kind) writes() bool {
-	return k == KindCreateIssue || k == KindCreateComment || k == KindEditComment
+	return k == KindCreateIssue || k == KindCreateComment || k == KindEditComment || k == KindSyncStatus
 }
 
 // needsReview reports kinds that make the run exit 2 until resolved or acknowledged.
@@ -103,6 +105,10 @@ const (
 	OpJiraComment   OpKind = "comment_jira"
 )
 
+// OpStatus identifies a pair's status decisions in reports and acknowledgements.
+// Status changes are not journaled, so it never appears in state operations.
+const OpStatus OpKind = "status"
+
 // commentOp is the operation kind for copying a comment that originates on side.
 func commentOp(side Side) OpKind {
 	if side == SideGitHub {
@@ -132,18 +138,22 @@ type GitHubIssue struct {
 	Title       string    `json:"title"`
 	Body        string    `json:"body"` // null decodes as ""
 	HTMLURL     string    `json:"html_url"`
+	State       string    `json:"state"` // "open" or "closed"
 	UpdatedAt   string    `json:"updated_at"`
 	PullRequest *struct{} `json:"pull_request"` // present only on pull requests
 }
 
 func (i *GitHubIssue) idString() string { return strconv.FormatInt(i.ID, 10) }
 
+func (i *GitHubIssue) closed() bool { return i.State == "closed" }
+
 // sameContent compares what drives sync decisions; activity timestamps are ignored.
 func (i *GitHubIssue) sameContent(o *GitHubIssue) bool {
 	if i == nil || o == nil {
 		return i == o
 	}
-	return i.ID == o.ID && i.Number == o.Number && i.Title == o.Title && i.Body == o.Body && i.HTMLURL == o.HTMLURL
+	return i.ID == o.ID && i.Number == o.Number && i.Title == o.Title && i.Body == o.Body &&
+		i.HTMLURL == o.HTMLURL && i.State == o.State
 }
 
 type gitHubUser struct {
@@ -174,11 +184,32 @@ type JiraIssue struct {
 		Project struct {
 			Key string `json:"key"`
 		} `json:"project"`
-		Updated string `json:"updated"`
+		Updated string     `json:"updated"`
+		Status  JiraStatus `json:"status"`
 	} `json:"fields"`
 	Properties struct {
 		Identity *IssueIdentity `json:"gh-jira-sync"`
 	} `json:"properties"`
+}
+
+// done reports a status in Jira's Done category, which counts as closed on GitHub.
+func (j *JiraIssue) done() bool { return j.Fields.Status.done() }
+
+// JiraStatus is a workflow status; its category says whether work is finished.
+type JiraStatus struct {
+	Name           string `json:"name"`
+	StatusCategory struct {
+		Key string `json:"key"` // "new", "indeterminate", or "done"
+	} `json:"statusCategory"`
+}
+
+func (s JiraStatus) done() bool { return s.StatusCategory.Key == "done" }
+
+// JiraTransition is a workflow move available from an issue's current status.
+type JiraTransition struct {
+	ID   string     `json:"id"`
+	Name string     `json:"name"`
+	To   JiraStatus `json:"to"`
 }
 
 // IssueIdentity is the issue property written atomically with each created Jira issue.

@@ -1,10 +1,12 @@
-# GitHub → Jira creation, two-way comments
+# GitHub → Jira creation, two-way comments and status
 
 Creates Jira Cloud issues from GitHub issues labeled **`sync-jira`**, then copies
 original comments and their edits in both directions. A single Go binary (Go 1.27+,
 standard library only) with a ready-to-use GitHub Actions workflow.
 
 * Issue title and description are copied at creation only.
+* Optionally, closing or reopening an issue on either side does the same on the
+  other (see [Issue status](#issue-status)).
 * Original comment edits update the existing copy. Edits to copies are reported
   and preserved for review; original comments are never modified by the utility.
 * No issue/comment deletions, reverse issue creation, or attachment copying.
@@ -26,7 +28,8 @@ Set credentials through your secret manager or shell environment:
 | `JIRA_API_TOKEN` | API token for that account |
 
 The Jira account needs Browse Projects, Create Issues, Add Comments, Edit Own
-Comments, and access to issue properties. Jira Software and business projects are
+Comments, and access to issue properties, plus Transition Issues when status sync
+is on. Jira Software and business projects are
 supported; Jira Service Management projects are rejected to avoid mishandling
 internal comments. HTTPS is mandatory and credentials never follow redirects.
 
@@ -50,7 +53,14 @@ go build -o gh-jira-sync .
 go test -race ./...
 ```
 
-`go install .` also works. Flags accept one or two dashes (`-apply` or `--apply`).
+To install from GitHub instead, while the repository is private, tell Go to skip the
+public module proxy and give Git access to `cccteam` repositories:
+
+```sh
+GOPRIVATE=github.com/cccteam/* go install github.com/cccteam/gh-jira-sync@latest
+```
+
+Flags accept one or two dashes (`-apply` or `--apply`).
 Supported platforms are Linux/macOS (the local lock uses `flock`). No live
 credentials are needed to run tests.
 
@@ -61,29 +71,118 @@ operation tokens, Jira `gh-sync-*` labels, and content fingerprints are byte-ide
 
 ## GitHub Actions
 
-Commit the code, workflows, and your `sync.json` to the default branch of the
-repository being synced.
+All runs go through the reusable workflow
+[`.github/workflows/sync-reusable.yml`](.github/workflows/sync-reusable.yml). A
+**deployment** is one config file plus one state branch, syncing one GitHub
+repository with one Jira project.
 
-1. Add Actions secrets `JIRA_EMAIL` and `JIRA_API_TOKEN`.
-2. Permit the workflow's `GITHUB_TOKEN` to write issues and contents. Contents write
-   is needed for the dedicated `sync-state` branch; branch rules must allow it.
-3. Dispatch **Sync GitHub and Jira** on the default branch with **initialize** checked
-   and **apply** unchecked. Inspect the job summary.
-4. Dispatch with initialize and apply checked for the first write run. Later runs
+| Input | Default | Meaning |
+| --- | --- | --- |
+| `config` | `sync.json` | Config path in the calling repository |
+| `state-branch` | `sync-state` | State branch in the calling repository: `sync-state` or `sync-state-<name>` |
+| `apply` | `false` | Perform writes; otherwise dry-run |
+| `initialize` | `false` | Allow creating new state (first run only) |
+| `tool-ref` | `main` | Ref of this repository to build; pin it to the ref in `uses:` |
+
+| Secret | Required | Purpose |
+| --- | --- | --- |
+| `jira-email`, `jira-api-token` | yes | Jira Cloud service account |
+| `github-token` | no | Issue read/write on the configured repository; defaults to the caller's `GITHUB_TOKEN` |
+| `tool-token` | no | Read access to `cccteam/gh-jira-sync`, needed by other repositories while it is private |
+
+The calling workflow must grant `contents: write` (for the state branch) and
+`issues: write`, and branch rules must allow pushes to the state branch. The
+reusable job runs only on the default branch, so secret-bearing code never runs
+from pull requests or other branches. It serializes runs per repository and state
+branch and never cancels an active run.
+
+### This repository's deployment
+
+[`sync.yml`](.github/workflows/sync.yml) calls the reusable workflow with
+`sync.json`, the `sync-state` branch, and the tool built from the same commit.
+
+1. Add Actions secrets `JIRA_EMAIL` and `JIRA_API_TOKEN`, and commit `sync.json`.
+2. Dispatch **Sync GitHub and Jira** with **initialize** checked and **apply**
+   unchecked. Inspect the job summary.
+3. Dispatch with initialize and apply checked for the first write run. Later runs
    need only apply. Run again to copy comments for newly created Jira issues.
-5. Hourly runs remain dry-run until repository variable **`SYNC_APPLY=true`** is set.
+4. Hourly runs remain dry-run until repository variable **`SYNC_APPLY=true`** is set.
 
-The workflow uses `--git-state-branch sync-state`: it loads authoritative state
-from `origin`, pushes every creation intent **before** the corresponding API request,
-and checkpoints each success. It uses a fixed concurrency group and never cancels
-an active run. It does not run secret-bearing code from pull requests or non-default
-branches. The test workflow can run on pull requests without sync credentials.
+### Another repository syncing itself
 
-Use one writer deployment for a repository/project. Do not run separate local
-journals or other repositories' workflows against the same objects. A different
-source repository needs a scoped GitHub App token or PAT in `GH_TOKEN`; the default
-`GITHUB_TOKEN` only covers the workflow's repository. State writes still use the
-checkout's Git credentials for the workflow repository.
+Commit a `sync.json` whose `repository` is that repository, add the Jira secrets
+and a `tool-token`, then add a workflow like this. Pin `uses:` and `tool-ref` to the
+same tag or commit so the workflow and the tool always match:
+
+```yaml
+name: Sync GitHub and Jira
+on:
+  workflow_dispatch:
+    inputs:
+      apply: { type: boolean, default: false }
+      initialize: { type: boolean, default: false }
+  schedule:
+    - cron: '17 * * * *'
+permissions:
+  contents: write
+  issues: write
+jobs:
+  sync:
+    uses: cccteam/gh-jira-sync/.github/workflows/sync-reusable.yml@<commit-or-tag>
+    with:
+      tool-ref: <commit-or-tag>
+      apply: ${{ inputs.apply || (github.event_name == 'schedule' && vars.SYNC_APPLY == 'true') }}
+      initialize: ${{ inputs.initialize || false }}
+    secrets:
+      jira-email: ${{ secrets.JIRA_EMAIL }}
+      jira-api-token: ${{ secrets.JIRA_API_TOKEN }}
+      tool-token: ${{ secrets.GH_JIRA_SYNC_READ_TOKEN }}
+```
+
+While `cccteam/gh-jira-sync` is private, other repositories can call its workflow
+only if its **Settings → Actions → General → Access** allows repositories in the
+organization, and its code checkout needs `tool-token`: a fine-grained token or
+GitHub App token with read-only Contents access to this repository.
+
+### One repository serving several
+
+A single hub repository can run several deployments. Give each its own config file
+and state branch, and a `github-token` that can read and write issues in its target
+repository (the default `GITHUB_TOKEN` only covers the hub itself):
+
+```yaml
+jobs:
+  sync:
+    strategy:
+      fail-fast: false
+      matrix:
+        deployment: [web, api]
+    uses: cccteam/gh-jira-sync/.github/workflows/sync-reusable.yml@<commit-or-tag>
+    with:
+      tool-ref: <commit-or-tag>
+      config: sync/${{ matrix.deployment }}.json
+      state-branch: sync-state-${{ matrix.deployment }}
+      apply: ${{ inputs.apply || (github.event_name == 'schedule' && vars.SYNC_APPLY == 'true') }}
+      initialize: ${{ inputs.initialize || false }}
+    secrets:
+      jira-email: ${{ secrets.JIRA_EMAIL }}
+      jira-api-token: ${{ secrets.JIRA_API_TOKEN }}
+      github-token: ${{ secrets.ISSUES_TOKEN }}
+      tool-token: ${{ secrets.GH_JIRA_SYNC_READ_TOKEN }}
+```
+
+Deployments are independent: one failing or blocked does not stop the others, and
+each state branch is bound to its config's repository, Jira site, and project, so a
+config pointed at the wrong branch fails closed. State branches use a dash
+(`sync-state-web`), because Git cannot hold both `sync-state` and `sync-state/web`.
+A state branch must contain only `state.json`; the tool refuses any other branch,
+since each checkpoint replaces the branch's whole tree.
+
+The workflow loads authoritative state from `origin`, pushes every creation intent
+**before** the corresponding API request, and checkpoints each success. Use exactly
+one deployment per GitHub repository and Jira project pair: two deployments writing
+the same objects keep separate journals and can duplicate issues and comments. The
+test workflow can run on pull requests without sync credentials.
 
 ## Configuration
 
@@ -104,6 +203,7 @@ See [sync.example.json](sync.example.json). Unknown keys fail validation.
 | `max_pages` | `100` pages per collection; incomplete scans fail closed |
 | `full_rescan_hours` | `24`; maximum time an unchanged pair goes without a full comment scan |
 | `jira_create_fields` | Extra Jira create fields, such as required custom fields or priority |
+| `status_sync` | `null` (off); `{"close_transition": "Done", "reopen_transition": "Reopen"}` mirrors closing and reopening |
 
 `jira_create_fields` cannot replace project, issue type, title, description, or
 identity labels. Required tenant-specific fields must be supplied explicitly;
@@ -129,7 +229,7 @@ are not matched by title. Only issues with this utility's verified source identi
 can be adopted during recovery.
 
 CLI options: `--state` (default `.sync-state/state.json`), `--report` (default
-`sync-report.json`), `--git-state-branch sync-state`, `--init-state`, `--apply`, and
+`sync-report.json`), `--git-state-branch sync-state` (or `sync-state-<name>`), `--init-state`, `--apply`, and
 `--acknowledge OPERATION` (repeatable). The Git option is required for ephemeral runners.
 
 `--acknowledge` takes an `operation` from a `blocked` or `unavailable` report entry
@@ -140,6 +240,36 @@ problem with the same object alerts again. Acknowledging never permits a retry. 
 authoritative, and the local file is only a checkpoint copy. Dry-run creates a
 report/lock file but does not modify state or either service. Apply computes a
 fresh plan; a previous report is not executable authorization.
+
+## Issue status
+
+With `status_sync` set, each tracked pair's open/closed status is mirrored in both
+directions. A Jira status counts as closed when it is in Jira's **Done** category
+(for example Done or Won't Do), so the mapping works with any workflow.
+
+* **GitHub → Jira:** closing a GitHub issue applies the Jira transition named
+  `close_transition`; reopening applies `reopen_transition`. Names must match the
+  workflow's transition names exactly. If that transition is not available from
+  the issue's current status, or leads to the wrong kind of status, the issue is
+  blocked for review and nothing changes.
+* **Jira → GitHub:** moving into a Done-category status closes the GitHub issue as
+  completed; moving out of it reopens the issue.
+
+Each pair records the status both sides last agreed on. The side that now differs
+from it is the side that changed, and the other side is updated to match. If both
+sides changed, they agree again and nothing is written. The one ambiguous case is a
+pair whose sides disagree and that has no agreed status yet, for example pairs
+created before status sync was turned on. It is blocked for review: align the two
+sides by hand (or acknowledge it), and the agreement is recorded on the next run.
+Issues created while status sync is on start with "open" recorded, so a GitHub issue
+that was already closed closes its new Jira issue on the following run.
+
+Status changes count toward `max_operations`, are re-checked immediately before
+and after each write, and are not journaled: they are idempotent, so a lost response
+simply shows up as agreement on the next run. A refused transition (for example one
+whose screen requires fields) is reported as `rejected` and retried next run. Status
+is checked every run, even when comment sync is off or a pair's comments are
+skipped as unchanged.
 
 ## Comments and formatting
 
@@ -184,7 +314,7 @@ For a pending operation (timeout, network failure, 5xx, or lost response):
 2. If the destination exists with intact markers, apply can recover its mapping.
 3. If the request definitely never created anything, have an operator remove
    **only that pending operation** from `state.json` after verifying the destination
-   and coordinating all writers. In Actions, make the reviewed change on `sync-state`.
+   and coordinating all writers. In Actions, make the reviewed change on the deployment's state branch.
    Do not delete completed mappings or reset the entire journal.
 4. If the outcome cannot be proven, leave it blocked and investigate manually.
 

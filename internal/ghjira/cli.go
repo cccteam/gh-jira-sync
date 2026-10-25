@@ -74,7 +74,7 @@ func Main(args []string, stdout io.Writer) int {
 	configPath := flags.String("config", "sync.json", "configuration file")
 	statePath := flags.String("state", ".sync-state/state.json", "local state file (a checkpoint copy in Git mode)")
 	reportPath := flags.String("report", "sync-report.json", "report file")
-	gitBranch := flags.String("git-state-branch", "", "persist every intent to origin's `sync-state` branch before API writes (required for ephemeral runners)")
+	gitBranch := flags.String("git-state-branch", "", "persist every intent to this `branch` on origin (sync-state or sync-state-<name>) before API writes; required for ephemeral runners")
 	applyWrites := flags.Bool("apply", false, "perform remote writes (otherwise dry-run)")
 	initState := flags.Bool("init-state", false, "permit a new journal; never use to replace lost production state")
 	var acknowledge stringList
@@ -85,8 +85,8 @@ func Main(args []string, stdout io.Writer) int {
 		}
 		return 2
 	}
-	if *gitBranch != "" && *gitBranch != "sync-state" {
-		fmt.Fprintln(flags.Output(), "-git-state-branch must be sync-state")
+	if *gitBranch != "" && !stateBranchPattern.MatchString(*gitBranch) {
+		fmt.Fprintln(flags.Output(), "-git-state-branch must be sync-state or sync-state-<name>")
 		return 2
 	}
 

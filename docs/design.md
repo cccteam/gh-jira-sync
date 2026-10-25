@@ -5,14 +5,31 @@
 * Jira Cloud, initially Software and business projects.
 * Create a Jira issue for each eligible GitHub issue labeled `sync-jira`.
 * Copy title and description at creation. Do not subsequently sync issue fields,
-  status, labels, assignees, or deletions. Never create GitHub issues from Jira.
+  labels, assignees, or deletions. Never create GitHub issues from Jira.
+* Optionally mirror open/closed status in both directions (`status_sync`).
 * Copy original comments in both directions, including later edits to originals.
 * Report edits to copied comments; preserve them for human review.
 * Never delete comments or recreate a known deleted copy.
 
 The earlier idea of bidirectional issue-field sync is superseded. Jira-wins field
-conflict resolution no longer applies: issue fields are creation-only, and a
-comment's original remains its authority.
+conflict resolution no longer applies: issue fields are creation-only, status
+follows whichever side changed, and a comment's original remains its authority.
+
+## Issue status
+
+GitHub has two states; Jira has per-project workflows. They meet at Jira's status
+categories: a Done-category status is closed, anything else is open. Jira → GitHub
+needs no configuration. GitHub → Jira uses two transitions named in `status_sync`,
+because a workflow can have several ways into or out of Done and guessing could
+choose the wrong one. The named transition must be available and must land in the
+expected category, or the pair is blocked.
+
+Each pair stores the last agreed status (`closed` on the pair, absent until first
+agreement). Comparing each side with it identifies which side moved. Two states make
+true conflicts impossible: if both moved, both now agree. Only disagreement with no
+agreed status is ambiguous, and it blocks rather than guessing a winner. Status
+writes are idempotent, so unlike creates they are not journaled; they are verified
+before and after the write and confirmed by recording the new agreed status.
 
 ## Architecture
 
@@ -59,7 +76,10 @@ ID and key. Recovery searches by label and checks the property; multiple matches
 or mismatched identity block adoption.
 
 Before every POST, persist a `pending` operation. In Actions this means successfully
-pushing a unique commit to `origin/sync-state`, not just writing runner-local disk.
+pushing a unique commit to the deployment's state branch on `origin`
+(`sync-state` or `sync-state-<name>`), not just writing runner-local disk. The
+store refuses a branch whose tree holds anything but `state.json`, because each
+checkpoint replaces the whole tree.
 After confirmed success, persist the destination mapping and mark it `done`.
 
 If the response or completion checkpoint is lost, a later run checks destination
@@ -119,7 +139,8 @@ unless a new deployment is explicitly initialized.
 Git commits have unique IDs even for identical payloads, so competing writers
 cannot both treat the same pending-intent commit as their own authorization to
 POST. Pushes never force or retry. The workflow additionally serializes all runs
-using a fixed repository-wide concurrency group and disables active cancellation.
+using a concurrency group per repository and state branch, and disables active
+cancellation.
 Use one deployment/journal per pair population; different repositories or journals
 are not covered by this lock. Local execution uses an exclusive advisory file lock.
 

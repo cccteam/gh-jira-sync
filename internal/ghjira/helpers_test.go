@@ -2,6 +2,7 @@ package ghjira
 
 import (
 	"maps"
+	"slices"
 	"strconv"
 	"testing"
 	"time"
@@ -53,13 +54,16 @@ type fakeAPI struct {
 	reads        []string
 	listReads    []Side
 	refuse       []int // HTTP statuses for upcoming writes to reject without effect
+	transitions  []JiraTransition
 	nextID       int
 }
 
 func newFake() *fakeAPI {
 	return &fakeAPI{
 		source: GitHubIssue{ID: 42, Number: 1, Title: "Original title", Body: "description",
-			HTMLURL: "https://github.com/acme/test/issues/1"},
+			HTMLURL: "https://github.com/acme/test/issues/1", State: "open"},
+		transitions: []JiraTransition{{ID: "31", Name: "Done", To: jiraStatus("Done", "done")},
+			{ID: "11", Name: "Reopen", To: jiraStatus("To Do", "new")}},
 		rows:   map[Side][]Comment{SideGitHub: {}, SideJira: {}},
 		nextID: 100,
 	}
@@ -129,6 +133,7 @@ func (f *fakeAPI) CreateIssue(source *GitHubIssue) (*JiraIssue, error) {
 		return nil, err
 	}
 	f.jira = &JiraIssue{ID: "200", Key: "ENG-1"}
+	f.jira.Fields.Status = jiraStatus("To Do", "new")
 	f.writes = append(f.writes, write{"issue", source.Title})
 	if err := f.lost(); err != nil {
 		return nil, err
@@ -257,3 +262,32 @@ func kinds(entries []*Entry) []Kind {
 }
 
 func lastWrite(f *fakeAPI) write { return f.writes[len(f.writes)-1] }
+
+func jiraStatus(name, category string) JiraStatus {
+	s := JiraStatus{Name: name}
+	s.StatusCategory.Key = category
+	return s
+}
+
+func (f *fakeAPI) JiraTransitions(string) ([]JiraTransition, error) {
+	return slices.Clone(f.transitions), nil
+}
+
+func (f *fakeAPI) TransitionJira(_ string, transitionID string) error {
+	if err := f.maybeRefuse(); err != nil {
+		return err
+	}
+	i := slices.IndexFunc(f.transitions, func(t JiraTransition) bool { return t.ID == transitionID })
+	f.jira.Fields.Status = f.transitions[i].To
+	f.writes = append(f.writes, write{"transition", f.transitions[i].Name})
+	return f.lost()
+}
+
+func (f *fakeAPI) SetGitHubState(_ int, closed bool) error {
+	if err := f.maybeRefuse(); err != nil {
+		return err
+	}
+	f.source.State = statusName(closed)
+	f.writes = append(f.writes, write{"state", f.source.State})
+	return f.lost()
+}

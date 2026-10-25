@@ -28,6 +28,10 @@ type API interface {
 	Comment(side Side, pair Pair, id string) (Comment, error)
 	CreateComment(side Side, pair Pair, text string) (Comment, error)
 	EditComment(side Side, pair Pair, id, text string) error
+	// JiraTransitions lists the workflow moves available from the issue's current status.
+	JiraTransitions(id string) ([]JiraTransition, error)
+	TransitionJira(id, transitionID string) error
+	SetGitHubState(number int, closed bool) error
 }
 
 // HTTP is a small JSON REST client. Only GET requests are automatically retried.
@@ -225,7 +229,7 @@ func httpStatus(err error) (int, bool) {
 
 func (a *Client) JiraIssue(id string) (*JiraIssue, error) {
 	issue := &JiraIssue{}
-	err := a.jira.Do("GET", "/rest/api/3/issue/"+id+"?fields=project,labels,updated&properties=gh-jira-sync", nil, issue)
+	err := a.jira.Do("GET", "/rest/api/3/issue/"+id+"?fields=project,labels,updated,status&properties=gh-jira-sync", nil, issue)
 	if status, ok := httpStatus(err); ok && status == 404 {
 		return nil, nil
 	}
@@ -358,4 +362,28 @@ func (a *Client) EditComment(side Side, pair Pair, id, text string) error {
 		return a.github.Do("PATCH", "/repos/"+a.c.Repository+"/issues/comments/"+id, map[string]string{"body": text}, nil)
 	}
 	return a.jira.Do("PUT", "/rest/api/3/issue/"+pair.JiraID+"/comment/"+id, map[string]any{"body": toADF(text)}, nil)
+}
+
+func (a *Client) JiraTransitions(id string) ([]JiraTransition, error) {
+	var result struct {
+		Transitions []JiraTransition `json:"transitions"`
+	}
+	if err := a.jira.Do("GET", "/rest/api/3/issue/"+id+"/transitions", nil, &result); err != nil {
+		return nil, err
+	}
+	return result.Transitions, nil
+}
+
+func (a *Client) TransitionJira(id, transitionID string) error {
+	body := map[string]map[string]string{"transition": {"id": transitionID}}
+	return a.jira.Do("POST", "/rest/api/3/issue/"+id+"/transitions", body, nil)
+}
+
+func (a *Client) SetGitHubState(number int, closed bool) error {
+	body := map[string]string{"state": "open", "state_reason": "reopened"}
+	if closed {
+		// A Done-category Jira status cannot say why work ended, so "completed" is assumed.
+		body = map[string]string{"state": "closed", "state_reason": "completed"}
+	}
+	return a.github.Do("PATCH", a.ghPath(number), body, nil)
 }

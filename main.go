@@ -4,7 +4,7 @@ package main
 import (
 	"os"
 
-	"gh-jira-sync/internal/ghjira"
+	"github.com/cccteam/gh-jira-sync/internal/ghjira"
 )
 
 func main() {

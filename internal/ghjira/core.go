@@ -59,6 +59,14 @@ type Config struct {
 	Comments         bool
 	CommentsSince    *time.Time
 	JiraCreateFields Object
+	StatusSync       *StatusSync // nil leaves issue status alone
+}
+
+// StatusSync names the Jira workflow transitions that mirror closing and reopening
+// a GitHub issue. Jira statuses in the Done category close the GitHub issue.
+type StatusSync struct {
+	CloseTransition  string
+	ReopenTransition string
 }
 
 var (
@@ -71,7 +79,7 @@ var configKeys = map[string]bool{
 	"repository": true, "github_url": true, "jira_url": true, "jira_project": true,
 	"jira_issue_type": true, "selection_label": true, "issue_state": true, "max_operations": true,
 	"max_pages": true, "comments": true, "comments_since": true, "jira_create_fields": true,
-	"full_rescan_hours": true,
+	"full_rescan_hours": true, "status_sync": true,
 }
 
 // ParseConfig validates sync.json. Unknown keys and wrong types fail closed.
@@ -173,6 +181,15 @@ func ParseConfig(data []byte) (*Config, error) {
 		}
 	}
 	c.JiraCreateFields = extra
+	if raw, present := raw["status_sync"]; present && raw != nil {
+		statusSync, ok := raw.(Object)
+		closeName, _ := statusSync["close_transition"].(string)
+		reopenName, _ := statusSync["reopen_transition"].(string)
+		if !ok || len(statusSync) != 2 || strings.TrimSpace(closeName) == "" || strings.TrimSpace(reopenName) == "" {
+			return nil, syncErr("status_sync must be null or {\"close_transition\": name, \"reopen_transition\": name}")
+		}
+		c.StatusSync = &StatusSync{CloseTransition: closeName, ReopenTransition: reopenName}
+	}
 	return c, nil
 }
 

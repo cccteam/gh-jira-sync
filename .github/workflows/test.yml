@@ -1,7 +1,7 @@
 name: Test
 on:
   push:
-    branches-ignore: [sync-state]
+    branches-ignore: ['sync-state', 'sync-state-*']
   pull_request:
 permissions:
   contents: read

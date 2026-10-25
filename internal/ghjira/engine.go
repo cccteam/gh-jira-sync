@@ -4,6 +4,7 @@ package ghjira
 
 import (
 	"errors"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -27,6 +28,7 @@ type Entry struct {
 	Destination       Side    `json:"destination,omitempty"`
 	PreviousRejection int     `json:"previous_rejection,omitempty"`
 	Outcome           Outcome `json:"outcome,omitempty"`
+	Status            string  `json:"status,omitempty"` // target "open" or "closed" for status entries
 
 	issue       *GitHubIssue     // source issue as planned
 	comment     Comment          // source comment as planned
@@ -39,6 +41,9 @@ type Entry struct {
 	destination Comment   // copy found for a pending comment
 	record      Operation // pending journal entry being recovered
 	stamp       Stamp     // issue timestamps of a clean full scan
+	jira        *JiraIssue
+	closed      bool   // status to apply or record
+	transition  string // Jira transition ID for a status change on Jira
 }
 
 func (e *Entry) block(reason string) { e.Kind, e.Reason = KindBlocked, reason }
@@ -228,6 +233,14 @@ func Plan(c *Config, s *State, api API, now time.Time) ([]*Entry, error) {
 				Reason: "Linked issue deleted, transferred, moved, or inaccessible; comment sync paused"})
 			continue
 		}
+		// Status reads only the issues already fetched, so it is checked every run.
+		statusEntry, err := planStatus(c, api, pair, source, jira)
+		if err != nil {
+			return nil, err
+		}
+		if statusEntry != nil {
+			entries = append(entries, statusEntry)
+		}
 		if !c.Comments {
 			continue
 		}
@@ -293,6 +306,58 @@ func planIssue(c *Config, s *State, api API, source *GitHubIssue) (*Entry, error
 		e.Kind = KindCreateIssue
 		if journaled {
 			retryNote(e, &old)
+		}
+	}
+	return e, nil
+}
+
+func statusName(closed bool) string {
+	if closed {
+		return "closed"
+	}
+	return "open"
+}
+
+// planStatus mirrors closing and reopening. The pair's recorded status is what both
+// sides last agreed on, so whichever side now differs from it is the side that
+// changed. With two states, sides that both changed agree again; only a pair with no
+// recorded status that disagrees is ambiguous, and it is blocked for review.
+func planStatus(c *Config, api API, pair Pair, source *GitHubIssue, jira *JiraIssue) (*Entry, error) {
+	if c.StatusSync == nil {
+		return nil, nil
+	}
+	gh, jr := source.closed(), jira.done()
+	e := &Entry{GitHub: pair.GitHub, Operation: token(c, OpStatus, pair.GitHubID), pair: pair, issue: source, jira: jira}
+	switch {
+	case gh == jr:
+		if pair.Closed != nil && *pair.Closed == gh {
+			return nil, nil
+		}
+		e.Kind, e.closed, e.Status = KindStatusAgreed, gh, statusName(gh)
+	case pair.Closed == nil:
+		e.block("GitHub is " + statusName(gh) + " but Jira status " + jira.Fields.Status.Name +
+			" is " + statusName(jr) + ", with no agreed status recorded; align them manually")
+	case *pair.Closed == gh: // Jira moved
+		e.Kind, e.Destination, e.closed, e.Status = KindSyncStatus, SideGitHub, jr, statusName(jr)
+	default: // GitHub moved
+		name := c.StatusSync.ReopenTransition
+		if gh {
+			name = c.StatusSync.CloseTransition
+		}
+		transitions, err := api.JiraTransitions(pair.JiraID)
+		if err != nil {
+			return nil, err
+		}
+		i := slices.IndexFunc(transitions, func(t JiraTransition) bool { return t.Name == name })
+		switch {
+		case i < 0:
+			e.block("Jira transition " + strconv.Quote(name) + " is not available from status " + jira.Fields.Status.Name)
+		case transitions[i].To.done() != gh:
+			e.block("Jira transition " + strconv.Quote(name) + " leads to " + transitions[i].To.Name +
+				", which would leave the issue " + statusName(!gh))
+		default:
+			e.Kind, e.Destination, e.closed, e.Status = KindSyncStatus, SideJira, gh, statusName(gh)
+			e.transition = transitions[i].ID
 		}
 	}
 	return e, nil
@@ -536,8 +601,18 @@ func Apply(c *Config, state *State, api API, entries []*Entry, save func(*State)
 		case KindReconciled:
 			// Saved with the final checkpoint; losing it only costs one extra scan.
 			s.Reconciled[strconv.Itoa(e.GitHub)] = e.stamp
+		case KindStatusAgreed:
+			// Saved with the final checkpoint; losing it only means it is recorded next run.
+			setAgreedStatus(s, e.GitHub, e.closed)
+		case KindSyncStatus:
+			err = applyStatus(s, api, e, save)
 		case KindCreateIssue, KindLinkIssue:
 			err = applyIssue(s, api, e, save)
+			// A new Jira issue starts open; recording that lets a GitHub issue that was
+			// already closed close its Jira issue on the next run.
+			if err == nil && e.Kind == KindCreateIssue && e.Outcome == "" && c.StatusSync != nil {
+				setAgreedStatus(s, e.GitHub, false)
+			}
 		case KindCreateComment, KindRecoverComment:
 			err = applyNewComment(s, api, e, save)
 		case KindEditComment, KindConfirmComment:
@@ -548,6 +623,61 @@ func Apply(c *Config, state *State, api API, entries []*Entry, save func(*State)
 		}
 	}
 	return s, save(s)
+}
+
+func setAgreedStatus(s *State, number int, closed bool) {
+	n := strconv.Itoa(number)
+	pair := s.Pairs[n]
+	pair.Closed = &closed
+	s.Pairs[n] = pair
+}
+
+// applyStatus closes or reopens one side. Status changes are idempotent and not
+// journaled: if a response is lost, the next run sees both sides agree and records it.
+func applyStatus(s *State, api API, e *Entry, save func(*State) error) error {
+	current := func() (*GitHubIssue, *JiraIssue, error) {
+		source, err := api.Issue(e.GitHub)
+		if err != nil {
+			return nil, nil, err
+		}
+		jira, err := api.JiraIssue(e.pair.JiraID)
+		if err != nil || source == nil || jira == nil {
+			if err == nil {
+				err = syncErr("Linked issue vanished after plan; rerun")
+			}
+			return nil, nil, err
+		}
+		return source, jira, nil
+	}
+	source, jira, err := current()
+	if err != nil {
+		return err
+	}
+	if source.closed() != e.issue.closed() || jira.done() != e.jira.done() {
+		return syncErr("Issue status changed after plan; rerun")
+	}
+	if e.Destination == SideGitHub {
+		err = api.SetGitHubState(e.GitHub, e.closed)
+	} else {
+		err = api.TransitionJira(e.pair.JiraID, e.transition)
+	}
+	if status, refused := refusedStatus(err); refused && itemRejections[status] {
+		// For example a transition screen that needs fields; nothing changed, so retry next run.
+		e.Outcome, e.Reason = OutcomeRejected, "Status change rejected with HTTP "+strconv.Itoa(status)+"; retried next run"
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if source, jira, err = current(); err != nil {
+		return err
+	}
+	if source.closed() != e.closed || jira.done() != e.closed {
+		return syncErr("Status change not confirmed; GitHub is %s, Jira status %s is %s",
+			statusName(source.closed()), jira.Fields.Status.Name, statusName(jira.done()))
+	}
+	setAgreedStatus(s, e.GitHub, e.closed)
+	return save(s)
 }
 
 func applyIssue(s *State, api API, e *Entry, save func(*State) error) error {

@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -35,6 +36,9 @@ type Pair struct {
 	GitHubID string `json:"github_id"`
 	JiraID   string `json:"jira_id"`
 	JiraKey  string `json:"jira_key"`
+	// Closed is the status both sides last agreed on; nil until status sync first
+	// sees them agree. The side that differs from it is the side that changed.
+	Closed *bool `json:"closed,omitempty"`
 }
 
 // Operation is a journaled create: pending before dispatch, done after confirmation,
@@ -180,7 +184,7 @@ func atomicJSON(path string, v any) error {
 	return d.Sync()
 }
 
-// GitStore checkpoints state to origin's sync-state branch. It never checks out,
+// GitStore checkpoints state to a dedicated branch on origin. It never checks out,
 // force-pushes, or retries: a rejected push means a concurrent writer.
 type GitStore struct {
 	Branch   string
@@ -189,9 +193,14 @@ type GitStore struct {
 	previous []byte
 }
 
+// stateBranchPattern allows "sync-state" for a single deployment and
+// "sync-state-<name>" for several in one repository. A slash would collide with an
+// existing "sync-state" branch in Git's ref namespace, so names use a dash.
+var stateBranchPattern = regexp.MustCompile(`^sync-state(-[A-Za-z0-9][A-Za-z0-9_-]*)?$`)
+
 func NewGitStore(branch string) (*GitStore, error) {
-	if branch != "sync-state" {
-		return nil, syncErr("Only the dedicated sync-state branch is supported")
+	if !stateBranchPattern.MatchString(branch) {
+		return nil, syncErr("State branch must be sync-state or sync-state-<name>")
 	}
 	return &GitStore{Branch: branch}, nil
 }
@@ -224,7 +233,8 @@ func (g *GitStore) git(data string, allowed []int, args ...string) (int, string,
 
 // Load returns nil when the branch does not exist yet.
 func (g *GitStore) Load() (*State, error) {
-	code, _, err := g.git("", []int{0, 2}, "ls-remote", "--exit-code", "--heads", "origin", g.Branch)
+	// The full ref avoids matching another branch that merely ends in the same name.
+	code, _, err := g.git("", []int{0, 2}, "ls-remote", "--exit-code", "origin", "refs/heads/"+g.Branch)
 	if err != nil || code == 2 {
 		return nil, err
 	}
@@ -233,6 +243,14 @@ func (g *GitStore) Load() (*State, error) {
 	}
 	_, parent, err := g.git("", []int{0}, "rev-parse", "FETCH_HEAD")
 	if err != nil {
+		return nil, err
+	}
+	// Each checkpoint replaces the whole tree with state.json, so pointing the store at
+	// a branch holding anything else would wipe that branch's files on the next save.
+	if _, files, err := g.git("", []int{0}, "ls-tree", "--name-only", parent); err != nil || files != "state.json" {
+		if err == nil {
+			err = syncErr("Branch %s holds more than state.json; refusing to use it as sync state", g.Branch)
+		}
 		return nil, err
 	}
 	_, raw, err := g.git("", []int{0}, "show", parent+":state.json")
