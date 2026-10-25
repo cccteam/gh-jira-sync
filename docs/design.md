@@ -1,4 +1,4 @@
-# GitHub → Jira issues; GitHub ↔ Jira comments
+# GitHub ↔ Jira issues, comments, status, and parents
 
 ## Agreed scope
 
@@ -6,7 +6,8 @@
 * Create a Jira issue for each eligible GitHub issue labeled `sync-jira`.
 * Copy title and description at creation, choosing the Jira issue type from the
   GitHub issue type when `jira_issue_types` maps it. Do not subsequently sync issue fields,
-  labels, assignees, or deletions. Never create GitHub issues from Jira.
+  labels, assignees, or deletions.
+* Optionally create GitHub issues from Jira issues with `jira_selection_label`.
 * Optionally mirror open/closed status in both directions (`status_sync`).
 * Optionally mirror parent links: GitHub sub-issues and Jira parents (`sync_parents`).
 * Or mirror a GitHub Project's Status field and Jira statuses (`project_status`).
@@ -246,3 +247,22 @@ not matter. A Jira parent that is not linked has no GitHub counterpart and block
 Writes use GitHub's sub-issue endpoints (`replace_parent` to move, the sub-issue's ID
 rather than its number) and Jira's issue edit (`fields.parent` to set,
 `update.parent.set.none` to remove). Hierarchy refusals are item-level rejections.
+
+## Jira → GitHub creation
+
+`jira_selection_label` mirrors GitHub → Jira creation in the other direction. Each run
+searches the project for labeled Jira issues (filtered by `issue_state` through Jira's
+status category) and plans a GitHub issue for each one not yet linked. The operation
+token hashes the Jira issue ID (`jira_issue` kind). The intent is journaled with its
+start time before the POST; the created issue's body ends with a hidden marker, so a
+lost response is recovered by listing issues updated since the intent started and
+matching the marker exactly. No match leaves the intent blocked, as for issue creation
+in the other direction; a 4xx refusal marks it rejected and retryable.
+
+The two directions must never feed each other. A GitHub issue that ends with the
+tool's marker is never sent to Jira, and a Jira issue carrying the tool's identity
+property is never sent to GitHub, even when either carries the other side's
+selection label: each is left to its own recovery, or blocked when its journal is
+missing. Once linked, a pair created from Jira is indistinguishable from any other.
+New pairs record "open" and "no parent" as agreed, so status and parent sync carry
+Jira's current values to GitHub on the next run.

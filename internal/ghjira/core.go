@@ -66,8 +66,11 @@ type Config struct {
 	StatusSync       *StatusSync // nil leaves issue status alone
 	// SyncParents mirrors GitHub sub-issue parents and Jira parent links between
 	// linked issues, such as an Epic and its stories.
-	SyncParents   bool
-	ProjectStatus *ProjectStatus // nil disables project status mode
+	SyncParents bool
+	// JiraSelectionLabel selects Jira issues in the project to create in GitHub; nil
+	// disables Jira → GitHub creation.
+	JiraSelectionLabel *string
+	ProjectStatus      *ProjectStatus // nil disables project status mode
 }
 
 // ProjectStatus mirrors a GitHub Project's single-select field (normally Status)
@@ -217,7 +220,7 @@ var configKeys = map[string]bool{
 	"jira_issue_type": true, "selection_label": true, "issue_state": true, "max_operations": true,
 	"max_pages": true, "comments": true, "comments_since": true, "jira_create_fields": true,
 	"full_rescan_hours": true, "status_sync": true, "project_status": true, "jira_issue_types": true,
-	"sync_parents": true,
+	"sync_parents": true, "jira_selection_label": true,
 }
 
 // ParseConfig validates sync.json. Unknown keys and wrong types fail closed.
@@ -322,6 +325,17 @@ func ParseConfig(data []byte) (*Config, error) {
 	}
 	if c.SyncParents, ok = value("sync_parents", false).(bool); !ok {
 		return nil, syncErr("sync_parents must be boolean")
+	}
+	switch label := value("jira_selection_label", nil).(type) {
+	case nil:
+	case string:
+		// Jira labels cannot contain spaces; quotes would break the JQL that selects them.
+		if label == "" || strings.ContainsAny(label, " \"\\") {
+			return nil, syncErr("jira_selection_label must be one Jira label (no spaces or quotes) or null")
+		}
+		c.JiraSelectionLabel = &label
+	default:
+		return nil, syncErr("jira_selection_label must be one Jira label (no spaces or quotes) or null")
 	}
 	if since := value("comments_since", nil); since != nil {
 		s, isString := since.(string)

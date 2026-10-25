@@ -68,13 +68,16 @@ const (
 	// Parent sync: GitHub sub-issues mirror Jira parent links (for example Epic → Story).
 	KindSyncParent   Kind = "sync_parent"
 	KindParentAgreed Kind = "parent_agreed"
+	// Jira → GitHub creation (jira_selection_label).
+	KindCreateGitHubIssue Kind = "create_github_issue"
+	KindLinkGitHubIssue   Kind = "link_github_issue"
 )
 
 // writes reports kinds that perform a remote write and count against max_operations.
 func (k Kind) writes() bool {
 	switch k {
 	case KindCreateIssue, KindCreateComment, KindEditComment, KindSyncStatus, KindAddToProject, KindSyncProjectStatus,
-		KindSyncParent:
+		KindSyncParent, KindCreateGitHubIssue:
 		return true
 	}
 	return false
@@ -118,7 +121,9 @@ type OpKind string
 const (
 	OpIssue         OpKind = "issue"
 	OpGitHubComment OpKind = "comment_github"
-	OpJiraComment   OpKind = "comment_jira"
+	// OpJiraIssue creates a GitHub issue from a Jira issue (jira_selection_label).
+	OpJiraIssue   OpKind = "jira_issue"
+	OpJiraComment OpKind = "comment_jira"
 )
 
 // OpStatus identifies a pair's status decisions in reports and acknowledgements.
@@ -141,7 +146,7 @@ func commentOp(side Side) OpKind {
 
 func (k *OpKind) UnmarshalText(b []byte) error {
 	switch v := OpKind(b); v {
-	case OpIssue, OpGitHubComment, OpJiraComment:
+	case OpIssue, OpGitHubComment, OpJiraComment, OpJiraIssue:
 		*k = v
 		return nil
 	}
@@ -220,6 +225,13 @@ type JiraIssue struct {
 		Project struct {
 			Key string `json:"key"`
 		} `json:"project"`
+		// Summary, Description (raw ADF), and IssueType are read for Jira issues created
+		// in GitHub by jira_selection_label.
+		Summary     string `json:"summary"`
+		Description any    `json:"description"`
+		IssueType   struct {
+			ID string `json:"id"`
+		} `json:"issuetype"`
 		Updated string     `json:"updated"`
 		Status  JiraStatus `json:"status"`
 		Parent  *struct {

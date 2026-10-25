@@ -31,6 +31,7 @@ type Entry struct {
 	Status            string  `json:"status,omitempty"`     // target "open" or "closed" for status entries
 	IssueType         string  `json:"issue_type,omitempty"` // Jira issue type ID for create_issue
 	Parent            string  `json:"parent,omitempty"`     // target parent, "#<number>" or "none", for parent entries
+	JiraKey           string  `json:"jira_key,omitempty"`   // Jira issue for create_github_issue and link_github_issue
 
 	issue       *GitHubIssue     // source issue as planned
 	comment     Comment          // source comment as planned
@@ -44,15 +45,19 @@ type Entry struct {
 	record      Operation // pending journal entry being recovered
 	stamp       Stamp     // issue timestamps of a clean full scan
 	jira        *JiraIssue
-	closed      bool        // status to apply or record
-	transition  string      // Jira transition ID for a status change on Jira
-	item        ProjectItem // project item as planned
-	option      string      // project option to apply or record
-	fieldID     int64       // project status field
-	optionID    string      // ID of option, for project writes
-	parent      int         // parent to apply or record (GitHub number, 0 for none)
-	ghParent    int         // GitHub parent as planned
-	jiraParent  int         // Jira parent as planned, as a GitHub number
+	closed      bool         // status to apply or record
+	transition  string       // Jira transition ID for a status change on Jira
+	item        ProjectItem  // project item as planned
+	option      string       // project option to apply or record
+	fieldID     int64        // project status field
+	optionID    string       // ID of option, for project writes
+	parent      int          // parent to apply or record (GitHub number, 0 for none)
+	ghParent    int          // GitHub parent as planned
+	jiraParent  int          // Jira parent as planned, as a GitHub number
+	title       string       // GitHub issue title to create
+	labels      []string     // GitHub labels for a created issue
+	issueType   string       // GitHub issue type for a created issue
+	found       *GitHubIssue // GitHub issue a pending creation already made
 }
 
 func (e *Entry) block(reason string) { e.Kind, e.Reason = KindBlocked, reason }
@@ -251,6 +256,17 @@ func Plan(c *Config, s *State, api API, now time.Time) ([]*Entry, error) {
 		}
 		number, _ := strconv.Atoi(n)
 		pair, tracked := s.Pairs[n]
+		// An issue this tool created from Jira ends with its hidden marker. Until it is
+		// linked (normally the same run, or recovery after a lost response), creating a
+		// Jira issue for it would duplicate its Jira origin.
+		if !tracked && trailingMarker(Comment{Side: SideGitHub, Body: source.Body}) != "" {
+			op := trailingMarker(Comment{Side: SideGitHub, Body: source.Body})
+			if record, ok := s.Operations[op]; !ok || record.Kind != OpJiraIssue {
+				entries = append(entries, &Entry{GitHub: number, Operation: op, Kind: KindBlocked,
+					Reason: "GitHub issue was created from Jira but is not linked or journaled; restore state"})
+			}
+			continue
+		}
 		if !tracked {
 			e, err := planIssue(c, s, api, source)
 			if err != nil {
@@ -320,6 +336,13 @@ func Plan(c *Config, s *State, api API, now time.Time) ([]*Entry, error) {
 			stamp.Scanned = now.UTC().Format("2006-01-02T15:04:05.000000-07:00")
 			entries = append(entries, &Entry{GitHub: number, Operation: issueOp, Kind: KindReconciled, stamp: stamp})
 		}
+	}
+	if c.JiraSelectionLabel != nil {
+		reverse, err := planJiraIssues(c, s, api, visited)
+		if err != nil {
+			return nil, err
+		}
+		entries = append(entries, reverse...)
 	}
 	for _, op := range sortedKeys(s.Operations) {
 		if r := s.Operations[op]; r.Status == StatusPending && !visited[op] {
@@ -755,6 +778,8 @@ func Apply(c *Config, state *State, api API, entries []*Entry, save func(*State)
 			setAgreedStatus(s, e.GitHub, e.closed)
 		case KindSyncStatus:
 			err = applyStatus(s, api, e, save)
+		case KindCreateGitHubIssue, KindLinkGitHubIssue:
+			err = applyGitHubIssue(c, s, api, e, save)
 		case KindParentAgreed:
 			setAgreedParent(s, e.GitHub, e.parent)
 		case KindSyncParent:
@@ -1236,5 +1261,165 @@ func applyParent(s *State, api API, e *Entry, save func(*State) error) error {
 		return syncErr("Parent change not confirmed; GitHub has %s, Jira has %s", parentName(gh), parentName(jr))
 	}
 	setAgreedParent(s, e.GitHub, e.parent)
+	return save(s)
+}
+
+// githubTypeFor maps a Jira issue type back to a GitHub issue type, when exactly
+// one GitHub type maps to it in jira_issue_types.
+func (c *Config) githubTypeFor(jiraTypeID string) string {
+	var names []string
+	for name, id := range c.JiraIssueTypes {
+		if id == jiraTypeID {
+			names = append(names, name)
+		}
+	}
+	if len(names) == 1 {
+		return names[0]
+	}
+	return ""
+}
+
+// githubBody is a created GitHub issue's body: a link back, the Jira description as
+// readable text, and the hidden marker that identifies the creation for recovery.
+func githubBody(c *Config, j *JiraIssue, op string) (string, error) {
+	text := ""
+	if j.Fields.Description != nil {
+		var err error
+		if text, err = adfText(j.Fields.Description); err != nil {
+			return "", syncErr("Jira description has content that cannot be copied; create the GitHub issue manually")
+		}
+	}
+	return "From Jira: " + c.JiraURL + "/browse/" + j.Key + "\n\n" + text + "\n\n" + hiddenMarker(op), nil
+}
+
+// planJiraIssues decides which selected Jira issues to create in GitHub. Linked Jira
+// issues are skipped, so issues created from GitHub never come back. Like GitHub →
+// Jira creation, a pending intent is only ever recovered by finding its marker,
+// never retried; a refused one is retried.
+func planJiraIssues(c *Config, s *State, api API, visited map[string]bool) ([]*Entry, error) {
+	selected, err := api.SelectedJiraIssues()
+	if err != nil {
+		return nil, err
+	}
+	linked := map[string]bool{}
+	for _, p := range s.Pairs {
+		linked[p.JiraID] = true
+	}
+	var entries []*Entry
+	for i := range selected {
+		j := &selected[i]
+		if linked[j.ID] {
+			continue
+		}
+		// A Jira issue this tool created from GitHub carries its identity property. Until
+		// it is linked, creating a GitHub issue for it would duplicate its GitHub origin.
+		if id := j.Properties.Identity; id != nil {
+			if record, ok := s.Operations[id.Operation]; !ok || record.Kind != OpIssue {
+				entries = append(entries, &Entry{Operation: id.Operation, JiraKey: j.Key, Kind: KindBlocked,
+					Reason: "Jira issue was created from GitHub but is not linked or journaled; restore state"})
+			}
+			continue
+		}
+		op := token(c, OpJiraIssue, j.ID)
+		visited[op] = true
+		e := &Entry{Operation: op, JiraKey: j.Key, jira: j}
+		entries = append(entries, e)
+		old, journaled := s.Operations[op]
+		if journaled && old.Status == StatusDone {
+			e.block("Jira issue was created in GitHub but its link is missing; restore state")
+			continue
+		}
+		if journaled && old.Status == StatusPending {
+			found, err := api.FindGitHubIssue(op, old.Started)
+			if err != nil {
+				return nil, err
+			}
+			if found == nil {
+				e.block("GitHub issue creation outcome unknown or not visible yet; never retry automatically")
+				continue
+			}
+			e.Kind, e.GitHub, e.found = KindLinkGitHubIssue, found.Number, found
+			continue
+		}
+		body, err := githubBody(c, j, op)
+		switch {
+		case err != nil:
+			e.block(err.Error())
+		case strings.TrimSpace(j.Fields.Summary) == "":
+			e.block("Jira summary is empty")
+		case runeLen(j.Fields.Summary) > 256:
+			e.block("Jira summary exceeds GitHub's 256 character title limit")
+		case runeLen(body) > 65536:
+			e.block("Jira description exceeds GitHub's 65536 character body limit")
+		default:
+			e.Kind, e.title, e.text = KindCreateGitHubIssue, j.Fields.Summary, body
+			if c.SelectionLabel != nil {
+				e.labels = []string{*c.SelectionLabel}
+			}
+			e.issueType = c.githubTypeFor(j.Fields.IssueType.ID)
+			if journaled {
+				retryNote(e, &old)
+			}
+		}
+	}
+	return entries, nil
+}
+
+// applyGitHubIssue creates (or, for a recovered intent, links) the GitHub issue for
+// a selected Jira issue, journaling the intent before the request.
+func applyGitHubIssue(c *Config, s *State, api API, e *Entry, save func(*State) error) error {
+	record := Operation{Kind: OpJiraIssue, SourceID: e.jira.ID, Status: StatusPending,
+		Started: time.Now().UTC().Format(time.RFC3339)}
+	issue := e.found
+	if e.Kind == KindLinkGitHubIssue {
+		record = s.Operations[e.Operation]
+	} else {
+		current, err := api.JiraIssue(e.jira.ID)
+		if err != nil {
+			return err
+		}
+		if current == nil || current.Fields.Summary != e.jira.Fields.Summary ||
+			!sameJSON(current.Fields.Description, e.jira.Fields.Description) {
+			return syncErr("Jira issue changed after plan; rerun")
+		}
+		s.Operations[e.Operation] = record
+		if err := save(s); err != nil { // Never dispatch creation without a durable intent.
+			return err
+		}
+		issue, err = api.CreateGitHubIssue(e.title, e.text, e.labels, e.issueType)
+		if status, refused := refusedStatus(err); refused && status == 422 && e.issueType != "" {
+			// The type may not exist in this organization. A 4xx proves nothing was
+			// created, so creating again without the type cannot duplicate.
+			issue, err = api.CreateGitHubIssue(e.title, e.text, e.labels, "")
+			if err == nil {
+				e.Reason = "GitHub refused issue type " + strconv.Quote(e.issueType) + "; created without a type"
+			}
+		}
+		if status, refused := refusedStatus(err); refused {
+			return reject(s, e, record, status, err, save)
+		}
+		if err != nil {
+			return err
+		}
+		if issue == nil || issue.Number == 0 {
+			return syncErr("Invalid API response; write outcome may be unknown")
+		}
+	}
+	n := strconv.Itoa(issue.Number)
+	if _, taken := s.Pairs[n]; taken {
+		return syncErr("GitHub issue #%s is already linked; review the journal", n)
+	}
+	s.Pairs[n] = Pair{GitHub: issue.Number, GitHubID: issue.idString(), JiraID: e.jira.ID, JiraKey: e.jira.Key}
+	record.GitHub, record.Status = issue.Number, StatusDone
+	s.Operations[e.Operation] = record
+	e.GitHub = issue.Number
+	// The new GitHub issue starts open with no parent; status and parent sync then
+	// carry Jira's current status and parent over on the next run.
+	if c.StatusSync != nil || c.ProjectStatus != nil {
+		setAgreedStatus(s, issue.Number, false)
+	}
+	if c.SyncParents {
+		setAgreedParent(s, issue.Number, 0)
+	}
 	return save(s)
 }

@@ -360,3 +360,10 @@ func (f *fakeAPI) SubIssues(int) ([]GitHubIssue, error)  { return nil, nil }
 func (f *fakeAPI) GitHubParent(int) (int, error)         { return 0, nil }
 func (f *fakeAPI) SetGitHubParent(int64, int, int) error { return nil }
 func (f *fakeAPI) SetJiraParent(string, string) error    { return nil }
+
+// Jira → GitHub creation on the single-issue fake: nothing is selected in Jira.
+func (f *fakeAPI) SelectedJiraIssues() ([]JiraIssue, error) { return nil, nil }
+func (f *fakeAPI) CreateGitHubIssue(string, string, []string, string) (*GitHubIssue, error) {
+	return nil, syncErr("unexpected GitHub issue creation")
+}
+func (f *fakeAPI) FindGitHubIssue(string, string) (*GitHubIssue, error) { return nil, nil }

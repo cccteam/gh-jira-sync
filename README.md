@@ -1,4 +1,4 @@
-# GitHub → Jira creation, two-way comments and status
+# GitHub ↔ Jira issue sync: creation, comments, status, and parents
 
 Creates Jira Cloud issues from GitHub issues labeled **`sync-jira`**, then copies
 original comments and their edits in both directions. A single Go binary (Go 1.27+,
@@ -11,7 +11,9 @@ standard library only) with a ready-to-use GitHub Actions workflow.
   (see [Project status](#project-status)).
 * Original comment edits update the existing copy. Edits to copies are reported
   and preserved for review; original comments are never modified by the utility.
-* No issue/comment deletions, reverse issue creation, or attachment copying.
+* Optionally, Jira issues with a chosen label are created in GitHub too (see
+  [Jira → GitHub creation](#jira--github-creation)).
+* No issue/comment deletions or attachment copying.
 * Dry-run by default; explicit `--apply` required for remote writes.
 
 See [the design](docs/design.md) for identity, failure recovery, and tradeoffs.
@@ -245,6 +247,7 @@ See [sync.example.json](sync.example.json). Unknown keys fail validation.
 | `jira_issue_type` | Required **issue type ID string**, e.g. `10001` |
 | `jira_issue_types` | `{}`; maps GitHub issue types to Jira issue type IDs for new issues, e.g. `{"Bug": "10004", "Feature": "10005"}`; see [Issue types](#issue-types) |
 | `sync_parents` | `false`; mirror GitHub sub-issue parents and Jira parent links (for example Epic → Story) between linked issues; see [Epics and parent links](#epics-and-parent-links) |
+| `jira_selection_label` | `null` (off); Jira issues in the project with this label are created in GitHub; see [Jira → GitHub creation](#jira--github-creation) |
 | `github_url` | `https://api.github.com`; compatible custom API bases allowed |
 | `selection_label` | `sync-jira`; `null` explicitly opts into all issues |
 | `issue_state` | `open`; `closed` or `all` also supported for creation selection |
@@ -292,6 +295,32 @@ problem with the same object alerts again. Acknowledging never permits a retry. 
 authoritative, and the local file is only a checkpoint copy. Dry-run creates a
 report/lock file but does not modify state or either service. Apply computes a
 fresh plan; a previous report is not executable authorization.
+
+## Jira → GitHub creation
+
+Set `jira_selection_label` (for example `"sync-github"`) and each Jira issue in the
+project carrying that label gets a GitHub issue. `issue_state` applies as for GitHub:
+by default, only issues outside Jira's Done category are created. Once created, the
+pair is like any other: comments, status, project status, and parents sync both ways
+where configured.
+
+The new GitHub issue gets:
+
+* the Jira summary as its title;
+* a body starting with `From Jira: <link>`, then the Jira description as readable
+  text, ending with a hidden `<!-- gh-jira-sync:… -->` marker;
+* the GitHub `selection_label`, if set, so it shows up with the other synced issues;
+* the GitHub issue type mapped back from `jira_issue_types` when exactly one GitHub
+  type maps to its Jira type. If GitHub refuses that type, it is created without one.
+
+Creation follows the same rules as GitHub → Jira: the intent is journaled before the
+request, a lost response is recovered by finding the hidden marker in issues updated
+since, an uncertain creation is never retried, and a refused one is retried next run.
+Issues the tool created in one direction are never created again in the other: GitHub
+issues ending with its marker and Jira issues carrying its identity property are left
+to their own recovery, or blocked if their journal is missing. Jira descriptions with
+content that cannot be copied as text, such as media or tables, block that issue.
+Title and description are copied once; later edits are not synced.
 
 ## Issue types
 
@@ -510,6 +539,7 @@ Every entry has `github`, `operation`, and `kind`; the rest appear only when the
 | `status` | Target: `open` or `closed` for `sync_status` and `status_agreed`; the project option for `sync_project_status` and `project_status_agreed` |
 | `previous_rejection` | HTTP status of an earlier refused attempt that this entry retries |
 | `issue_type` | Jira issue type ID a `create_issue` entry will use |
+| `jira_key` | Jira issue for `create_github_issue` and `link_github_issue` (their `github` is 0 until created) |
 | `parent` | Target parent for `sync_parent` and `parent_agreed`: `#<GitHub number>` or `none` |
 | `outcome` | Set during apply: `rejected` when the service refused the write (nothing changed; retried next run), or `already_done` when a status change was already in place, for example made by a project workflow, so nothing was written and the agreement was recorded |
 
@@ -525,6 +555,8 @@ others write nothing to either service; some only update the state journal.
 | Kind | Type | Meaning |
 | --- | --- | --- |
 | `create_issue` | write | Create a Jira issue for a newly selected GitHub issue |
+| `create_github_issue` | write | Create a GitHub issue for a selected Jira issue (`jira_key`) |
+| `link_github_issue` | state | A GitHub issue from an interrupted earlier run exists; record it instead of creating another |
 | `link_issue` | state | A Jira issue with this GitHub issue's identity already exists (for example after a lost response); record the pair instead of creating another |
 | `create_comment` | write | Copy an original comment to the other side |
 | `recover_comment` | state | A copy from an interrupted earlier run exists; record it instead of copying again |

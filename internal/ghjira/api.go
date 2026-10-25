@@ -48,6 +48,11 @@ type API interface {
 	SetGitHubParent(childID int64, parent, oldParent int) error
 	// SetJiraParent sets a Jira issue's parent by key, or removes it when key is "".
 	SetJiraParent(id, key string) error
+	// Jira → GitHub creation.
+	SelectedJiraIssues() ([]JiraIssue, error)
+	CreateGitHubIssue(title, body string, labels []string, issueType string) (*GitHubIssue, error)
+	// FindGitHubIssue looks for an issue a pending creation may have made, by its marker.
+	FindGitHubIssue(op, started string) (*GitHubIssue, error)
 }
 
 // HTTP is a small JSON REST client. Only GET requests are automatically retried.
@@ -297,7 +302,7 @@ func httpStatus(err error) (int, bool) {
 
 func (a *Client) JiraIssue(id string) (*JiraIssue, error) {
 	issue := &JiraIssue{}
-	err := a.jira.Do("GET", "/rest/api/3/issue/"+id+"?fields=project,labels,updated,status,parent&properties=gh-jira-sync", nil, issue)
+	err := a.jira.Do("GET", "/rest/api/3/issue/"+id+"?fields=project,labels,updated,status,parent,summary,description,issuetype&properties=gh-jira-sync", nil, issue)
 	if status, ok := httpStatus(err); ok && status == 404 {
 		return nil, nil
 	}
@@ -754,4 +759,81 @@ func (a *Client) SetJiraParent(id, key string) error {
 		body = map[string]any{"update": map[string]any{"parent": []any{map[string]any{"set": map[string]bool{"none": true}}}}}
 	}
 	return a.jira.Do("PUT", "/rest/api/3/issue/"+id, body, nil)
+}
+
+// SelectedJiraIssues lists the project's Jira issues carrying jira_selection_label.
+// issue_state applies as for GitHub: open excludes Jira's Done category, closed keeps
+// only it. Every page is read or the run fails.
+func (a *Client) SelectedJiraIssues() ([]JiraIssue, error) {
+	jql := `project = "` + a.c.JiraProject + `" AND labels = "` + *a.c.JiraSelectionLabel + `"`
+	switch a.c.IssueState {
+	case "open":
+		jql += " AND statusCategory != Done"
+	case "closed":
+		jql += " AND statusCategory = Done"
+	}
+	jql += " ORDER BY created ASC"
+	var result []JiraIssue
+	next := ""
+	for range a.c.MaxPages {
+		query := url.Values{"jql": {jql}, "maxResults": {"100"},
+			"fields": {"project,summary,description,issuetype,status,updated,parent"}, "properties": {"gh-jira-sync"}}
+		if next != "" {
+			query.Set("nextPageToken", next)
+		}
+		var page struct {
+			Issues        []JiraIssue `json:"issues"`
+			NextPageToken string      `json:"nextPageToken"`
+		}
+		if err := a.jira.Do("GET", "/rest/api/3/search/jql?"+query.Encode(), nil, &page); err != nil {
+			return nil, err
+		}
+		result = append(result, page.Issues...)
+		if next = page.NextPageToken; next == "" {
+			return result, nil
+		}
+	}
+	return nil, syncErr("Jira search pagination limit exceeded; no partial scan allowed")
+}
+
+func (a *Client) CreateGitHubIssue(title, body string, labels []string, issueType string) (*GitHubIssue, error) {
+	request := map[string]any{"title": title, "body": body}
+	if len(labels) > 0 {
+		request["labels"] = labels
+	}
+	if issueType != "" {
+		request["type"] = issueType
+	}
+	created := &GitHubIssue{}
+	if err := a.github.Do("POST", a.ghPath(0), request, created); err != nil {
+		return nil, err
+	}
+	return created, nil
+}
+
+// FindGitHubIssue lists issues updated since the intent started (with a margin for
+// clock skew) and returns the one whose body ends with the operation's hidden marker.
+func (a *Client) FindGitHubIssue(op, started string) (*GitHubIssue, error) {
+	since, err := time.Parse(time.RFC3339, started)
+	if err != nil {
+		return nil, syncErr("Pending Jira → GitHub creation has no start time; review the journal")
+	}
+	params := url.Values{"state": {"all"}, "since": {since.Add(-10 * time.Minute).UTC().Format(time.RFC3339)}}
+	issues, err := ghPages[GitHubIssue](a, a.ghPath(0), params)
+	if err != nil {
+		return nil, err
+	}
+	var found []GitHubIssue
+	for _, issue := range issues {
+		if issue.PullRequest == nil && hasMarker(Comment{Side: SideGitHub, Body: issue.Body}, op) {
+			found = append(found, issue)
+		}
+	}
+	if len(found) > 1 {
+		return nil, syncErr("Multiple GitHub issues carry the same Jira source identity")
+	}
+	if len(found) == 0 {
+		return nil, nil
+	}
+	return &found[0], nil
 }
