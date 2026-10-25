@@ -1,0 +1,14 @@
+{
+  "repository": "your-org/your-repository",
+  "jira_url": "https://your-company.atlassian.net",
+  "jira_project": "ENG",
+  "jira_issue_type": "10001",
+  "selection_label": "sync-jira",
+  "issue_state": "open",
+  "comments": true,
+  "comments_since": null,
+  "max_operations": 20,
+  "max_pages": 100,
+  "full_rescan_hours": 24,
+  "jira_create_fields": {}
+}

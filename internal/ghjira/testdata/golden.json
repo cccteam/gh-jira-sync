@@ -1,0 +1,451 @@
+{
+  "config": {
+    "repository": "acme/test",
+    "jira_url": "https://acme.atlassian.net",
+    "jira_project": "ENG",
+    "jira_issue_type": "10001",
+    "github_url": "https://api.github.com",
+    "selection_label": "sync-jira",
+    "issue_state": "open",
+    "max_operations": 20,
+    "max_pages": 100,
+    "comments": true,
+    "comments_since": null,
+    "jira_create_fields": {},
+    "full_rescan_hours": 24
+  },
+  "binding": "f2b6d360404801c9d703e2572e0b7d604c2060c11019a68bbb46fee272be63e8",
+  "tokens": [
+    {
+      "kind": "issue",
+      "id": 42,
+      "token": "57403b78cd33b0cff0af9b8b5fc2e95022653f72e0ba467d586f4f00b1c3ecdb"
+    },
+    {
+      "kind": "comment_github",
+      "id": 11,
+      "token": "aa16bbb4e4a340550df8c181c8f87a567116ca558cfa162d5abfefa83bb810a6"
+    },
+    {
+      "kind": "comment_jira",
+      "id": "10023",
+      "token": "ea7493bdca047a90fa3b1fae0fb2d68aec28fa823f413d0b9fd5fe21a33a4c61"
+    }
+  ],
+  "digests": [
+    {
+      "value": "",
+      "digest": "12ae32cb1ec02d01eda3581b127c1fee3b0dc53572ed6baf239721a03d82e126"
+    },
+    {
+      "value": "hello",
+      "digest": "5aa762ae383fbb727af3c7a36d4940a5b8c40a989452d2304fc958ff3f354e7a"
+    },
+    {
+      "value": "line\nbreak\r\n\ttab",
+      "digest": "db42c36b0954c2c0861c6f0feb1654531870bd58433264dad533dc905308e1ce"
+    },
+    {
+      "value": "quote \" back \\ slash",
+      "digest": "2d90fd84271b1bc8ab2a6cdb8b24444f8c8a7ab99c21c2f55c738ec07d9e5786"
+    },
+    {
+      "value": "em — dash é 👋 中文",
+      "digest": "5334fbe7344f009f2c0e1149b42586240d96613a16aa0b3989ac4406f24b5742"
+    },
+    {
+      "value": "  ",
+      "digest": "e3a0e2262ac7790f4df36b522a8fbdd4ee3370d568eb15dc25c5f1775f14ed6c"
+    },
+    {
+      "value": "\u0000\u0001\u001f",
+      "digest": "3a5f25746de9e33a0a1d8d04f3bb8e3cc03c04b69fbe67fdbc4091e2b3c48fa8"
+    },
+    {
+      "value": "\b\f",
+      "digest": "1a32ae256b714c68b9c63d9e5d8a2e5f949fab8dded16fe838b1dc5f8ea494a4"
+    },
+    {
+      "value": "<>&",
+      "digest": "de0b609d2f9f5af97658414422d275ed44984bc2eaa807e7ba5f308b4e436365"
+    },
+    {
+      "value": " 　",
+      "digest": "14eeff4149c4629b3aa73cabd63fdd478df7155a656560cb09eaa6cbc329e130"
+    },
+    {
+      "value": {
+        "b": 1,
+        "a": [
+          true,
+          false,
+          null,
+          1.5,
+          -2,
+          "x"
+        ],
+        "ü": {
+          "z": "y"
+        },
+        "B": [],
+        "c": {}
+      },
+      "digest": "35e8e3a3620d59f735e439fea9bbd95271429ea9b0fbe36145177b7f731db8cd"
+    },
+    {
+      "value": {
+        "type": "doc",
+        "version": 1,
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "Synced from github — álice (2026-01-01T00:00:00Z)"
+              }
+            ]
+          },
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "Source: https://x"
+              }
+            ]
+          },
+          {
+            "type": "paragraph",
+            "content": []
+          },
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "body"
+              }
+            ]
+          },
+          {
+            "type": "paragraph",
+            "content": []
+          },
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "[gh-jira-sync:aa16bbb4e4a340550df8c181c8f87a567116ca558cfa162d5abfefa83bb810a6]"
+              }
+            ]
+          }
+        ]
+      },
+      "digest": "2497ba8aa91ca0fc4bcf688ed666bd11a35871af2e83a684a7f2733fc786fcda"
+    },
+    {
+      "value": [
+        "f2b6d360404801c9d703e2572e0b7d604c2060c11019a68bbb46fee272be63e8",
+        "issue",
+        "42"
+      ],
+      "digest": "57403b78cd33b0cff0af9b8b5fc2e95022653f72e0ba467d586f4f00b1c3ecdb"
+    }
+  ],
+  "to_adf": [
+    {
+      "text": "",
+      "adf": {
+        "type": "doc",
+        "version": 1,
+        "content": [
+          {
+            "type": "paragraph",
+            "content": []
+          }
+        ]
+      }
+    },
+    {
+      "text": "a",
+      "adf": {
+        "type": "doc",
+        "version": 1,
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "a"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "text": "a\n\nb\n",
+      "adf": {
+        "type": "doc",
+        "version": 1,
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "a"
+              }
+            ]
+          },
+          {
+            "type": "paragraph",
+            "content": []
+          },
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "b"
+              }
+            ]
+          },
+          {
+            "type": "paragraph",
+            "content": []
+          }
+        ]
+      }
+    },
+    {
+      "text": "\n\n",
+      "adf": {
+        "type": "doc",
+        "version": 1,
+        "content": [
+          {
+            "type": "paragraph",
+            "content": []
+          },
+          {
+            "type": "paragraph",
+            "content": []
+          },
+          {
+            "type": "paragraph",
+            "content": []
+          }
+        ]
+      }
+    }
+  ],
+  "adf_text": {
+    "doc": {
+      "type": "doc",
+      "version": 1,
+      "content": [
+        {
+          "type": "heading",
+          "attrs": {
+            "level": 2
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Title"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "see ",
+              "marks": [
+                {
+                  "type": "strong"
+                }
+              ]
+            },
+            {
+              "type": "text",
+              "text": "docs",
+              "marks": [
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "https://d"
+                  }
+                }
+              ]
+            },
+            {
+              "type": "hardBreak"
+            },
+            {
+              "type": "mention",
+              "attrs": {
+                "text": "@bob"
+              }
+            },
+            {
+              "type": "emoji",
+              "attrs": {
+                "shortName": ":+1:"
+              }
+            }
+          ]
+        },
+        {
+          "type": "bulletList",
+          "content": [
+            {
+              "type": "listItem",
+              "content": [
+                {
+                  "type": "paragraph",
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "one"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "listItem",
+              "content": [
+                {
+                  "type": "paragraph",
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "two"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "blockquote",
+          "content": [
+            {
+              "type": "paragraph",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "q"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "rule"
+        },
+        {
+          "type": "codeBlock",
+          "content": [
+            {
+              "type": "text",
+              "text": "x = 1"
+            }
+          ]
+        }
+      ]
+    },
+    "text": "Title\nsee docs (https://d)\n@bob:+1:\n- one\n- two\nq\n---\nx = 1"
+  },
+  "github_markers": [
+    {
+      "body": "plain",
+      "op": null
+    },
+    {
+      "body": "x\n\n[gh-jira-sync:aa16bbb4e4a340550df8c181c8f87a567116ca558cfa162d5abfefa83bb810a6]\n",
+      "op": "aa16bbb4e4a340550df8c181c8f87a567116ca558cfa162d5abfefa83bb810a6"
+    },
+    {
+      "body": "> [gh-jira-sync:aa16bbb4e4a340550df8c181c8f87a567116ca558cfa162d5abfefa83bb810a6]\n\nreply",
+      "op": null
+    },
+    {
+      "body": "reply\n\n> [gh-jira-sync:aa16bbb4e4a340550df8c181c8f87a567116ca558cfa162d5abfefa83bb810a6]",
+      "op": null
+    },
+    {
+      "body": "x [gh-jira-sync:aa16bbb4e4a340550df8c181c8f87a567116ca558cfa162d5abfefa83bb810a6]",
+      "op": "aa16bbb4e4a340550df8c181c8f87a567116ca558cfa162d5abfefa83bb810a6"
+    },
+    {
+      "body": "x\n[gh-jira-sync:aa16bbb4e4a340550df8c181c8f87a567116ca558cfa162d5abfefa83bb810a6]\u001c ",
+      "op": "aa16bbb4e4a340550df8c181c8f87a567116ca558cfa162d5abfefa83bb810a6"
+    },
+    {
+      "body": "mentions [gh-jira-sync:aa16bbb4e4a340550df8c181c8f87a567116ca558cfa162d5abfefa83bb810a6] inline",
+      "op": null
+    }
+  ],
+  "jira_marker_doc": {
+    "doc": {
+      "type": "doc",
+      "version": 1,
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "Synced from github — álice (2026-01-01T00:00:00Z)"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "Source: https://x"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": []
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "body"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": []
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "[gh-jira-sync:aa16bbb4e4a340550df8c181c8f87a567116ca558cfa162d5abfefa83bb810a6]"
+            }
+          ]
+        }
+      ]
+    },
+    "op": "aa16bbb4e4a340550df8c181c8f87a567116ca558cfa162d5abfefa83bb810a6",
+    "has": true
+  }
+}
