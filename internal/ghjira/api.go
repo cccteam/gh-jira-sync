@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"maps"
 	"math"
@@ -532,17 +533,104 @@ func (a *Client) Project() (*ProjectSnapshot, error) {
 	for _, o := range fields[i].Options {
 		snap.Options[o.Name.Raw] = o.ID
 	}
-	fieldID := strconv.FormatInt(snap.FieldID, 10)
-	items, err := projectPages[apiProjectItem](a, a.projectPath()+"/items?per_page=100&fields="+fieldID)
-	if err != nil {
+	if snap.Items, err = a.projectItems(); err != nil {
 		return nil, err
 	}
-	for _, item := range items {
-		if item.ContentType == "Issue" && item.Content != nil {
-			snap.Items[item.Content.ID] = item.item(snap.FieldID)
-		}
-	}
 	return snap, nil
+}
+
+// projectItemsQuery lists a project's items with their issue and single-select
+// value. The REST item listing returns no items to GitHub App installation tokens
+// (seen live), while GraphQL lists them all. Option IDs and item database IDs are
+// the same ones the REST endpoints use.
+const projectItemsQuery = `query($login: String!, $number: Int!, $field: String!, $cursor: String) {
+  owner: %s(login: $login) {
+    projectV2(number: $number) {
+      items(first: 100, after: $cursor) {
+        pageInfo { hasNextPage endCursor }
+        nodes {
+          fullDatabaseId
+          isArchived
+          content { __typename ... on Issue { fullDatabaseId } }
+          fieldValueByName(name: $field) { ... on ProjectV2ItemFieldSingleSelectValue { optionId } }
+        }
+      }
+    }
+  }
+}`
+
+func (a *Client) projectItems() (map[int64]ProjectItem, error) {
+	p := a.c.ProjectStatus
+	ownerType := "organization"
+	if p.OwnerType == "user" {
+		ownerType = "user"
+	}
+	query := fmt.Sprintf(projectItemsQuery, ownerType)
+	items := map[int64]ProjectItem{}
+	var cursor *string
+	for range a.c.MaxPages {
+		body := map[string]any{"query": query, "variables": map[string]any{
+			"login": p.Owner, "number": p.ProjectNumber, "field": p.Field, "cursor": cursor}}
+		var resp struct {
+			Data struct {
+				Owner *struct {
+					ProjectV2 *struct {
+						Items struct {
+							PageInfo struct {
+								HasNextPage bool   `json:"hasNextPage"`
+								EndCursor   string `json:"endCursor"`
+							} `json:"pageInfo"`
+							Nodes []struct {
+								ID         string `json:"fullDatabaseId"`
+								IsArchived bool   `json:"isArchived"`
+								Content    *struct {
+									Typename string `json:"__typename"`
+									ID       string `json:"fullDatabaseId"`
+								} `json:"content"`
+								Value *struct {
+									OptionID string `json:"optionId"`
+								} `json:"fieldValueByName"`
+							} `json:"nodes"`
+						} `json:"items"`
+					} `json:"projectV2"`
+				} `json:"owner"`
+			} `json:"data"`
+			Errors []struct {
+				Message string `json:"message"`
+			} `json:"errors"`
+		}
+		if err := a.projects.Do("POST", "/graphql", body, &resp); err != nil {
+			return nil, err
+		}
+		if len(resp.Errors) > 0 {
+			return nil, syncErr("GitHub GraphQL error reading the project: %s", resp.Errors[0].Message)
+		}
+		if resp.Data.Owner == nil || resp.Data.Owner.ProjectV2 == nil {
+			return nil, syncErr("Project %d of %s is missing or not visible to the project token", p.ProjectNumber, p.Owner)
+		}
+		page := resp.Data.Owner.ProjectV2.Items
+		for _, n := range page.Nodes {
+			// Pull requests, draft issues, and items hidden from this token are skipped.
+			if n.Content == nil || n.Content.Typename != "Issue" {
+				continue
+			}
+			itemID, err1 := strconv.ParseInt(n.ID, 10, 64)
+			issueID, err2 := strconv.ParseInt(n.Content.ID, 10, 64)
+			if err1 != nil || err2 != nil {
+				return nil, syncErr("Invalid project item ID from GitHub")
+			}
+			item := ProjectItem{ID: itemID, Archived: n.IsArchived}
+			if n.Value != nil {
+				item.OptionID = n.Value.OptionID
+			}
+			items[issueID] = item
+		}
+		if !page.PageInfo.HasNextPage {
+			return items, nil
+		}
+		cursor = &page.PageInfo.EndCursor
+	}
+	return nil, syncErr("Project pagination limit exceeded; no partial scan allowed")
 }
 
 func (a *Client) ProjectItem(itemID, fieldID int64) (ProjectItem, error) {

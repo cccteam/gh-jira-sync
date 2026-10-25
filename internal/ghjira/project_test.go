@@ -249,6 +249,7 @@ func TestProjectStatusConfig(t *testing.T) {
 }
 
 func TestProjectAPIRequests(t *testing.T) {
+	var graphql []map[string]any
 	var srv *server
 	srv = newServer(t, func(r *http.Request) (int, http.Header, any) {
 		if r.Header.Get("X-GitHub-Api-Version") != "2026-03-10" || r.Header.Get("Authorization") != "Bearer project-token" {
@@ -260,15 +261,27 @@ func TestProjectAPIRequests(t *testing.T) {
 				Object{"id": 9, "name": "Status", "data_type": "single_select", "options": []any{
 					Object{"id": "o-todo", "name": Object{"raw": "Todo", "html": "Todo"}},
 					Object{"id": "o-done", "name": Object{"raw": "Done", "html": "Done"}}}}}
-		case strings.HasSuffix(r.URL.Path, "/items") && r.Method == "GET" && r.URL.Query().Get("after") == "":
-			next := http.Header{"Link": {`<` + srv.instance.URL + r.URL.Path + `?after=c1&fields=9>; rel="next"`}}
-			return 200, next, []any{
-				Object{"id": 900, "content_type": "Issue", "content": Object{"id": 42, "number": 1},
-					"fields": []any{Object{"id": 9, "value": Object{"id": "o-done", "name": Object{"raw": "Done"}}}}},
-				Object{"id": 901, "content_type": "DraftIssue", "content": Object{"id": 7}}}
-		case strings.HasSuffix(r.URL.Path, "/items") && r.Method == "GET":
-			return 200, nil, []any{Object{"id": 902, "content_type": "Issue", "content": Object{"id": 43},
-				"archived_at": "2026-01-01T00:00:00Z", "fields": []any{Object{"id": 9, "value": "o-todo"}}}}
+		case r.URL.Path == "/graphql":
+			// Shapes as GitHub returned them live to the App token, across two pages.
+			req := srv.bodies[len(srv.bodies)-1] // the server already read the body
+			variables := asObject(req["variables"])
+			graphql = append(graphql, variables)
+			if query, _ := req["query"].(string); !strings.Contains(query, "owner: organization(login: $login)") {
+				return 200, nil, Object{"errors": []any{Object{"message": "wrong owner type"}}}
+			}
+			if variables["cursor"] == nil {
+				return 200, nil, Object{"data": Object{"owner": Object{"projectV2": Object{"items": Object{
+					"pageInfo": Object{"hasNextPage": true, "endCursor": "c1"},
+					"nodes": []any{
+						Object{"fullDatabaseId": "900", "isArchived": false, "content": Object{"__typename": "Issue", "fullDatabaseId": "42"},
+							"fieldValueByName": Object{"optionId": "o-done"}},
+						Object{"fullDatabaseId": "901", "isArchived": false, "content": Object{"__typename": "DraftIssue"}},
+						Object{"fullDatabaseId": "903", "isArchived": false, "content": nil}}}}}}}
+			}
+			return 200, nil, Object{"data": Object{"owner": Object{"projectV2": Object{"items": Object{
+				"pageInfo": Object{"hasNextPage": false, "endCursor": "c2"},
+				"nodes": []any{Object{"fullDatabaseId": "902", "isArchived": true, "content": Object{"__typename": "Issue", "fullDatabaseId": "6027956256"},
+					"fieldValueByName": nil}}}}}}}
 		case strings.HasSuffix(r.URL.Path, "/items/900"):
 			return 200, nil, Object{"id": 900, "content_type": "Issue", "fields": []any{Object{"id": 9, "value": nil}}}
 		}
@@ -284,10 +297,12 @@ func TestProjectAPIRequests(t *testing.T) {
 		t.Fatal(err)
 	}
 	eq(t, snap.FieldID, int64(9))
-	eq(t, snap.Items, map[int64]ProjectItem{42: {ID: 900, OptionID: "o-done"}, 43: {ID: 902, OptionID: "o-todo", Archived: true}})
-	if !strings.HasPrefix(srv.urls[0], "/orgs/acme/projectsV2/3/fields") || !strings.Contains(srv.urls[1], "fields=9") {
+	eq(t, snap.Items, map[int64]ProjectItem{42: {ID: 900, OptionID: "o-done"}, 6027956256: {ID: 902, Archived: true}})
+	if !strings.HasPrefix(srv.urls[0], "/orgs/acme/projectsV2/3/fields") || srv.urls[1] != "/graphql" {
 		t.Fatalf("urls: %v", srv.urls)
 	}
+	eq(t, len(graphql), 2)
+	eq(t, []any{graphql[0]["login"], graphql[0]["field"], graphql[1]["cursor"]}, []any{"acme", "Status", "c1"})
 	item, err := api.ProjectItem(900, 9)
 	if err != nil || item != (ProjectItem{ID: 900}) {
 		t.Fatalf("unset item: %+v %v", item, err)
@@ -373,5 +388,20 @@ func TestRefusedProjectAddExplainsMissingRepositoryAccess(t *testing.T) {
 	_, entries = x.ok(s)
 	if strings.Contains(projectEntry(t, x, entries).Reason, "Issues: read") {
 		t.Fatal("hint shown for an unrelated refusal")
+	}
+}
+
+func TestProjectGraphQLErrorsFailTheRun(t *testing.T) {
+	srv := newServer(t, func(r *http.Request) (int, http.Header, any) {
+		if strings.HasSuffix(r.URL.Path, "/fields") {
+			return 200, nil, []any{Object{"id": 9, "name": "Status", "data_type": "single_select", "options": []any{}}}
+		}
+		return 200, nil, Object{"data": Object{"owner": nil}, "errors": []any{Object{"message": "Could not resolve to a ProjectV2"}}}
+	})
+	api := srv.client(t)
+	api.c.ProjectStatus = &ProjectStatus{Owner: "acme", OwnerType: "user", ProjectNumber: 3, Field: "Status"}
+	api.projects = srv.http()
+	if _, err := api.Project(); err == nil || !strings.Contains(err.Error(), "Could not resolve") {
+		t.Fatalf("got %v", err)
 	}
 }

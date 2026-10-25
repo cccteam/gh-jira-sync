@@ -221,8 +221,10 @@ For the same reason a config uses `status_sync` or `project_status`, never both.
 Open/closed entries are planned before project entries, since only open/closed
 leaves Jira untouched and so cannot invalidate the other's pre-write checks.
 
-The project is read once per run: the field's options by name, then every item with
-that field's value, following `Link` cursors. A next-page link must stay on the
+The project is read once per run: the field's options by name over REST, then every
+item with that field's value over GraphQL. The REST item listing returns no items to
+GitHub App installation tokens (observed live), while GraphQL lists them; option IDs
+and item IDs are shared, so single-item reads and all writes stay on REST. A next-page link must stay on the
 configured GitHub host. Items are matched to issues by GitHub issue ID. Project calls
 use their own client: `GH_PROJECT_TOKEN`, normally a GitHub App installation token
 scoped to organization Projects (the reusable workflow mints separate App tokens for
