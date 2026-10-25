@@ -24,6 +24,16 @@ on:
         description: Ref of cccteam/gh-jira-sync to build; pin it to the same ref as `uses:`
         type: string
         default: main
+      app-client-id:
+        description: >-
+          Client ID of a GitHub App with Projects read/write, for project_status.
+          Its token is limited to organization projects.
+        type: string
+        default: ''
+      app-owner:
+        description: Organization the App is installed on; defaults to the calling repository's owner
+        type: string
+        default: ''
     secrets:
       jira-email:
         description: Jira Cloud service account email
@@ -40,6 +50,14 @@ on:
         description: >-
           Token with read access to cccteam/gh-jira-sync, needed while that repository
           is private and the caller is another repository.
+        required: false
+      app-private-key:
+        description: Private key of the GitHub App named by app-client-id
+        required: false
+      project-token:
+        description: >-
+          Alternative to the App for project_status: a token with Projects read/write,
+          for example a fine-grained token for a user-owned project.
         required: false
 
 jobs:
@@ -74,9 +92,21 @@ jobs:
         run: |
           go build -C .gh-jira-sync-tool -o "$RUNNER_TEMP/gh-jira-sync" .
           rm -rf .gh-jira-sync-tool
+      # Workflow tokens cannot reach organization projects, so project_status uses an
+      # App installation token, scoped down to Projects and revoked when the job ends.
+      - name: Project token
+        id: app
+        if: inputs.app-client-id != ''
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ inputs.app-client-id }}
+          private-key: ${{ secrets.app-private-key }}
+          owner: ${{ inputs.app-owner || github.repository_owner }}
+          permission-organization-projects: write
       - name: Reconcile
         env:
           GH_TOKEN: ${{ secrets.github-token || github.token }}
+          GH_PROJECT_TOKEN: ${{ steps.app.outputs.token || secrets.project-token }}
           JIRA_EMAIL: ${{ secrets.jira-email }}
           JIRA_API_TOKEN: ${{ secrets.jira-api-token }}
           APPLY: ${{ inputs.apply }}

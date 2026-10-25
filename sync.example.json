@@ -11,5 +11,6 @@
   "max_pages": 100,
   "full_rescan_hours": 24,
   "jira_create_fields": {},
-  "status_sync": null
+  "status_sync": null,
+  "project_status": null
 }

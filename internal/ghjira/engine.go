@@ -42,8 +42,12 @@ type Entry struct {
 	record      Operation // pending journal entry being recovered
 	stamp       Stamp     // issue timestamps of a clean full scan
 	jira        *JiraIssue
-	closed      bool   // status to apply or record
-	transition  string // Jira transition ID for a status change on Jira
+	closed      bool        // status to apply or record
+	transition  string      // Jira transition ID for a status change on Jira
+	item        ProjectItem // project item as planned
+	option      string      // project option to apply or record
+	fieldID     int64       // project status field
+	optionID    string      // ID of option, for project writes
 }
 
 func (e *Entry) block(reason string) { e.Kind, e.Reason = KindBlocked, reason }
@@ -174,6 +178,20 @@ func Plan(c *Config, s *State, api API, now time.Time) ([]*Entry, error) {
 	if err := api.CheckProject(); err != nil {
 		return nil, err
 	}
+	var project *ProjectSnapshot
+	if c.ProjectStatus != nil {
+		var err error
+		if project, err = api.Project(); err != nil {
+			return nil, err
+		}
+		// A mapped option missing from the project is a configuration error for every pair.
+		for _, m := range c.ProjectStatus.Map {
+			if _, ok := project.Options[m.Project]; !ok {
+				return nil, syncErr("project_status maps option %q, which the project's %s field does not have",
+					m.Project, c.ProjectStatus.Field)
+			}
+		}
+	}
 	var entries []*Entry
 	visited := map[string]bool{}
 	listed, err := api.Issues()
@@ -240,6 +258,16 @@ func Plan(c *Config, s *State, api API, now time.Time) ([]*Entry, error) {
 		}
 		if statusEntry != nil {
 			entries = append(entries, statusEntry)
+		}
+		// After open/closed, which never writes Jira, so its pre-write checks still hold.
+		if project != nil {
+			projectEntry, err := planProjectStatus(c, api, project, pair, source, jira)
+			if err != nil {
+				return nil, err
+			}
+			if projectEntry != nil {
+				entries = append(entries, projectEntry)
+			}
 		}
 		if !c.Comments {
 			continue
@@ -322,8 +350,12 @@ func statusName(closed bool) string {
 // sides last agreed on, so whichever side now differs from it is the side that
 // changed. With two states, sides that both changed agree again; only a pair with no
 // recorded status that disagrees is ambiguous, and it is blocked for review.
+//
+// In project status mode the project drives Jira, so only Jira's side is mirrored
+// here: a GitHub close or reopen waits until the project's own automation moves
+// its status and project sync carries that to Jira.
 func planStatus(c *Config, api API, pair Pair, source *GitHubIssue, jira *JiraIssue) (*Entry, error) {
-	if c.StatusSync == nil {
+	if c.StatusSync == nil && c.ProjectStatus == nil {
 		return nil, nil
 	}
 	gh, jr := source.closed(), jira.done()
@@ -339,6 +371,8 @@ func planStatus(c *Config, api API, pair Pair, source *GitHubIssue, jira *JiraIs
 			" is " + statusName(jr) + ", with no agreed status recorded; align them manually")
 	case *pair.Closed == gh: // Jira moved
 		e.Kind, e.Destination, e.closed, e.Status = KindSyncStatus, SideGitHub, jr, statusName(jr)
+	case c.StatusSync == nil: // GitHub moved, in project status mode
+		return nil, nil
 	default: // GitHub moved
 		name := c.StatusSync.ReopenTransition
 		if gh {
@@ -359,6 +393,87 @@ func planStatus(c *Config, api API, pair Pair, source *GitHubIssue, jira *JiraIs
 			e.Kind, e.Destination, e.closed, e.Status = KindSyncStatus, SideJira, gh, statusName(gh)
 			e.transition = transitions[i].ID
 		}
+	}
+	return e, nil
+}
+
+// planProjectStatus mirrors the project's status field and Jira's workflow status
+// through the configured map. Like open/closed, the pair records the option both
+// sides last agreed on, and the side that differs from it changed. With several
+// options both sides can change to different values; that, and disagreement with
+// nothing recorded, block for review. An unset project status is never a change:
+// it is filled from Jira.
+func planProjectStatus(c *Config, api API, project *ProjectSnapshot, pair Pair, source *GitHubIssue, jira *JiraIssue) (*Entry, error) {
+	ps := c.ProjectStatus
+	e := &Entry{GitHub: pair.GitHub, Operation: token(c, OpProjectStatus, pair.GitHubID), pair: pair,
+		issue: source, jira: jira, fieldID: project.FieldID}
+	item, inProject := project.Items[source.ID]
+	switch {
+	case !inProject && ps.AddToProject:
+		e.Kind, e.Destination = KindAddToProject, SideProject
+		return e, nil
+	case !inProject:
+		e.Kind, e.Reason = KindExcluded, "Issue is not in the project"
+		return e, nil
+	case item.Archived:
+		e.Kind, e.Reason = KindExcluded, "Project item is archived"
+		return e, nil
+	}
+	e.item = item
+	current := project.optionName(item.OptionID)
+	jiraStatus := jira.Fields.Status.Name
+	fromJira, mapped := ps.forJira(jiraStatus)
+	if !mapped {
+		e.block("Jira status " + strconv.Quote(jiraStatus) + " is not mapped in project_status")
+		return e, nil
+	}
+	if _, ok := ps.mapping(current); current != "" && !ok {
+		e.block("Project status " + strconv.Quote(current) + " is not mapped in project_status")
+		return e, nil
+	}
+	setProject := func() {
+		e.Kind, e.Destination, e.option, e.Status = KindSyncProjectStatus, SideProject, fromJira, fromJira
+		e.optionID = project.Options[fromJira]
+	}
+	agreed := pair.ProjectStatus
+	switch {
+	case current == fromJira:
+		if agreed != nil && *agreed == current {
+			return nil, nil
+		}
+		e.Kind, e.option, e.Status = KindProjectStatusAgreed, current, current
+	case current == "":
+		setProject()
+	case agreed == nil:
+		e.block("Project status " + strconv.Quote(current) + " and Jira status " + strconv.Quote(jiraStatus) +
+			" disagree, with no agreed status recorded; align them manually")
+	case current == *agreed: // Jira moved
+		setProject()
+	case fromJira == *agreed: // the project moved
+		m, _ := ps.mapping(current)
+		transitions, err := api.JiraTransitions(pair.JiraID)
+		if err != nil {
+			return nil, err
+		}
+		i := slices.IndexFunc(transitions, func(t JiraTransition) bool {
+			if m.Transition != "" {
+				return t.Name == m.Transition
+			}
+			return t.To.Name == m.Jira[0]
+		})
+		switch {
+		case i < 0:
+			e.block("No Jira transition from " + strconv.Quote(jiraStatus) + " to " + strconv.Quote(m.Jira[0]))
+		case !slices.Contains(m.Jira, transitions[i].To.Name):
+			e.block("Jira transition " + strconv.Quote(transitions[i].Name) + " leads to " +
+				strconv.Quote(transitions[i].To.Name) + ", which is not mapped to " + strconv.Quote(current))
+		default:
+			e.Kind, e.Destination, e.option, e.Status = KindSyncProjectStatus, SideJira, current, current
+			e.transition = transitions[i].ID
+		}
+	default:
+		e.block("Both sides changed since the agreed status " + strconv.Quote(*agreed) + ": project is " +
+			strconv.Quote(current) + ", Jira is " + strconv.Quote(jiraStatus) + "; align them manually")
 	}
 	return e, nil
 }
@@ -606,11 +721,22 @@ func Apply(c *Config, state *State, api API, entries []*Entry, save func(*State)
 			setAgreedStatus(s, e.GitHub, e.closed)
 		case KindSyncStatus:
 			err = applyStatus(s, api, e, save)
+		case KindProjectStatusAgreed:
+			setAgreedProjectStatus(s, e.GitHub, e.option)
+		case KindAddToProject:
+			// Adding is idempotent; its status is synced on the next run.
+			err = api.AddProjectItem(e.GitHub)
+			if status, refused := refusedStatus(err); refused && itemRejections[status] {
+				e.Outcome, e.Reason = OutcomeRejected, "Adding to the project was rejected with HTTP "+strconv.Itoa(status)+"; retried next run"
+				err = nil
+			}
+		case KindSyncProjectStatus:
+			err = applyProjectStatus(c, s, api, e, save)
 		case KindCreateIssue, KindLinkIssue:
 			err = applyIssue(s, api, e, save)
 			// A new Jira issue starts open; recording that lets a GitHub issue that was
 			// already closed close its Jira issue on the next run.
-			if err == nil && e.Kind == KindCreateIssue && e.Outcome == "" && c.StatusSync != nil {
+			if err == nil && e.Kind == KindCreateIssue && e.Outcome == "" && (c.StatusSync != nil || c.ProjectStatus != nil) {
 				setAgreedStatus(s, e.GitHub, false)
 			}
 		case KindCreateComment, KindRecoverComment:
@@ -677,6 +803,57 @@ func applyStatus(s *State, api API, e *Entry, save func(*State) error) error {
 			statusName(source.closed()), jira.Fields.Status.Name, statusName(jira.done()))
 	}
 	setAgreedStatus(s, e.GitHub, e.closed)
+	return save(s)
+}
+
+func setAgreedProjectStatus(s *State, number int, option string) {
+	n := strconv.Itoa(number)
+	pair := s.Pairs[n]
+	pair.ProjectStatus = &option
+	s.Pairs[n] = pair
+}
+
+// applyProjectStatus sets the project item or transitions Jira. Like status changes
+// it is idempotent and not journaled, and both sides are checked before and after.
+func applyProjectStatus(c *Config, s *State, api API, e *Entry, save func(*State) error) error {
+	current := func() (ProjectItem, *JiraIssue, error) {
+		item, err := api.ProjectItem(e.item.ID, e.fieldID)
+		if err != nil {
+			return ProjectItem{}, nil, err
+		}
+		jira, err := api.JiraIssue(e.pair.JiraID)
+		if err == nil && jira == nil {
+			err = syncErr("Linked Jira issue vanished after plan; rerun")
+		}
+		return item, jira, err
+	}
+	item, jira, err := current()
+	if err != nil {
+		return err
+	}
+	if item.OptionID != e.item.OptionID || jira.Fields.Status.Name != e.jira.Fields.Status.Name {
+		return syncErr("Project or Jira status changed after plan; rerun")
+	}
+	if e.Destination == SideProject {
+		err = api.SetProjectStatus(e.item.ID, e.fieldID, e.optionID)
+	} else {
+		err = api.TransitionJira(e.pair.JiraID, e.transition)
+	}
+	if status, refused := refusedStatus(err); refused && itemRejections[status] {
+		e.Outcome, e.Reason = OutcomeRejected, "Project status change rejected with HTTP "+strconv.Itoa(status)+"; retried next run"
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if item, jira, err = current(); err != nil {
+		return err
+	}
+	fromJira, _ := c.ProjectStatus.forJira(jira.Fields.Status.Name)
+	if e.Destination == SideProject && item.OptionID != e.optionID || fromJira != e.option {
+		return syncErr("Project status change not confirmed; Jira status is %s", jira.Fields.Status.Name)
+	}
+	setAgreedProjectStatus(s, e.GitHub, e.option)
 	return save(s)
 }
 

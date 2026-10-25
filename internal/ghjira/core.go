@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net/url"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -59,7 +60,134 @@ type Config struct {
 	Comments         bool
 	CommentsSince    *time.Time
 	JiraCreateFields Object
-	StatusSync       *StatusSync // nil leaves issue status alone
+	StatusSync       *StatusSync    // nil leaves issue status alone
+	ProjectStatus    *ProjectStatus // nil disables project status mode
+}
+
+// ProjectStatus mirrors a GitHub Project's single-select field (normally Status)
+// and Jira workflow statuses. It replaces StatusSync: the project drives Jira, and
+// Jira's Done category still closes or reopens the GitHub issue.
+type ProjectStatus struct {
+	Owner         string
+	OwnerType     string // "org" or "user"
+	ProjectNumber int
+	Field         string
+	AddToProject  bool
+	Map           []ProjectStatusMapping
+}
+
+// ProjectStatusMapping pairs one project option with the Jira statuses it covers.
+// Jira[0] is the status Jira moves to; Transition picks one when several lead there.
+type ProjectStatusMapping struct {
+	Project    string
+	Jira       []string
+	Transition string
+}
+
+func (p *ProjectStatus) mapping(option string) (ProjectStatusMapping, bool) {
+	for _, m := range p.Map {
+		if m.Project == option {
+			return m, true
+		}
+	}
+	return ProjectStatusMapping{}, false
+}
+
+// forJira returns the project option that covers a Jira status.
+func (p *ProjectStatus) forJira(status string) (string, bool) {
+	for _, m := range p.Map {
+		if slices.Contains(m.Jira, status) {
+			return m.Project, true
+		}
+	}
+	return "", false
+}
+
+var ownerPattern = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$`)
+
+func parseProjectStatus(raw any) (*ProjectStatus, error) {
+	bad := func(detail string) (*ProjectStatus, error) {
+		return nil, syncErr("project_status: %s", detail)
+	}
+	obj, ok := raw.(Object)
+	if !ok {
+		return bad("must be null or an object")
+	}
+	allowed := map[string]bool{"owner": true, "owner_type": true, "project_number": true, "field": true, "add_to_project": true, "map": true}
+	for k := range obj {
+		if !allowed[k] {
+			return bad("unknown key " + strconv.Quote(k))
+		}
+	}
+	p := &ProjectStatus{OwnerType: "org", Field: "Status", AddToProject: true}
+	if p.Owner, _ = obj["owner"].(string); !ownerPattern.MatchString(p.Owner) {
+		return bad("owner must be a GitHub organization or user name")
+	}
+	if v, present := obj["owner_type"]; present {
+		if p.OwnerType, _ = v.(string); p.OwnerType != "org" && p.OwnerType != "user" {
+			return bad("owner_type must be org or user")
+		}
+	}
+	if p.ProjectNumber, ok = strictInt(obj["project_number"]); !ok || p.ProjectNumber < 1 {
+		return bad("project_number must be a positive integer")
+	}
+	if v, present := obj["field"]; present {
+		if p.Field, _ = v.(string); strings.TrimSpace(p.Field) == "" {
+			return bad("field must be a field name")
+		}
+	}
+	if v, present := obj["add_to_project"]; present {
+		if p.AddToProject, ok = v.(bool); !ok {
+			return bad("add_to_project must be boolean")
+		}
+	}
+	entries, _ := obj["map"].([]any)
+	if len(entries) == 0 {
+		return bad("map must list at least one option")
+	}
+	seenOption, seenJira := map[string]bool{}, map[string]bool{}
+	for _, entry := range entries {
+		e, ok := entry.(Object)
+		if !ok {
+			return bad("each map entry must be an object")
+		}
+		for k := range e {
+			if k != "project" && k != "jira" && k != "transition" {
+				return bad("unknown map key " + strconv.Quote(k))
+			}
+		}
+		m := ProjectStatusMapping{}
+		if m.Project, _ = e["project"].(string); strings.TrimSpace(m.Project) == "" || seenOption[m.Project] {
+			return bad("each map entry needs a distinct project option name")
+		}
+		seenOption[m.Project] = true
+		// "jira" is one status name or a list; the first listed is the one Jira moves to.
+		switch v := e["jira"].(type) {
+		case string:
+			m.Jira = []string{v}
+		case []any:
+			for _, s := range v {
+				name, _ := s.(string)
+				m.Jira = append(m.Jira, name)
+			}
+		}
+		if len(m.Jira) == 0 {
+			return bad("map entry " + strconv.Quote(m.Project) + " needs at least one Jira status")
+		}
+		for _, name := range m.Jira {
+			if strings.TrimSpace(name) == "" || seenJira[name] {
+				return bad("Jira statuses must be non-empty and appear in only one map entry")
+			}
+			seenJira[name] = true
+		}
+		if v, present := e["transition"]; present {
+			if m.Transition, _ = v.(string); strings.TrimSpace(m.Transition) == "" {
+				return bad("transition must be a transition name")
+			}
+		}
+		p.Map = append(p.Map, m)
+	}
+	return p, nil
 }
 
 // StatusSync names the Jira workflow transitions that mirror closing and reopening
@@ -79,7 +207,7 @@ var configKeys = map[string]bool{
 	"repository": true, "github_url": true, "jira_url": true, "jira_project": true,
 	"jira_issue_type": true, "selection_label": true, "issue_state": true, "max_operations": true,
 	"max_pages": true, "comments": true, "comments_since": true, "jira_create_fields": true,
-	"full_rescan_hours": true, "status_sync": true,
+	"full_rescan_hours": true, "status_sync": true, "project_status": true,
 }
 
 // ParseConfig validates sync.json. Unknown keys and wrong types fail closed.
@@ -189,6 +317,17 @@ func ParseConfig(data []byte) (*Config, error) {
 			return nil, syncErr("status_sync must be null or {\"close_transition\": name, \"reopen_transition\": name}")
 		}
 		c.StatusSync = &StatusSync{CloseTransition: closeName, ReopenTransition: reopenName}
+	}
+	if raw, present := raw["project_status"]; present && raw != nil {
+		if c.StatusSync != nil {
+			// Both would move Jira when a GitHub issue closes, possibly to different statuses.
+			return nil, syncErr("Use either status_sync or project_status, not both")
+		}
+		ps, err := parseProjectStatus(raw)
+		if err != nil {
+			return nil, err
+		}
+		c.ProjectStatus = ps
 	}
 	return c, nil
 }

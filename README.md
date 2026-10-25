@@ -7,6 +7,8 @@ standard library only) with a ready-to-use GitHub Actions workflow.
 * Issue title and description are copied at creation only.
 * Optionally, closing or reopening an issue on either side does the same on the
   other (see [Issue status](#issue-status)).
+* Or, with a GitHub Project, its Status field and Jira workflow statuses stay in step
+  (see [Project status](#project-status)).
 * Original comment edits update the existing copy. Edits to copies are reported
   and preserved for review; original comments are never modified by the utility.
 * No issue/comment deletions, reverse issue creation, or attachment copying.
@@ -83,12 +85,16 @@ repository with one Jira project.
 | `apply` | `false` | Perform writes; otherwise dry-run |
 | `initialize` | `false` | Allow creating new state (first run only) |
 | `tool-ref` | `main` | Ref of this repository to build; pin it to the ref in `uses:` |
+| `app-client-id` | empty | GitHub App client ID, for `project_status`; see [Project status](#project-status) |
+| `app-owner` | calling repository's owner | Organization the App is installed on |
 
 | Secret | Required | Purpose |
 | --- | --- | --- |
 | `jira-email`, `jira-api-token` | yes | Jira Cloud service account |
 | `github-token` | no | Issue read/write on the configured repository; defaults to the caller's `GITHUB_TOKEN` |
 | `tool-token` | no | Read access to `cccteam/gh-jira-sync`, needed by other repositories while it is private |
+| `app-private-key` | with `app-client-id` | The GitHub App's private key |
+| `project-token` | no | Instead of the App: a token with Projects read/write, for example for a user-owned project |
 
 The calling workflow must grant `contents: write` (for the state branch) and
 `issues: write`, and branch rules must allow pushes to the state branch. The
@@ -204,6 +210,7 @@ See [sync.example.json](sync.example.json). Unknown keys fail validation.
 | `full_rescan_hours` | `24`; maximum time an unchanged pair goes without a full comment scan |
 | `jira_create_fields` | Extra Jira create fields, such as required custom fields or priority |
 | `status_sync` | `null` (off); `{"close_transition": "Done", "reopen_transition": "Reopen"}` mirrors closing and reopening |
+| `project_status` | `null` (off); mirrors a GitHub Project's Status field and Jira statuses instead of `status_sync`; see [Project status](#project-status) |
 
 `jira_create_fields` cannot replace project, issue type, title, description, or
 identity labels. Required tenant-specific fields must be supplied explicitly;
@@ -271,6 +278,82 @@ whose screen requires fields) is reported as `rejected` and retried next run. St
 is checked every run, even when comment sync is off or a pair's comments are
 skipped as unchanged.
 
+## Project status
+
+`project_status` keeps a GitHub Project's single-select field (normally **Status**)
+and the Jira issue's workflow status in step, in both directions. It replaces
+`status_sync`; a config cannot use both.
+
+```json
+"project_status": {
+  "owner": "cccteam",
+  "project_number": 7,
+  "map": [
+    {"project": "Todo",        "jira": ["To Do", "Backlog"]},
+    {"project": "In Progress", "jira": ["In Progress", "In Review"]},
+    {"project": "Done",        "jira": ["Done", "Won't Do"]}
+  ]
+}
+```
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `owner` | required | Organization or user that owns the project |
+| `owner_type` | `org` | `org` or `user` |
+| `project_number` | required | The number in the project's URL |
+| `field` | `Status` | Name of the single-select field to sync |
+| `add_to_project` | `true` | Add linked issues that are not in the project yet; otherwise report them as `excluded` |
+| `map` | required | Each project option and the Jira statuses it covers (a name or a list) |
+| `map[].transition` | none | Jira transition to use when several lead to the target status |
+
+How it behaves:
+
+* **Mapping.** Each Jira status belongs to at most one option. When several Jira
+  statuses share an option, the first listed is where Jira moves when the project
+  changes; Jira moving between them leaves the project alone.
+* **Project → Jira.** Jira takes the transition whose destination is the target
+  status (or the named `transition`). If none is available from the current status,
+  the issue is blocked; multi-step paths are not taken.
+* **Jira → project.** The item's field is set to the option covering Jira's status.
+* **Which side changed.** Each pair records the option both sides last agreed on;
+  the side that differs from it changed. If both changed to different values, or
+  they disagree with nothing recorded yet, the issue is blocked for review. An item
+  with an empty status is filled from Jira.
+* **Not mapped.** A Jira status or project option missing from `map` blocks that
+  issue. A mapped option that the project does not have fails the whole run, since
+  it is a configuration error.
+* **Open/closed.** Jira's Done category still closes and reopens the GitHub issue.
+  Closing or reopening on GitHub does not move Jira directly: turn on the project's
+  built-in workflows **Item closed** (set Done) and **Item reopened**, and the status
+  change reaches Jira through project sync.
+* **Safety.** Like other writes, adding items and status changes count toward
+  `max_operations`, are re-checked before and after, and are retried next run if
+  refused.
+
+### Credentials for projects
+
+Workflow tokens cannot reach organization projects, so project calls use a separate
+token in `GH_PROJECT_TOKEN`. Issues and comments keep using `GH_TOKEN`.
+
+1. Create a GitHub App owned by the organization (**Settings → Developer settings →
+   GitHub Apps → New GitHub App**). Turn off its webhook. Under **Organization
+   permissions**, set **Projects** to **Read and write**; it needs nothing else.
+2. Install it on the organization, note its **Client ID**, and generate a private key.
+3. In the repository running the workflow, add the private key as a secret and pass:
+
+```yaml
+    with:
+      app-client-id: Iv23liExampleClientId
+    secrets:
+      app-private-key: ${{ secrets.GH_JIRA_SYNC_APP_KEY }}
+```
+
+The workflow then creates a short-lived installation token limited to organization
+projects and revokes it when the job ends. For a user-owned project, pass a
+fine-grained token with Projects read/write as `project-token` instead. When running
+locally, export `GH_PROJECT_TOKEN`, for example `gh auth token` after
+`gh auth refresh -s project`.
+
 ## Comments and formatting
 
 Copies identify the original author, creation time, and source URL. The actual API
@@ -336,8 +419,8 @@ Every entry has `github`, `operation`, and `kind`; the rest appear only when the
 | `reason` | Why an entry is blocked, unavailable, excluded, deferred, unchanged, or rejected (kept on `acknowledged`) |
 | `source` | Side of the original comment: `github` or `jira` |
 | `comment_id` | ID of that original comment on its own side |
-| `destination` | Side that receives the write: the copy's side, or the side whose status changes |
-| `status` | Target status, `open` or `closed`, for `sync_status` and `status_agreed` |
+| `destination` | Side that receives the write: `github` or `jira` for comment copies and status changes, or `project` for the GitHub Project item |
+| `status` | Target: `open` or `closed` for `sync_status` and `status_agreed`; the project option for `sync_project_status` and `project_status_agreed` |
 | `previous_rejection` | HTTP status of an earlier refused attempt that this entry retries |
 | `outcome` | `rejected` when the service refused this entry's write during apply; nothing changed and it is retried next run |
 
@@ -360,6 +443,9 @@ others write nothing to either service; some only update the state journal.
 | `confirm_comment` | state | Both sides already show the new text (for example an edit whose response was lost); re-read and record it |
 | `sync_status` | write | Close or reopen the `destination` side to match the other (`status`) |
 | `status_agreed` | state | Both sides already have the same status; record it as the agreed status |
+| `add_to_project` | write | Add the GitHub issue to the project; its status is synced on the next run |
+| `sync_project_status` | write | Set the project item's option, or transition Jira, to match the other side (`destination`, `status`) |
+| `project_status_agreed` | state | The project option and Jira status already match; record it as the agreed option |
 | `noop` | none | A tracked comment pair is in sync |
 | `reconciled` | state | Every comment on this pair is in sync; record the issues' timestamps so later runs can skip reading its comments |
 | `unchanged` | none | Neither issue has changed since the last full scan; its comments were not read this run |

@@ -39,6 +39,9 @@ type Pair struct {
 	// Closed is the status both sides last agreed on; nil until status sync first
 	// sees them agree. The side that differs from it is the side that changed.
 	Closed *bool `json:"closed,omitempty"`
+	// ProjectStatus is the project option both sides last agreed on, in project
+	// status mode; nil until they first agree. It works like Closed.
+	ProjectStatus *string `json:"project_status,omitempty"`
 }
 
 // Operation is a journaled create: pending before dispatch, done after confirmation,

@@ -7,6 +7,7 @@
 * Copy title and description at creation. Do not subsequently sync issue fields,
   labels, assignees, or deletions. Never create GitHub issues from Jira.
 * Optionally mirror open/closed status in both directions (`status_sync`).
+* Or mirror a GitHub Project's Status field and Jira statuses (`project_status`).
 * Copy original comments in both directions, including later edits to originals.
 * Report edits to copied comments; preserve them for human review.
 * Never delete comments or recreate a known deleted copy.
@@ -189,3 +190,27 @@ fields, and branch rules still require a live sandbox pilot.
 * https://developer.atlassian.com/cloud/jira/platform/rest/v3/api-group-issues/
 * https://developer.atlassian.com/cloud/jira/platform/rest/v3/api-group-issue-comments/
 * https://developer.atlassian.com/cloud/jira/platform/search-and-reconcile/
+
+## Project status
+
+`project_status` generalizes status sync from two states to a configured mapping
+between a GitHub Project's single-select field and Jira workflow statuses. Each pair
+stores the last agreed option (`project_status` on the pair). Unlike open/closed,
+both sides can now change to different values, so that case blocks for review,
+alongside disagreement with nothing recorded. An empty project field is not a
+change and is filled from Jira, so newly added items converge without review.
+
+The project drives Jira; Jira drives GitHub open/closed. GitHub close/reopen is not
+carried to Jira directly, because the project's own workflows already turn it into a
+Status change; doing both would move Jira twice, possibly to different statuses.
+For the same reason a config uses `status_sync` or `project_status`, never both.
+Open/closed entries are planned before project entries, since only open/closed
+leaves Jira untouched and so cannot invalidate the other's pre-write checks.
+
+The project is read once per run: the field's options by name, then every item with
+that field's value, following `Link` cursors. A next-page link must stay on the
+configured GitHub host. Items are matched to issues by GitHub issue ID. Project calls
+use their own client: `GH_PROJECT_TOKEN`, normally a GitHub App installation token
+scoped to organization Projects, and API version `2026-03-10`, under which the
+Projects REST endpoints are documented. Adding items and setting the field are
+idempotent and not journaled.

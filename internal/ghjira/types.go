@@ -18,6 +18,10 @@ const (
 
 var sides = []Side{SideGitHub, SideJira}
 
+// SideProject marks report entries that write the GitHub Project item. It is
+// report-only: state never stores it, so Side's decoding still rejects it.
+const SideProject Side = "project"
+
 // Other returns the opposite service.
 func (s Side) Other() Side {
 	if s == SideGitHub {
@@ -57,11 +61,19 @@ const (
 	KindReconciled     Kind = "reconciled"
 	KindSyncStatus     Kind = "sync_status"   // close or reopen one side to match the other
 	KindStatusAgreed   Kind = "status_agreed" // both sides agree; record that as the baseline
+	// Project status mode: a GitHub Project's single-select field mirrors Jira status.
+	KindAddToProject        Kind = "add_to_project"
+	KindSyncProjectStatus   Kind = "sync_project_status"
+	KindProjectStatusAgreed Kind = "project_status_agreed"
 )
 
 // writes reports kinds that perform a remote write and count against max_operations.
 func (k Kind) writes() bool {
-	return k == KindCreateIssue || k == KindCreateComment || k == KindEditComment || k == KindSyncStatus
+	switch k {
+	case KindCreateIssue, KindCreateComment, KindEditComment, KindSyncStatus, KindAddToProject, KindSyncProjectStatus:
+		return true
+	}
+	return false
 }
 
 // needsReview reports kinds that make the run exit 2 until resolved or acknowledged.
@@ -108,6 +120,9 @@ const (
 // OpStatus identifies a pair's status decisions in reports and acknowledgements.
 // Status changes are not journaled, so it never appears in state operations.
 const OpStatus OpKind = "status"
+
+// OpProjectStatus identifies a pair's project status decisions, like OpStatus.
+const OpProjectStatus OpKind = "project_status"
 
 // commentOp is the operation kind for copying a comment that originates on side.
 func commentOp(side Side) OpKind {
@@ -292,3 +307,73 @@ func (c Comment) Text() (string, error) {
 
 // sameAs compares every field that drives decisions, including the raw body.
 func (c Comment) sameAs(o Comment) bool { return sameJSON(c, o) }
+
+// ProjectSnapshot is the configured project's status field and every issue item's
+// value, read once per run.
+type ProjectSnapshot struct {
+	FieldID int64
+	Options map[string]string     // option name → option ID
+	Items   map[int64]ProjectItem // keyed by GitHub issue ID
+}
+
+// ProjectItem is one issue's entry in the project.
+type ProjectItem struct {
+	ID       int64
+	OptionID string // "" when the status field is unset
+	Archived bool
+}
+
+// optionName returns the option's name, or "" for an unset or unknown option.
+func (p *ProjectSnapshot) optionName(id string) string {
+	for name, optionID := range p.Options {
+		if optionID == id && id != "" {
+			return name
+		}
+	}
+	return ""
+}
+
+type apiProjectField struct {
+	ID       int64  `json:"id"`
+	Name     string `json:"name"`
+	DataType string `json:"data_type"`
+	Options  []struct {
+		ID   string `json:"id"`
+		Name struct {
+			Raw string `json:"raw"`
+		} `json:"name"`
+	} `json:"options"`
+}
+
+type apiProjectItem struct {
+	ID          int64   `json:"id"`
+	ContentType string  `json:"content_type"`
+	ArchivedAt  *string `json:"archived_at"`
+	Content     *struct {
+		ID int64 `json:"id"`
+	} `json:"content"`
+	Fields []struct {
+		ID int64 `json:"id"`
+		// A single-select value is an option object; only its ID is needed, so the
+		// value is decoded on demand and also accepted as a bare option ID.
+		Value json.RawMessage `json:"value"`
+	} `json:"fields"`
+}
+
+func (i apiProjectItem) item(fieldID int64) ProjectItem {
+	item := ProjectItem{ID: i.ID, Archived: i.ArchivedAt != nil}
+	for _, f := range i.Fields {
+		if f.ID != fieldID {
+			continue
+		}
+		var option struct {
+			ID string `json:"id"`
+		}
+		if json.Unmarshal(f.Value, &option) == nil {
+			item.OptionID = option.ID
+		} else {
+			json.Unmarshal(f.Value, &item.OptionID)
+		}
+	}
+	return item
+}

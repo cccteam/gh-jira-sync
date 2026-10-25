@@ -10,7 +10,10 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
+	"slices"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -32,6 +35,11 @@ type API interface {
 	JiraTransitions(id string) ([]JiraTransition, error)
 	TransitionJira(id, transitionID string) error
 	SetGitHubState(number int, closed bool) error
+	// Project reads the configured project's status field and every issue item's value.
+	Project() (*ProjectSnapshot, error)
+	ProjectItem(itemID, fieldID int64) (ProjectItem, error)
+	AddProjectItem(number int) error
+	SetProjectStatus(itemID, fieldID int64, optionID string) error
 }
 
 // HTTP is a small JSON REST client. Only GET requests are automatically retried.
@@ -71,17 +79,42 @@ func (h *HTTP) retryDelay(headers http.Header, attempt int) time.Duration {
 // Do sends body as JSON and decodes the response into out (unless out is nil).
 // A response that does not fit out's type is an error, never silently zero values.
 func (h *HTTP) Do(method, path string, body, out any) error {
+	_, err := h.exchange(method, path, body, out)
+	return err
+}
+
+var nextLink = regexp.MustCompile(`<([^>]+)>;\s*rel="next"`)
+
+// DoPage is Do for cursor-paginated GET requests: it also returns the path of the
+// next page from the Link header, or "" on the last page. The next page must be on
+// the same host, so credentials are never sent elsewhere.
+func (h *HTTP) DoPage(path string, out any) (string, error) {
+	headers, err := h.exchange(http.MethodGet, path, nil, out)
+	if err != nil {
+		return "", err
+	}
+	m := nextLink.FindStringSubmatch(headers.Get("Link"))
+	if m == nil {
+		return "", nil
+	}
+	if !strings.HasPrefix(m[1], h.base+"/") {
+		return "", syncErr("Unexpected pagination link; refusing to follow it")
+	}
+	return strings.TrimPrefix(m[1], h.base), nil
+}
+
+func (h *HTTP) exchange(method, path string, body, out any) (http.Header, error) {
 	var data []byte
 	if body != nil {
 		var err error
 		if data, err = json.Marshal(body); err != nil {
-			return syncErr("Invalid request body")
+			return nil, syncErr("Invalid request body")
 		}
 	}
 	for attempt := 0; ; attempt++ {
 		req, err := http.NewRequest(method, h.base+path, bytes.NewReader(data))
 		if err != nil {
-			return syncErr("%s network failure; write outcome may be unknown", method)
+			return nil, syncErr("%s network failure; write outcome may be unknown", method)
 		}
 		for k, v := range h.headers {
 			req.Header.Set(k, v)
@@ -98,7 +131,7 @@ func (h *HTTP) Do(method, path string, body, out any) error {
 				h.sleep(time.Duration(math.Pow(2, float64(attempt))) * time.Second)
 				continue
 			}
-			return syncErr("%s network failure; write outcome may be unknown", method)
+			return nil, syncErr("%s network failure; write outcome may be unknown", method)
 		}
 		if code := resp.StatusCode; code >= 300 {
 			// GitHub signals primary and secondary rate limits with 403 plus these headers.
@@ -109,40 +142,52 @@ func (h *HTTP) Do(method, path string, body, out any) error {
 				continue
 			}
 			// API response bodies can contain issue text or credentials; never log them.
-			return &HTTPStatusError{Status: code, Msg: method + " failed with HTTP " + strconv.Itoa(code) + "; writes are not retried"}
+			return nil, &HTTPStatusError{Status: code, Msg: method + " failed with HTTP " + strconv.Itoa(code) + "; writes are not retried"}
 		}
 		if out == nil {
-			return nil
+			return resp.Header, nil
 		}
 		dec := json.NewDecoder(bytes.NewReader(result))
 		dec.UseNumber() // raw ADF bodies keep exact numbers for hashing
 		if dec.Decode(out) != nil || dec.Decode(new(json.RawMessage)) != io.EOF {
-			return syncErr("Invalid API response; write outcome may be unknown")
+			return nil, syncErr("Invalid API response; write outcome may be unknown")
 		}
-		return nil
+		return resp.Header, nil
 	}
 }
 
 // Client talks to GitHub and Jira Cloud with narrowly scoped requests.
 type Client struct {
-	c      *Config
-	github *HTTP
-	jira   *HTTP
+	c        *Config
+	github   *HTTP
+	jira     *HTTP
+	projects *HTTP // project status mode only; uses GH_PROJECT_TOKEN
 }
 
-// NewClient reads credentials from GH_TOKEN, JIRA_EMAIL, and JIRA_API_TOKEN.
+// NewClient reads credentials from GH_TOKEN, JIRA_EMAIL, and JIRA_API_TOKEN, plus
+// GH_PROJECT_TOKEN in project status mode.
 func NewClient(c *Config) (*Client, error) {
 	gh, email, apiToken := os.Getenv("GH_TOKEN"), os.Getenv("JIRA_EMAIL"), os.Getenv("JIRA_API_TOKEN")
 	if gh == "" || email == "" || apiToken == "" {
 		return nil, syncErr("Set GH_TOKEN, JIRA_EMAIL, and JIRA_API_TOKEN")
 	}
 	basic := base64.StdEncoding.EncodeToString([]byte(email + ":" + apiToken))
-	return &Client{
+	client := &Client{
 		c: c,
 		github: newHTTP(c.GitHubURL, map[string]string{"Authorization": "Bearer " + gh,
 			"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}),
 		jira: newHTTP(c.JiraURL, map[string]string{"Authorization": "Basic " + basic, "Accept": "application/json"}),
-	}, nil
+	}
+	if c.ProjectStatus != nil {
+		projectToken := os.Getenv("GH_PROJECT_TOKEN")
+		if projectToken == "" {
+			return nil, syncErr("Set GH_PROJECT_TOKEN for project_status; GitHub Actions tokens cannot reach organization projects")
+		}
+		// The Projects REST endpoints are documented under this newer API version.
+		client.projects = newHTTP(c.GitHubURL, map[string]string{"Authorization": "Bearer " + projectToken,
+			"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2026-03-10"})
+	}
+	return client, nil
 }
 
 func (a *Client) CheckProject() error {
@@ -386,4 +431,78 @@ func (a *Client) SetGitHubState(number int, closed bool) error {
 		body = map[string]string{"state": "closed", "state_reason": "completed"}
 	}
 	return a.github.Do("PATCH", a.ghPath(number), body, nil)
+}
+
+func (a *Client) projectPath() string {
+	p := a.c.ProjectStatus
+	owner := "/orgs/"
+	if p.OwnerType == "user" {
+		owner = "/users/"
+	}
+	return owner + p.Owner + "/projectsV2/" + strconv.Itoa(p.ProjectNumber)
+}
+
+// projectPages reads every page of a cursor-paginated project listing or fails.
+func projectPages[T any](a *Client, path string) ([]T, error) {
+	var result []T
+	for range a.c.MaxPages {
+		var batch []T
+		next, err := a.projects.DoPage(path, &batch)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, batch...)
+		if next == "" {
+			return result, nil
+		}
+		path = next
+	}
+	return nil, syncErr("Project pagination limit exceeded; no partial scan allowed")
+}
+
+func (a *Client) Project() (*ProjectSnapshot, error) {
+	p := a.c.ProjectStatus
+	fields, err := projectPages[apiProjectField](a, a.projectPath()+"/fields?per_page=100")
+	if err != nil {
+		return nil, err
+	}
+	i := slices.IndexFunc(fields, func(f apiProjectField) bool { return f.Name == p.Field })
+	if i < 0 || fields[i].DataType != "single_select" {
+		return nil, syncErr("Project field %q is missing or not a single-select field", p.Field)
+	}
+	snap := &ProjectSnapshot{FieldID: fields[i].ID, Options: map[string]string{}, Items: map[int64]ProjectItem{}}
+	for _, o := range fields[i].Options {
+		snap.Options[o.Name.Raw] = o.ID
+	}
+	fieldID := strconv.FormatInt(snap.FieldID, 10)
+	items, err := projectPages[apiProjectItem](a, a.projectPath()+"/items?per_page=100&fields="+fieldID)
+	if err != nil {
+		return nil, err
+	}
+	for _, item := range items {
+		if item.ContentType == "Issue" && item.Content != nil {
+			snap.Items[item.Content.ID] = item.item(snap.FieldID)
+		}
+	}
+	return snap, nil
+}
+
+func (a *Client) ProjectItem(itemID, fieldID int64) (ProjectItem, error) {
+	var item apiProjectItem
+	path := a.projectPath() + "/items/" + strconv.FormatInt(itemID, 10) + "?fields=" + strconv.FormatInt(fieldID, 10)
+	if err := a.projects.Do("GET", path, nil, &item); err != nil {
+		return ProjectItem{}, err
+	}
+	return item.item(fieldID), nil
+}
+
+func (a *Client) AddProjectItem(number int) error {
+	owner, repo, _ := strings.Cut(a.c.Repository, "/")
+	body := map[string]any{"type": "Issue", "owner": owner, "repo": repo, "number": number}
+	return a.projects.Do("POST", a.projectPath()+"/items", body, nil)
+}
+
+func (a *Client) SetProjectStatus(itemID, fieldID int64, optionID string) error {
+	body := map[string]any{"fields": []map[string]any{{"id": fieldID, "value": optionID}}}
+	return a.projects.Do("PATCH", a.projectPath()+"/items/"+strconv.FormatInt(itemID, 10), body, nil)
 }

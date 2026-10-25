@@ -55,6 +55,7 @@ type fakeAPI struct {
 	listReads    []Side
 	refuse       []int // HTTP statuses for upcoming writes to reject without effect
 	transitions  []JiraTransition
+	project      *ProjectSnapshot // the GitHub Project, in project status mode
 	nextID       int
 }
 
@@ -289,5 +290,46 @@ func (f *fakeAPI) SetGitHubState(_ int, closed bool) error {
 	}
 	f.source.State = statusName(closed)
 	f.writes = append(f.writes, write{"state", f.source.State})
+	return f.lost()
+}
+
+func (f *fakeAPI) Project() (*ProjectSnapshot, error) {
+	snap := *f.project
+	snap.Options = maps.Clone(f.project.Options)
+	snap.Items = maps.Clone(f.project.Items)
+	return &snap, nil
+}
+
+func (f *fakeAPI) ProjectItem(itemID, _ int64) (ProjectItem, error) {
+	for _, item := range f.project.Items {
+		if item.ID == itemID {
+			return item, nil
+		}
+	}
+	return ProjectItem{}, &HTTPStatusError{Status: 404, Msg: "no item"}
+}
+
+func (f *fakeAPI) AddProjectItem(int) error {
+	if err := f.maybeRefuse(); err != nil {
+		return err
+	}
+	if _, ok := f.project.Items[f.source.ID]; !ok {
+		f.project.Items[f.source.ID] = ProjectItem{ID: 900}
+	}
+	f.writes = append(f.writes, write{"add", "project"})
+	return f.lost()
+}
+
+func (f *fakeAPI) SetProjectStatus(itemID, _ int64, optionID string) error {
+	if err := f.maybeRefuse(); err != nil {
+		return err
+	}
+	for issue, item := range f.project.Items {
+		if item.ID == itemID {
+			item.OptionID = optionID
+			f.project.Items[issue] = item
+		}
+	}
+	f.writes = append(f.writes, write{"project", f.project.optionName(optionID)})
 	return f.lost()
 }
