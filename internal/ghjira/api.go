@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"io"
+	"maps"
 	"math"
 	"net/http"
 	"net/url"
@@ -175,9 +176,7 @@ func (a *Client) ghPages(path string, params url.Values) ([]Object, error) {
 	var result []Object
 	for page := 1; page <= a.c.MaxPages; page++ {
 		q := url.Values{}
-		for k, v := range params {
-			q[k] = v
-		}
+		maps.Copy(q, params)
 		q.Set("per_page", "100")
 		q.Set("page", strconv.Itoa(page))
 		v, err := a.github.Request("GET", path+"?"+q.Encode(), nil)
@@ -288,9 +287,7 @@ func (a *Client) FindIssue(source Object) (Object, error) {
 func (a *Client) CreateIssue(source Object) (Object, error) {
 	op := token(a.c, "issue", source["id"])
 	fields := Object{}
-	for k, v := range a.c.JiraCreateFields {
-		fields[k] = v
-	}
+	maps.Copy(fields, a.c.JiraCreateFields)
 	fields["project"] = Object{"key": a.c.JiraProject}
 	fields["issuetype"] = Object{"id": a.c.JiraIssueType}
 	fields["summary"] = source["title"]

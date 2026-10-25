@@ -1,6 +1,7 @@
 package ghjira
 
 import (
+	"maps"
 	"strconv"
 	"testing"
 	"time"
@@ -10,9 +11,7 @@ func testConfig(t *testing.T, extra Object) *Config {
 	t.Helper()
 	raw := Object{"repository": "acme/test", "jira_url": "https://acme.atlassian.net",
 		"jira_project": "ENG", "jira_issue_type": "10001"}
-	for k, v := range extra {
-		raw[k] = v
-	}
+	maps.Copy(raw, extra)
 	c, err := ParseConfig(canonical(raw, false))
 	if err != nil {
 		t.Fatalf("config: %v", err)

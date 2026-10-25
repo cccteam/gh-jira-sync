@@ -1,7 +1,7 @@
 # GitHub → Jira creation, two-way comments
 
 Creates Jira Cloud issues from GitHub issues labeled **`sync-jira`**, then copies
-original comments and their edits in both directions. A single Go binary (Go 1.23+,
+original comments and their edits in both directions. A single Go binary (Go 1.27+,
 standard library only) with a ready-to-use GitHub Actions workflow.
 
 * Issue title and description are copied at creation only.

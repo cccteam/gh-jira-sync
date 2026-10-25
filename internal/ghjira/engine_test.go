@@ -2,6 +2,7 @@ package ghjira
 
 import (
 	"encoding/json"
+	"maps"
 	"reflect"
 	"slices"
 	"strings"
@@ -610,12 +611,8 @@ func TestBindingAndBadConfigFailClosed(t *testing.T) {
 		{"jira_create_fields": Object{"labels": []any{}}}, {"max_operations": true}, {"full_rescan_hours": 0},
 		{"max_pages": 1.5}, {"comments_since": "2026-02-01T00:00:00"}} {
 		raw := Object{}
-		for k, v := range base {
-			raw[k] = v
-		}
-		for k, v := range bad {
-			raw[k] = v
-		}
+		maps.Copy(raw, base)
+		maps.Copy(raw, bad)
 		if _, err := ParseConfig(canonical(raw, false)); err == nil {
 			t.Errorf("config %v accepted", bad)
 		}

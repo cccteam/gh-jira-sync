@@ -7,9 +7,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 )
@@ -133,9 +135,7 @@ func (s *State) clone() *State {
 
 func cloneMap[V any](m map[string]V) map[string]V {
 	out := make(map[string]V, len(m))
-	for k, v := range m {
-		out[k] = v
-	}
+	maps.Copy(out, m)
 	return out
 }
 
@@ -208,10 +208,8 @@ func (g *GitStore) git(data string, allowed []int, args ...string) (int, string,
 		}
 		code = exit.ExitCode()
 	}
-	for _, a := range allowed {
-		if a == code {
-			return code, strings.TrimSpace(stdout.String()), nil
-		}
+	if slices.Contains(allowed, code) {
+		return code, strings.TrimSpace(stdout.String()), nil
 	}
 	return code, "", syncErr("Git checkpoint failed; check remote, permissions, or concurrent writer")
 }

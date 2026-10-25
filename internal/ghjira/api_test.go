@@ -3,6 +3,7 @@ package ghjira
 import (
 	"encoding/json"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -34,9 +35,7 @@ func newServer(t *testing.T, respond func(r *http.Request) (int, http.Header, an
 		srv.bodies = append(srv.bodies, parsed)
 		srv.mu.Unlock()
 		status, headers, payload := srv.respond(r)
-		for k, v := range headers {
-			w.Header()[k] = v
-		}
+		maps.Copy(w.Header(), headers)
 		w.WriteHeader(status)
 		if raw, isRaw := payload.([]byte); isRaw {
 			w.Write(raw)
