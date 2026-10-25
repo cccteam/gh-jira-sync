@@ -200,7 +200,10 @@ type StatusSync struct {
 var (
 	repositoryPattern = regexp.MustCompile(`^[\w.-]+/[\w.-]+$`)
 	projectPattern    = regexp.MustCompile(`^[A-Z][A-Z0-9_]*$`)
-	markerPattern     = regexp.MustCompile(`^\[gh-jira-sync:([a-f0-9]{64})\]$`)
+	// markerPattern is the visible marker older releases appended to copies;
+	// hiddenMarkerPattern is the HTML comment GitHub copies now end with.
+	markerPattern       = regexp.MustCompile(`^\[gh-jira-sync:([a-f0-9]{64})\]$`)
+	hiddenMarkerPattern = regexp.MustCompile(`^<!--\s*gh-jira-sync:([a-f0-9]{64})\s*-->$`)
 )
 
 var configKeys = map[string]bool{
@@ -301,11 +304,11 @@ func ParseConfig(data []byte) (*Config, error) {
 	}
 	extra, ok := value("jira_create_fields", Object{}).(Object)
 	if !ok {
-		return nil, syncErr("jira_create_fields cannot override identity, summary, description, or labels")
+		return nil, syncErr("jira_create_fields cannot override project, issue type, summary, or description")
 	}
-	for _, k := range []string{"summary", "description", "project", "issuetype", "labels"} {
+	for _, k := range []string{"summary", "description", "project", "issuetype"} {
 		if _, present := extra[k]; present {
-			return nil, syncErr("jira_create_fields cannot override identity, summary, description, or labels")
+			return nil, syncErr("jira_create_fields cannot override project, issue type, summary, or description")
 		}
 	}
 	c.JiraCreateFields = extra
@@ -401,7 +404,12 @@ func token(c *Config, kind OpKind, sourceID string) string {
 	return digest([]any{binding(c), string(kind), sourceID})
 }
 
+// marker is the visible marker older releases appended to copies. It is still
+// recognized, and golden parity tests pin its format.
 func marker(op string) string { return "[gh-jira-sync:" + op + "]" }
+
+// hiddenMarker ends GitHub copies: an HTML comment, which GitHub does not render.
+func hiddenMarker(op string) string { return "<!-- gh-jira-sync:" + op + " -->" }
 
 // toADF copies text literally: one ADF paragraph per line.
 func toADF(text string) Object {
@@ -495,16 +503,28 @@ func renderADF(node Object) (string, error) {
 	return text, nil
 }
 
+// issueDescription is the Jira description: a link back, then the GitHub body as written.
+func issueDescription(source *GitHubIssue) string {
+	return "From GitHub: " + source.HTMLURL + "\n\n" + normalized(source.Body)
+}
+
 // normalized unifies GitHub web-editor CRLF line endings so hashes stay stable and ADF text clean.
 func normalized(body string) string {
 	return strings.ReplaceAll(body, "\r\n", "\n")
 }
 
-// trailingMarker returns the operation in a marker that is the body's own last line,
-// where copies carry it. Quote-replies embed a copy's marker inside a quote ("> [...]"
-// or an ADF blockquote), so they remain originals. Only the last top-level ADF
-// paragraph is read, which works even when the rest of the comment uses unsupported ADF.
+// trailingMarker returns the copy operation a comment carries, or "".
+//
+// Jira copies carry it in a comment property (Identity), invisible to readers.
+// GitHub copies end with a hidden HTML comment marker on their own last line.
+// Copies from older releases end with a visible marker line, still recognized.
+// Quote-replies embed a copy's marker inside a quote ("> ..." or an ADF blockquote)
+// and never carry the property, so they remain originals. Only the last top-level
+// ADF paragraph is read, which works even when the rest uses unsupported ADF.
 func trailingMarker(comment Comment) string {
+	if comment.Identity != "" {
+		return comment.Identity
+	}
 	var last string
 	if comment.Side == SideGitHub {
 		body, _ := comment.Body.(string)
@@ -541,6 +561,9 @@ func trailingMarker(comment Comment) string {
 		}
 	}
 	if m := markerPattern.FindStringSubmatch(last); m != nil {
+		return m[1]
+	}
+	if m := hiddenMarkerPattern.FindStringSubmatch(last); m != nil && comment.Side == SideGitHub {
 		return m[1]
 	}
 	return ""

@@ -56,6 +56,7 @@ type fakeAPI struct {
 	refuse       []int // HTTP statuses for upcoming writes to reject without effect
 	transitions  []JiraTransition
 	project      *ProjectSnapshot // the GitHub Project, in project status mode
+	searches     []string         // started values passed to FindIssue
 	nextID       int
 }
 
@@ -115,7 +116,8 @@ func (f *fakeAPI) Issue(number int) (*GitHubIssue, error) {
 	return f.issueCopy(), nil
 }
 
-func (f *fakeAPI) FindIssue(*GitHubIssue) (*JiraIssue, error) {
+func (f *fakeAPI) FindIssue(_ *GitHubIssue, started string) (*JiraIssue, error) {
+	f.searches = append(f.searches, started)
 	if f.hideJira {
 		return nil, nil
 	}
@@ -134,6 +136,7 @@ func (f *fakeAPI) CreateIssue(source *GitHubIssue) (*JiraIssue, error) {
 		return nil, err
 	}
 	f.jira = &JiraIssue{ID: "200", Key: "ENG-1"}
+	f.jira.Properties.Identity = &IssueIdentity{Operation: token(fakeConfig, OpIssue, source.idString()), GitHubID: source.idString()}
 	f.jira.Fields.Status = jiraStatus("To Do", "new")
 	f.writes = append(f.writes, write{"issue", source.Title})
 	if err := f.lost(); err != nil {
@@ -169,7 +172,7 @@ func (f *fakeAPI) Comment(side Side, _ Pair, id string) (Comment, error) {
 	return cp(*row), nil
 }
 
-func (f *fakeAPI) CreateComment(side Side, _ Pair, text string) (Comment, error) {
+func (f *fakeAPI) CreateComment(side Side, _ Pair, text, op string) (Comment, error) {
 	if err := f.maybeRefuse(); err != nil {
 		return Comment{}, err
 	}
@@ -177,6 +180,7 @@ func (f *fakeAPI) CreateComment(side Side, _ Pair, text string) (Comment, error)
 	row := ghComment(f.nextID, text)
 	if side == SideJira {
 		row = jiraComment(f.nextID, text)
+		row.Identity = op // as the gh-jira-sync comment property would
 	}
 	f.rows[side] = append(f.rows[side], row)
 	f.writes = append(f.writes, write{"create", string(side)})
@@ -333,3 +337,14 @@ func (f *fakeAPI) SetProjectStatus(itemID, _ int64, optionID string) error {
 	f.writes = append(f.writes, write{"project", f.project.optionName(optionID)})
 	return f.lost()
 }
+
+// fakeConfig has the binding every test config shares, so the fake can compute the
+// identity Jira would store on a created issue.
+var fakeConfig = func() *Config {
+	c, err := ParseConfig([]byte(`{"repository": "acme/test", "jira_url": "https://acme.atlassian.net",
+		"jira_project": "ENG", "jira_issue_type": "10001"}`))
+	if err != nil {
+		panic(err)
+	}
+	return c
+}()

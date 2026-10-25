@@ -66,10 +66,11 @@ Flags accept one or two dashes (`-apply` or `--apply`).
 Supported platforms are Linux/macOS (the local lock uses `flock`). No live
 credentials are needed to run tests.
 
-State, report, and identity formats are unchanged from the earlier Python release:
-operation tokens, Jira `gh-sync-*` labels, and content fingerprints are byte-identical
-(checked against vectors in `internal/ghjira/testdata/golden.json`), so existing
-`sync-state` branches and Jira issues keep working.
+State and identity formats stay compatible with the earlier Python release:
+operation tokens and content fingerprints are byte-identical (checked against vectors
+in `internal/ghjira/testdata/golden.json`), so existing `sync-state` branches, Jira
+issues, and copies keep working. Issues and copies created now carry no visible
+markers; older labels and marker lines are still recognized.
 
 ## GitHub Actions
 
@@ -212,8 +213,8 @@ See [sync.example.json](sync.example.json). Unknown keys fail validation.
 | `status_sync` | `null` (off); `{"close_transition": "Done", "reopen_transition": "Reopen"}` mirrors closing and reopening |
 | `project_status` | `null` (off); mirrors a GitHub Project's Status field and Jira statuses instead of `status_sync`; see [Project status](#project-status) |
 
-`jira_create_fields` cannot replace project, issue type, title, description, or
-identity labels. Required tenant-specific fields must be supplied explicitly;
+`jira_create_fields` cannot replace project, issue type, title, or description. It
+may set `labels`; the tool adds none of its own. Required tenant-specific fields must be supplied explicitly;
 the tool does not guess them or truncate long titles. `comments_since` applies to
 newly enrolled comments, not edits to already tracked comments.
 
@@ -356,12 +357,18 @@ locally, export `GH_PROJECT_TOKEN`, for example `gh auth token` after
 
 ## Comments and formatting
 
-Copies identify the original author, creation time, and source URL. The actual API
-author is the service account. Stable source IDs and markers prevent echo loops;
-two identical original comments still produce two distinct copies. A comment is
-treated as a copy only when the marker is its own last line (in Jira, its last
-paragraph), so quote-replies of a copy sync as new originals. Do not manually
-remove or alter attribution or `[gh-jira-sync:…]` markers.
+Copies start with a plain header naming the original author and linking to the
+original, for example "alice wrote on GitHub (link):" in Jira, or "**Bob** wrote
+in [Jira](link):" on GitHub. The actual API author is the service account.
+
+Each copy also carries an invisible identity that prevents echo loops and lets a
+lost response be recovered: a comment property on Jira, and an HTML comment
+(`<!-- gh-jira-sync:… -->`) on GitHub, which GitHub does not display. Two identical
+originals still produce two distinct copies. Quote-replies of a copy sync as new
+originals, because a quote never carries the identity. Do not remove the header
+from a copy, or the HTML comment when editing a GitHub copy's Markdown; either
+blocks that comment for review. Copies made by older releases end with a visible
+`[gh-jira-sync:…]` line and keep working.
 
 GitHub Markdown is preserved literally in Jira, with CRLF line endings from the
 GitHub web editor normalized to LF. Jira comments are rendered as
@@ -476,8 +483,9 @@ notifications, Jira automation, and incompatible project audiences remain possib
 Pilot in a sandbox and review the first plans.
 
 A creation journal records `pending` before dispatch and `done` after confirmation.
-Writes are never retried within a run. If a response is lost, the next run searches
-for the destination marker and adopts a matching result. If no result is visible,
+Writes are never retried within a run. If a response is lost, the next run looks for
+the destination by its hidden identity (for issues: issues this account created
+since the intent was journaled, matched by issue property) and adopts a match. If no result is visible,
 it **blocks instead of creating another**. Jira search can lag behind writes.
 
 A 4xx answer (other than 408) proves the service refused the write, so the journal

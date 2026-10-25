@@ -71,10 +71,17 @@ service and naturally catches missed events.
 
 An operation token hashes the source service/repository/project identity, object
 kind, and immutable source object ID. GitHub issue numbers are used for API routing;
-immutable IDs detect transfers/replacements. The created Jira issue has a source
-label and issue property set in the same creation request. State records its Jira
-ID and key. Recovery searches by label and checks the property; multiple matches
-or mismatched identity block adoption.
+immutable IDs detect transfers/replacements. The created Jira issue carries its identity
+only in an issue property set in the same creation request; nothing visible is added.
+State records its Jira ID and key, and each journaled intent records when it started.
+Recovery runs only for pending intents: it searches issues this account created in
+the project since the intent started (with a margin for clock skew), returns their
+properties in the same search, and adopts the one whose property matches exactly.
+Multiple matches or a mismatched identity block adoption, and no match leaves the
+intent blocked, never retried. Intents journaled before start times were recorded
+fall back to the `gh-sync-<token>` label older releases added. Because state is
+authoritative, issues are not searched for otherwise; existing Jira issues cannot be
+re-adopted after state is lost.
 
 Before every POST, persist a `pending` operation. In Actions this means successfully
 pushing a unique commit to the deployment's state branch on `origin`
@@ -97,8 +104,11 @@ This keeps the full current-pass write budget reviewable before any writes begin
 
 ## Comment ownership and edits
 
-Each copied comment carries an attribution prefix, original link, and stable
-operation marker. The journal records original/copy IDs, origin side, envelope,
+Each copied comment carries a readable attribution header with the original link,
+and an invisible operation identity: a Jira comment property set atomically on
+create (read back through the bulk `comment/list` endpoint, which documents
+expanding properties), or a trailing HTML comment on GitHub. Older copies end with
+a visible marker line instead; both are recognized. The journal records original/copy IDs, origin side, envelope,
 last confirmed content fingerprint, and raw copy-body fingerprint. Known copied
 IDs and markers prevent echoes. A marker counts only as the body's final line (or
 final top-level ADF paragraph), so quoted copies inside replies stay originals.

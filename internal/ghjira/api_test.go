@@ -125,18 +125,87 @@ func TestGitHubPaginationAndLimit(t *testing.T) {
 	}
 }
 
-func TestJiraPagination(t *testing.T) {
+func TestJiraPaginationAndCommentProperties(t *testing.T) {
+	op := strings.Repeat("c", 64)
 	srv := newServer(t, func(r *http.Request) (int, http.Header, any) {
+		if r.URL.Path == "/rest/api/3/comment/list" {
+			// Properties come only from this documented bulk endpoint.
+			return 200, nil, Object{"isLast": true, "values": []any{
+				Object{"id": "10", "properties": []any{Object{"key": "gh-jira-sync", "value": Object{"operation": op}}}},
+				Object{"id": "11", "properties": []any{Object{"key": "sd.public.comment", "value": Object{"internal": true}}}}}}
+		}
 		start := r.URL.Query().Get("startAt")
-		return 200, nil, Object{"comments": []any{Object{"id": "c" + start}}, "total": 2}
+		return 200, nil, Object{"comments": []any{Object{"id": "1" + start}}, "total": 2}
 	})
-	rows, err := srv.client(t).Comments("jira", Pair{JiraID: "200"})
+	rows, err := srv.client(t).Comments(SideJira, Pair{JiraID: "200"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	eq(t, len(rows), 2)
 	if !strings.Contains(srv.urls[1], "startAt=1") {
 		t.Fatalf("second page not requested from offset 1: %s", srv.urls[1])
+	}
+	eq(t, srv.urls[2], "/rest/api/3/comment/list?expand=properties")
+	eq(t, string(canonical(srv.bodies[2], false)), `{"ids":[10,11]}`)
+	eq(t, []any{rows[0].Identity, rows[0].Restricted, rows[1].Identity, rows[1].Restricted}, []any{op, false, "", true})
+}
+
+func TestPartialCommentPropertiesFail(t *testing.T) {
+	srv := newServer(t, func(r *http.Request) (int, http.Header, any) {
+		if r.URL.Path == "/rest/api/3/comment/list" {
+			return 200, nil, Object{"isLast": true, "values": []any{Object{"id": "10"}}}
+		}
+		return 200, nil, Object{"comments": []any{Object{"id": "10"}, Object{"id": "11"}}, "total": 2}
+	})
+	if _, err := srv.client(t).Comments(SideJira, Pair{JiraID: "200"}); err == nil {
+		t.Fatal("missing comment properties accepted")
+	}
+}
+
+func TestJiraCopyCarriesIdentityProperty(t *testing.T) {
+	srv := newServer(t, ok(Object{"id": "300"}))
+	op := strings.Repeat("d", 64)
+	if _, err := srv.client(t).CreateComment(SideJira, Pair{JiraID: "200"}, "hello", op); err != nil {
+		t.Fatal(err)
+	}
+	props := list(srv.bodies[0]["properties"])
+	eq(t, string(canonical(props, false)), `[{"key":"gh-jira-sync","value":{"operation":"`+op+`"}}]`)
+	text, _ := adfText(srv.bodies[0]["body"])
+	eq(t, text, "hello")
+}
+
+func TestFindIssueSearchesByCreatorSinceIntent(t *testing.T) {
+	var jql []string
+	api := (*Client)(nil)
+	srv := newServer(t, func(r *http.Request) (int, http.Header, any) {
+		if strings.HasPrefix(r.URL.Path, "/rest/api/3/search/jql") {
+			jql = append(jql, r.URL.Query().Get("jql"))
+			op := token(api.c, OpIssue, "42")
+			return 200, nil, Object{"issues": []any{
+				Object{"id": "199", "properties": Object{"gh-jira-sync": Object{"operation": op, "github_id": "41"}}},
+				Object{"id": "200", "properties": Object{"gh-jira-sync": Object{"operation": op, "github_id": "42"}}},
+				Object{"id": "201"}}}
+		}
+		op := token(api.c, OpIssue, "42")
+		return 200, nil, Object{"id": "200", "key": "ENG-7", "fields": Object{"project": Object{"key": "ENG"}},
+			"properties": Object{"gh-jira-sync": Object{"operation": op, "github_id": "42"}}}
+	})
+	api = srv.client(t)
+	source := newFake().source
+	started := time.Now().Add(-30 * time.Minute).UTC().Format(time.RFC3339)
+	issue, err := api.FindIssue(&source, started)
+	if err != nil || issue == nil || issue.Key != "ENG-7" {
+		t.Fatalf("got %+v %v", issue, err)
+	}
+	if !strings.Contains(jql[0], "creator = currentUser()") || !strings.Contains(jql[0], "created >= -40m") || strings.Contains(jql[0], "labels") {
+		t.Fatalf("jql: %s", jql[0])
+	}
+	// Intents journaled by older releases have no start time and use their label.
+	if _, err := api.FindIssue(&source, ""); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(jql[1], `labels = "gh-sync-`) {
+		t.Fatalf("legacy jql: %s", jql[1])
 	}
 }
 
@@ -150,9 +219,14 @@ func TestJiraCreationHasAtomicIdentity(t *testing.T) {
 	payload := srv.bodies[0]
 	prop := asObject(asObject(list(payload["properties"])[0])["value"])
 	eq(t, prop["github_id"], any("42"))
+	eq(t, prop["operation"], any(token(api.c, OpIssue, "42")))
 	fields := asObject(payload["fields"])
-	eq(t, list(fields["labels"]), []any{"gh-sync-" + token(api.c, OpIssue, "42")})
+	if _, labeled := fields["labels"]; labeled {
+		t.Fatal("identity must live only in the issue property, not a visible label")
+	}
 	eq(t, fields["summary"], any("Original title"))
+	description, _ := adfText(fields["description"])
+	eq(t, description, "From GitHub: https://github.com/acme/test/issues/1\n\ndescription")
 }
 
 func TestServiceDeskProjectRejected(t *testing.T) {

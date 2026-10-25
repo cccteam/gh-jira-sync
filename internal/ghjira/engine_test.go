@@ -593,7 +593,7 @@ func TestBindingAndBadConfigFailClosed(t *testing.T) {
 	}
 	base := Object{"repository": "acme/test", "jira_url": "https://acme.atlassian.net", "jira_project": "ENG", "jira_issue_type": "10001"}
 	for _, bad := range []Object{{"unknown": true}, {"jira_url": "http://unsafe"}, {"selection_label": ""},
-		{"jira_create_fields": Object{"labels": []any{}}}, {"max_operations": true}, {"full_rescan_hours": 0},
+		{"jira_create_fields": Object{"project": Object{}}}, {"max_operations": true}, {"full_rescan_hours": 0},
 		{"max_pages": 1.5}, {"comments_since": "2026-02-01T00:00:00"}} {
 		raw := Object{}
 		maps.Copy(raw, base)

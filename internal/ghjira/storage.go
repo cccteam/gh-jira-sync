@@ -55,6 +55,9 @@ type Operation struct {
 	Suffix     string `json:"suffix,omitempty"`
 	Baseline   string `json:"baseline,omitempty"`
 	HTTPStatus int    `json:"http_status,omitempty"`
+	// Started is when an issue creation was journaled (RFC 3339, UTC). Recovery
+	// searches for issues created since then.
+	Started string `json:"started,omitempty"`
 }
 
 // Link maps an original comment to its copy with the last confirmed fingerprints.

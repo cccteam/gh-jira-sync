@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -187,10 +188,15 @@ func Main(args []string, stdout io.Writer) int {
 	}()
 	if err != nil {
 		code = 1
-		if isSyncError(err) {
+		var pathErr *fs.PathError
+		switch {
+		case isSyncError(err):
 			rep.Error = err.Error()
-		} else {
-			// Other errors may quote file contents; report only their type.
+		case errors.As(err, &pathErr):
+			// Holds only the operation, path, and OS reason, such as "no such file or directory".
+			rep.Error = "Cannot " + pathErr.Op + " " + pathErr.Path + ": " + pathErr.Err.Error()
+		default:
+			// Other errors, such as JSON syntax errors, may quote file contents; report only their type.
 			rep.Error = fmt.Sprintf("Invalid input or I/O failure (%T)", err)
 		}
 	}

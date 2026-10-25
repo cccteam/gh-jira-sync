@@ -128,16 +128,28 @@ func retryNote(e *Entry, old *Operation) {
 	}
 }
 
+// envelope returns the readable header and the suffix of a new copy. Copies show only
+// who wrote the original and where; their identity is invisible: a hidden HTML
+// comment ending GitHub copies, a comment property on Jira copies. Each link stores
+// its own prefix and suffix, so copies made in older formats keep working.
 func envelope(c *Config, comment Comment, pair Pair, op string) (string, string) {
-	author, link := comment.Author, comment.HTMLURL
-	if author == "" {
-		author = "unknown"
-	}
+	author := comment.Author
 	if comment.Side == SideJira {
-		link = c.JiraURL + "/browse/" + pair.JiraKey + "?focusedCommentId=" + comment.ID
+		if author == "" {
+			author = "Someone"
+		}
+		link := c.JiraURL + "/browse/" + pair.JiraKey + "?focusedCommentId=" + comment.ID
+		return "**" + markdownEscape(author) + "** wrote in [Jira](" + link + "):\n\n", "\n\n" + hiddenMarker(op)
 	}
-	prefix := "Synced from " + string(comment.Side) + " — " + author + " (" + comment.Created + ")\nSource: " + link + "\n\n"
-	return prefix, "\n\n" + marker(op)
+	if author == "" {
+		author = "Someone"
+	}
+	return author + " wrote on GitHub (" + comment.HTMLURL + "):\n\n", ""
+}
+
+// markdownEscape keeps a display name from turning into formatting.
+func markdownEscape(s string) string {
+	return strings.NewReplacer(`\`, `\\`, "*", `\*`, "_", `\_`, "[", `\[`, "]", `\]`, "<", `\<`, "`", "\\`").Replace(s)
 }
 
 // quiet reports a fully reconciled pair that shows no activity and whose periodic
@@ -316,11 +328,15 @@ func Plan(c *Config, s *State, api API, now time.Time) ([]*Entry, error) {
 func planIssue(c *Config, s *State, api API, source *GitHubIssue) (*Entry, error) {
 	op := token(c, OpIssue, source.idString())
 	e := &Entry{GitHub: source.Number, Operation: op, issue: source}
-	existing, err := api.FindIssue(source)
-	if err != nil {
-		return nil, err
-	}
 	old, journaled := s.Operations[op]
+	// Only a pending intent may have created an issue; state is authoritative otherwise.
+	var existing *JiraIssue
+	if journaled && old.Status == StatusPending {
+		var err error
+		if existing, err = api.FindIssue(source, old.Started); err != nil {
+			return nil, err
+		}
+	}
 	switch {
 	case existing != nil:
 		e.Kind, e.pair = KindLinkIssue, issuePair(source, existing)
@@ -328,7 +344,7 @@ func planIssue(c *Config, s *State, api API, source *GitHubIssue) (*Entry, error
 		e.block("Issue creation outcome unknown or destination missing; never retry automatically")
 	case runeLen(source.Title) > 255:
 		e.block("GitHub title exceeds Jira summary limit")
-	case runeLen("Source: "+source.HTMLURL+"\n\n"+normalized(source.Body)) > textLimit:
+	case runeLen(issueDescription(source)) > textLimit:
 		e.block("Issue description exceeds conservative 30000 character limit")
 	default:
 		e.Kind = KindCreateIssue
@@ -865,16 +881,21 @@ func applyIssue(s *State, api API, e *Entry, save func(*State) error) error {
 	if !source.sameContent(e.issue) {
 		return syncErr("GitHub issue changed after plan; rerun")
 	}
-	existing, err := api.FindIssue(source)
-	if err != nil {
-		return err
-	}
-	record := Operation{Kind: OpIssue, SourceID: source.idString(), GitHub: e.GitHub, Status: StatusPending}
+	record := Operation{Kind: OpIssue, SourceID: source.idString(), GitHub: e.GitHub, Status: StatusPending,
+		Started: time.Now().UTC().Format(time.RFC3339)}
+	var existing *JiraIssue
 	if e.Kind == KindLinkIssue {
-		if existing == nil || existing.ID != e.pair.JiraID {
+		// Re-read the found issue itself; its identity property must still match.
+		var err error
+		existing, err = api.JiraIssue(e.pair.JiraID)
+		if err != nil {
+			return err
+		}
+		want := IssueIdentity{Operation: e.Operation, GitHubID: source.idString()}
+		if existing == nil || existing.Properties.Identity == nil || *existing.Properties.Identity != want {
 			return syncErr("Jira identity changed after plan")
 		}
-	} else if existing == nil {
+	} else {
 		s.Operations[e.Operation] = record
 		if err := save(s); err != nil { // Never dispatch creation without a durable intent.
 			return err
@@ -929,7 +950,7 @@ func applyNewComment(s *State, api API, e *Entry, save func(*State) error) error
 	if err := save(s); err != nil {
 		return err
 	}
-	created, err := api.CreateComment(e.Destination, e.pair, e.prefix+e.text+e.suffix)
+	created, err := api.CreateComment(e.Destination, e.pair, e.prefix+e.text+e.suffix, e.Operation)
 	if status, refused := refusedStatus(err); refused {
 		return reject(s, e, record, status, err, save)
 	}

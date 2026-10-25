@@ -113,3 +113,19 @@ func TestLockExcludesOtherWriter(t *testing.T) {
 		t.Fatal("second writer acquired the lock")
 	}
 }
+
+func TestCLIReportsMissingConfigPath(t *testing.T) {
+	dir := t.TempDir()
+	missing := filepath.Join(dir, "nope.json")
+	report := filepath.Join(dir, "report.json")
+	eq(t, Main([]string{"--config", missing, "--state", filepath.Join(dir, "s.json"), "--report", report}, io.Discard), 1)
+	data, err := os.ReadFile(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rep map[string]any
+	if err := json.Unmarshal(data, &rep); err != nil {
+		t.Fatal(err)
+	}
+	eq(t, rep["error"], any("Cannot open "+missing+": no such file or directory"))
+}

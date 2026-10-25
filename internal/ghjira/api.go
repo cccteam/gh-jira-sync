@@ -23,13 +23,14 @@ type API interface {
 	Issues() ([]GitHubIssue, error)
 	// Issue returns nil when the issue was deleted or transferred.
 	Issue(number int) (*GitHubIssue, error)
-	FindIssue(source *GitHubIssue) (*JiraIssue, error)
+	// FindIssue looks for an issue created by a pending intent journaled at started.
+	FindIssue(source *GitHubIssue, started string) (*JiraIssue, error)
 	// JiraIssue returns nil when the issue was deleted, hidden, or moved out of the project.
 	JiraIssue(id string) (*JiraIssue, error)
 	CreateIssue(source *GitHubIssue) (*JiraIssue, error)
 	Comments(side Side, pair Pair) ([]Comment, error)
 	Comment(side Side, pair Pair, id string) (Comment, error)
-	CreateComment(side Side, pair Pair, text string) (Comment, error)
+	CreateComment(side Side, pair Pair, text, op string) (Comment, error)
 	EditComment(side Side, pair Pair, id, text string) error
 	// JiraTransitions lists the workflow moves available from the issue's current status.
 	JiraTransitions(id string) ([]JiraTransition, error)
@@ -287,26 +288,59 @@ func (a *Client) JiraIssue(id string) (*JiraIssue, error) {
 	return issue, nil
 }
 
-func (a *Client) FindIssue(source *GitHubIssue) (*JiraIssue, error) {
+// FindIssue looks for the Jira issue a pending creation may have made, by its
+// identity property. started is when the intent was journaled: the search covers
+// issues this account created since then, so Jira issues carry no visible marker.
+// Intents journaled before started was recorded fall back to the label that older
+// releases added.
+func (a *Client) FindIssue(source *GitHubIssue, started string) (*JiraIssue, error) {
 	op := token(a.c, OpIssue, source.idString())
-	query := url.Values{"jql": {`project = "` + a.c.JiraProject + `" AND labels = "gh-sync-` + op + `"`},
-		"maxResults": {"2"}, "fields": {"id,key"}}
-	var result struct {
-		Issues []struct {
-			ID string `json:"id"`
-		} `json:"issues"`
-		NextPageToken string `json:"nextPageToken"`
+	identity := IssueIdentity{Operation: op, GitHubID: source.idString()}
+	jql := `project = "` + a.c.JiraProject + `" AND labels = "gh-sync-` + op + `"`
+	if since, err := time.Parse(time.RFC3339, started); err == nil {
+		// A margin covers clock skew between this runner and Jira.
+		minutes := int(time.Since(since)/time.Minute) + 10
+		jql = `project = "` + a.c.JiraProject + `" AND creator = currentUser() AND created >= -` +
+			strconv.Itoa(minutes) + `m ORDER BY created ASC`
 	}
-	if err := a.jira.Do("GET", "/rest/api/3/search/jql?"+query.Encode(), nil, &result); err != nil {
-		return nil, err
+	var found []string
+	next := ""
+	for page := 0; ; page++ {
+		if page == a.c.MaxPages {
+			return nil, syncErr("Jira search pagination limit exceeded; no partial scan allowed")
+		}
+		query := url.Values{"jql": {jql}, "maxResults": {"100"}, "fields": {"id"}, "properties": {"gh-jira-sync"}}
+		if next != "" {
+			query.Set("nextPageToken", next)
+		}
+		var result struct {
+			Issues []struct {
+				ID         string `json:"id"`
+				Properties struct {
+					Identity *IssueIdentity `json:"gh-jira-sync"`
+				} `json:"properties"`
+			} `json:"issues"`
+			NextPageToken string `json:"nextPageToken"`
+		}
+		if err := a.jira.Do("GET", "/rest/api/3/search/jql?"+query.Encode(), nil, &result); err != nil {
+			return nil, err
+		}
+		for _, issue := range result.Issues {
+			if issue.Properties.Identity != nil && *issue.Properties.Identity == identity {
+				found = append(found, issue.ID)
+			}
+		}
+		if next = result.NextPageToken; next == "" {
+			break
+		}
 	}
-	if result.NextPageToken != "" || len(result.Issues) > 1 {
+	if len(found) > 1 {
 		return nil, syncErr("Multiple Jira issues have the same source identity")
 	}
-	if len(result.Issues) == 0 {
+	if len(found) == 0 {
 		return nil, nil
 	}
-	issue, err := a.JiraIssue(result.Issues[0].ID)
+	issue, err := a.JiraIssue(found[0])
 	if err != nil {
 		return nil, err
 	}
@@ -327,8 +361,8 @@ func (a *Client) CreateIssue(source *GitHubIssue) (*JiraIssue, error) {
 	fields["project"] = Object{"key": a.c.JiraProject}
 	fields["issuetype"] = Object{"id": a.c.JiraIssueType}
 	fields["summary"] = source.Title
-	fields["description"] = toADF("Source: " + source.HTMLURL + "\n\n" + normalized(source.Body))
-	fields["labels"] = []string{"gh-sync-" + op}
+	fields["description"] = toADF(issueDescription(source))
+	// Identity lives only in this issue property, written atomically with the issue.
 	request := struct {
 		Fields     Object `json:"fields"`
 		Properties []any  `json:"properties"`
@@ -355,10 +389,10 @@ func (a *Client) Comments(side Side, pair Pair) ([]Comment, error) {
 		}
 		return result, nil
 	}
-	var result []Comment
+	var listed []apiJiraComment
 	start := 0
 	for range a.c.MaxPages {
-		q := url.Values{"startAt": {strconv.Itoa(start)}, "maxResults": {"100"}, "orderBy": {"created"}, "expand": {"properties"}}
+		q := url.Values{"startAt": {strconv.Itoa(start)}, "maxResults": {"100"}, "orderBy": {"created"}}
 		var batch struct {
 			Comments []apiJiraComment `json:"comments"`
 			Total    int              `json:"total"`
@@ -366,12 +400,10 @@ func (a *Client) Comments(side Side, pair Pair) ([]Comment, error) {
 		if err := a.jira.Do("GET", "/rest/api/3/issue/"+pair.JiraID+"/comment?"+q.Encode(), nil, &batch); err != nil {
 			return nil, err
 		}
-		for _, j := range batch.Comments {
-			result = append(result, j.comment())
-		}
+		listed = append(listed, batch.Comments...)
 		start += len(batch.Comments)
 		if start >= batch.Total {
-			return result, nil
+			return a.withProperties(listed)
 		}
 		if len(batch.Comments) == 0 {
 			return nil, syncErr("Incomplete Jira comment pagination")
@@ -387,18 +419,29 @@ func (a *Client) Comment(side Side, pair Pair, id string) (Comment, error) {
 		return g.comment(), err
 	}
 	var j apiJiraComment
-	err := a.jira.Do("GET", "/rest/api/3/issue/"+pair.JiraID+"/comment/"+id+"?expand=properties", nil, &j)
-	return j.comment(), err
+	err := a.jira.Do("GET", "/rest/api/3/issue/"+pair.JiraID+"/comment/"+id+"", nil, &j)
+	if err != nil {
+		return Comment{}, err
+	}
+	comments, err := a.withProperties([]apiJiraComment{j})
+	if err != nil {
+		return Comment{}, err
+	}
+	return comments[0], nil
 }
 
-func (a *Client) CreateComment(side Side, pair Pair, text string) (Comment, error) {
+func (a *Client) CreateComment(side Side, pair Pair, text, op string) (Comment, error) {
 	if side == SideGitHub {
 		var g apiGitHubComment
 		err := a.github.Do("POST", a.ghPath(pair.GitHub)+"/comments", map[string]string{"body": text}, &g)
 		return g.comment(), err
 	}
 	var j apiJiraComment
-	err := a.jira.Do("POST", "/rest/api/3/issue/"+pair.JiraID+"/comment", map[string]any{"body": toADF(text)}, &j)
+	// The copy's identity is a comment property set atomically on create, so the
+	// copy itself shows no marker text.
+	body := map[string]any{"body": toADF(text), "properties": []any{
+		map[string]any{"key": "gh-jira-sync", "value": map[string]string{"operation": op}}}}
+	err := a.jira.Do("POST", "/rest/api/3/issue/"+pair.JiraID+"/comment", body, &j)
 	return j.comment(), err
 }
 
@@ -505,4 +548,44 @@ func (a *Client) AddProjectItem(number int) error {
 func (a *Client) SetProjectStatus(itemID, fieldID int64, optionID string) error {
 	body := map[string]any{"fields": []map[string]any{{"id": fieldID, "value": optionID}}}
 	return a.projects.Do("PATCH", a.projectPath()+"/items/"+strconv.FormatInt(itemID, 10), body, nil)
+}
+
+// withProperties fills in comment properties through the comment/list endpoint,
+// which documents expanding them; listing an issue's comments does not. Properties
+// carry copy identities and Service Management visibility, so a partial answer fails.
+func (a *Client) withProperties(comments []apiJiraComment) ([]Comment, error) {
+	props := map[string][]jiraProperty{}
+	for start := 0; start < len(comments); start += 50 {
+		batch := comments[start:min(start+50, len(comments))]
+		ids := make([]int64, len(batch))
+		for i, c := range batch {
+			id, err := strconv.ParseInt(c.ID, 10, 64)
+			if err != nil {
+				return nil, syncErr("Invalid Jira comment ID")
+			}
+			ids[i] = id
+		}
+		var page struct {
+			IsLast bool `json:"isLast"`
+			Values []struct {
+				ID         string         `json:"id"`
+				Properties []jiraProperty `json:"properties"`
+			} `json:"values"`
+		}
+		if err := a.jira.Do("POST", "/rest/api/3/comment/list?expand=properties", map[string][]int64{"ids": ids}, &page); err != nil {
+			return nil, err
+		}
+		if !page.IsLast || len(page.Values) != len(batch) {
+			return nil, syncErr("Incomplete Jira comment properties; no partial scan allowed")
+		}
+		for _, v := range page.Values {
+			props[v.ID] = v.Properties
+		}
+	}
+	result := make([]Comment, len(comments))
+	for i, c := range comments {
+		c.Properties = props[c.ID]
+		result[i] = c.comment()
+	}
+	return result, nil
 }

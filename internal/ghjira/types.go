@@ -280,6 +280,14 @@ func (j apiJiraComment) comment() Comment {
 	if j.Author != nil {
 		c.Author = j.Author.DisplayName
 	}
+	for _, p := range j.Properties {
+		var identity struct {
+			Operation string `json:"operation"`
+		}
+		if p.Key == "gh-jira-sync" && json.Unmarshal(p.Value, &identity) == nil {
+			c.Identity = identity.Operation
+		}
+	}
 	return c
 }
 
@@ -294,6 +302,9 @@ type Comment struct {
 	Author     string `json:"author"`
 	HTMLURL    string `json:"html_url,omitempty"` // GitHub only
 	Restricted bool   `json:"restricted"`         // Jira only
+	// Identity is the copy operation stored in a Jira comment's gh-jira-sync property;
+	// it marks a copy without visible text. GitHub copies use a hidden HTML comment.
+	Identity string `json:"identity,omitempty"`
 }
 
 // Text is the comment's plain text: normalized Markdown, or rendered ADF.
