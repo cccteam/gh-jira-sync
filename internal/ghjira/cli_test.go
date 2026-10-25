@@ -79,7 +79,7 @@ func TestCLIApplyThenRepeat(t *testing.T) {
 func TestCLIAcknowledgeClearsReviewExitCode(t *testing.T) {
 	r := newCLI(t)
 	eq(t, r.main("--apply", "--init-state"), 0)
-	r.api.rows["github"] = []Object{ghComment(11, "Original")}
+	r.api.rows["github"] = []Comment{ghComment(11, "Original")}
 	eq(t, r.main("--apply"), 0)
 	r.api.rows["github"] = nil
 	eq(t, r.main("--apply"), 2)

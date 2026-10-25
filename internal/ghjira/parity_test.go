@@ -3,6 +3,7 @@ package ghjira
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"testing"
 )
@@ -71,7 +72,7 @@ func TestPythonParityDigestsAndTokens(t *testing.T) {
 		t.Errorf("binding: got %s want %s", binding(c), g.Binding)
 	}
 	for _, tk := range g.Tokens {
-		if got := token(c, tk.Kind, decodeJSON(mustMarshal(t, tk.ID))); got != tk.Token {
+		if got := token(c, OpKind(tk.Kind), fmt.Sprint(tk.ID)); got != tk.Token {
 			t.Errorf("token %s/%v: got %s want %s", tk.Kind, tk.ID, got, tk.Token)
 		}
 	}
@@ -93,12 +94,12 @@ func TestPythonParityTextConversion(t *testing.T) {
 		if m.Op != nil {
 			want = *m.Op
 		}
-		if got := trailingMarker("github", Object{"body": m.Body}); got != want {
+		if got := trailingMarker(Comment{Side: SideGitHub, Body: m.Body}); got != want {
 			t.Errorf("trailingMarker(%q) = %q, want %q", m.Body, got, want)
 		}
 	}
-	doc := Object{"body": decodeJSON(mustMarshal(t, g.JiraMarkerDoc.Doc))}
-	if trailingMarker("jira", doc) != g.JiraMarkerDoc.Op || hasMarker("jira", doc, g.JiraMarkerDoc.Op) != g.JiraMarkerDoc.Has {
+	doc := Comment{Side: SideJira, Body: decodeJSON(mustMarshal(t, g.JiraMarkerDoc.Doc))}
+	if trailingMarker(doc) != g.JiraMarkerDoc.Op || hasMarker(doc, g.JiraMarkerDoc.Op) != g.JiraMarkerDoc.Has {
 		t.Error("Jira marker parity mismatch")
 	}
 }

@@ -19,48 +19,48 @@ func testConfig(t *testing.T, extra Object) *Config {
 	return c
 }
 
-// cp deep-copies JSON-shaped values the way the real API hands out fresh objects.
-func cp(o Object) Object {
-	if o == nil {
-		return nil
-	}
-	return decodeJSON(canonical(o, false)).(Object)
+// cp deep-copies a comment the way the real API hands out fresh objects: the raw
+// body is re-decoded, so later edits to fake rows never leak into planned values.
+func cp(c Comment) Comment {
+	c.Body = decodeJSON(canonical(c.Body, false))
+	return c
 }
 
-func ghComment(id int, text string) Object {
-	return Object{"id": id, "body": text, "created_at": "2026-01-01T00:00:00Z",
-		"updated_at": "2026-01-01T00:00:00Z", "user": Object{"login": "alice"},
-		"html_url": "https://github.com/acme/test/issues/1#issuecomment-" + strconv.Itoa(id)}
+func ghComment(id int, text string) Comment {
+	return Comment{Side: SideGitHub, ID: strconv.Itoa(id), Body: text, Created: "2026-01-01T00:00:00Z",
+		Author: "alice", HTMLURL: "https://github.com/acme/test/issues/1#issuecomment-" + strconv.Itoa(id)}
 }
 
-func jiraComment(id int, text string) Object {
-	return Object{"id": strconv.Itoa(id), "body": toADF(text), "created": "2026-01-01T00:00:00Z",
-		"updated": "2026-01-01T00:00:00Z", "author": Object{"displayName": "Bob"}}
+func jiraComment(id int, text string) Comment {
+	return Comment{Side: SideJira, ID: strconv.Itoa(id), Body: toADF(text), Created: "2026-01-01T00:00:00Z", Author: "Bob"}
 }
 
-type write struct{ kind, detail string }
+type write struct {
+	kind   string
+	detail string
+}
 
 // fakeAPI simulates GitHub and Jira for one issue, with switches for failure modes.
 type fakeAPI struct {
-	source       Object
-	jira         Object
-	rows         map[string][]Object
+	source       GitHubIssue
+	jira         *JiraIssue
+	rows         map[Side][]Comment
 	writes       []write
 	loseResponse bool // perform the write, then fail as if the response was lost
 	hideJira     bool // search lags behind writes
 	githubGone   bool
 	jiraGone     bool
 	reads        []string
-	listReads    []string
+	listReads    []Side
 	refuse       []int // HTTP statuses for upcoming writes to reject without effect
 	nextID       int
 }
 
 func newFake() *fakeAPI {
 	return &fakeAPI{
-		source: Object{"id": 42, "number": 1, "title": "Original title", "body": "description",
-			"html_url": "https://github.com/acme/test/issues/1", "labels": []any{Object{"name": "sync-jira"}}},
-		rows:   map[string][]Object{"github": {}, "jira": {}},
+		source: GitHubIssue{ID: 42, Number: 1, Title: "Original title", Body: "description",
+			HTMLURL: "https://github.com/acme/test/issues/1"},
+		rows:   map[Side][]Comment{SideGitHub: {}, SideJira: {}},
 		nextID: 100,
 	}
 }
@@ -81,104 +81,116 @@ func (f *fakeAPI) lost() error {
 	return nil
 }
 
+func (f *fakeAPI) issueCopy() *GitHubIssue {
+	issue := f.source
+	return &issue
+}
+
+func (f *fakeAPI) jiraCopy() *JiraIssue {
+	if f.jira == nil {
+		return nil
+	}
+	issue := *f.jira
+	return &issue
+}
+
 func (f *fakeAPI) CheckProject() error { return nil }
 
-func (f *fakeAPI) Issues() ([]Object, error) {
+func (f *fakeAPI) Issues() ([]GitHubIssue, error) {
 	if f.githubGone {
 		return nil, nil
 	}
-	return []Object{cp(f.source)}, nil
+	return []GitHubIssue{f.source}, nil
 }
 
-func (f *fakeAPI) Issue(number int) (Object, error) {
-	if f.githubGone || idString(f.source["number"]) != strconv.Itoa(number) {
+func (f *fakeAPI) Issue(number int) (*GitHubIssue, error) {
+	if f.githubGone || f.source.Number != number {
 		return nil, nil
 	}
-	return cp(f.source), nil
+	return f.issueCopy(), nil
 }
 
-func (f *fakeAPI) FindIssue(Object) (Object, error) {
+func (f *fakeAPI) FindIssue(*GitHubIssue) (*JiraIssue, error) {
 	if f.hideJira {
 		return nil, nil
 	}
-	return cp(f.jira), nil
+	return f.jiraCopy(), nil
 }
 
-func (f *fakeAPI) JiraIssue(id string) (Object, error) {
-	if f.jiraGone || f.jira == nil || idString(f.jira["id"]) != id {
+func (f *fakeAPI) JiraIssue(id string) (*JiraIssue, error) {
+	if f.jiraGone || f.jira == nil || f.jira.ID != id {
 		return nil, nil
 	}
-	return cp(f.jira), nil
+	return f.jiraCopy(), nil
 }
 
-func (f *fakeAPI) CreateIssue(source Object) (Object, error) {
+func (f *fakeAPI) CreateIssue(source *GitHubIssue) (*JiraIssue, error) {
 	if err := f.maybeRefuse(); err != nil {
 		return nil, err
 	}
-	f.jira = Object{"id": "200", "key": "ENG-1"}
-	title, _ := source["title"].(string)
-	f.writes = append(f.writes, write{"issue", title})
+	f.jira = &JiraIssue{ID: "200", Key: "ENG-1"}
+	f.writes = append(f.writes, write{"issue", source.Title})
 	if err := f.lost(); err != nil {
 		return nil, err
 	}
-	return cp(f.jira), nil
+	return f.jiraCopy(), nil
 }
 
-func (f *fakeAPI) Comments(side string, _ Pair) ([]Object, error) {
+func (f *fakeAPI) Comments(side Side, _ Pair) ([]Comment, error) {
 	f.listReads = append(f.listReads, side)
-	out := make([]Object, len(f.rows[side]))
+	out := make([]Comment, len(f.rows[side]))
 	for i, row := range f.rows[side] {
 		out[i] = cp(row)
 	}
 	return out, nil
 }
 
-func (f *fakeAPI) find(side, id string) Object {
-	for _, row := range f.rows[side] {
-		if idString(row["id"]) == id {
-			return row
+func (f *fakeAPI) find(side Side, id string) *Comment {
+	for i := range f.rows[side] {
+		if f.rows[side][i].ID == id {
+			return &f.rows[side][i]
 		}
 	}
 	return nil
 }
 
-func (f *fakeAPI) Comment(side string, _ Pair, id string) (Object, error) {
-	f.reads = append(f.reads, side+":"+id)
+func (f *fakeAPI) Comment(side Side, _ Pair, id string) (Comment, error) {
+	f.reads = append(f.reads, string(side)+":"+id)
 	row := f.find(side, id)
 	if row == nil {
-		return nil, syncErr("missing comment")
+		return Comment{}, syncErr("missing comment")
+	}
+	return cp(*row), nil
+}
+
+func (f *fakeAPI) CreateComment(side Side, _ Pair, text string) (Comment, error) {
+	if err := f.maybeRefuse(); err != nil {
+		return Comment{}, err
+	}
+	f.nextID++
+	row := ghComment(f.nextID, text)
+	if side == SideJira {
+		row = jiraComment(f.nextID, text)
+	}
+	f.rows[side] = append(f.rows[side], row)
+	f.writes = append(f.writes, write{"create", string(side)})
+	if err := f.lost(); err != nil {
+		return Comment{}, err
 	}
 	return cp(row), nil
 }
 
-func (f *fakeAPI) CreateComment(side string, _ Pair, text string) (Object, error) {
-	if err := f.maybeRefuse(); err != nil {
-		return nil, err
-	}
-	f.nextID++
-	raw := ghComment(f.nextID, text)
-	if side == "jira" {
-		raw = jiraComment(f.nextID, text)
-	}
-	f.rows[side] = append(f.rows[side], raw)
-	f.writes = append(f.writes, write{"create", side})
-	if err := f.lost(); err != nil {
-		return nil, err
-	}
-	return cp(raw), nil
-}
-
-func (f *fakeAPI) EditComment(side string, _ Pair, id, text string) error {
+func (f *fakeAPI) EditComment(side Side, _ Pair, id, text string) error {
 	if err := f.maybeRefuse(); err != nil {
 		return err
 	}
 	row := f.find(side, id)
-	if side == "github" {
-		row["body"] = text
+	if side == SideGitHub {
+		row.Body = text
 	} else {
-		row["body"] = toADF(text)
+		row.Body = toADF(text)
 	}
-	f.writes = append(f.writes, write{"edit", side})
+	f.writes = append(f.writes, write{"edit", string(side)})
 	return f.lost()
 }
 
@@ -236,8 +248,8 @@ func (x *syncer) linked() *State {
 
 func (x *syncer) last() *State { return x.saved[len(x.saved)-1] }
 
-func kinds(entries []*Entry) []string {
-	out := make([]string, len(entries))
+func kinds(entries []*Entry) []Kind {
+	out := make([]Kind, len(entries))
 	for i, e := range entries {
 		out[i] = e.Kind
 	}

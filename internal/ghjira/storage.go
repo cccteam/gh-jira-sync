@@ -40,10 +40,10 @@ type Pair struct {
 // Operation is a journaled create: pending before dispatch, done after confirmation,
 // rejected when the service refused it with a 4xx.
 type Operation struct {
-	Kind       string `json:"kind"`
+	Kind       OpKind `json:"kind"`
 	SourceID   string `json:"source_id"`
 	GitHub     int    `json:"github"`
-	Status     string `json:"status"`
+	Status     Status `json:"status"`
 	Prefix     string `json:"prefix,omitempty"`
 	Suffix     string `json:"suffix,omitempty"`
 	Baseline   string `json:"baseline,omitempty"`
@@ -53,7 +53,7 @@ type Operation struct {
 // Link maps an original comment to its copy with the last confirmed fingerprints.
 type Link struct {
 	GitHub   int    `json:"github"`
-	Origin   string `json:"origin"`
+	Origin   Side   `json:"origin"` // side of the original; the other side holds the copy
 	Prefix   string `json:"prefix"`
 	Suffix   string `json:"suffix"`
 	Baseline string `json:"baseline"`
@@ -62,11 +62,19 @@ type Link struct {
 	JiraID   string `json:"jira_id"`
 }
 
-func (l Link) id(side string) string {
-	if side == "github" {
+func (l Link) id(side Side) string {
+	if side == SideGitHub {
 		return l.GitHubID
 	}
 	return l.JiraID
+}
+
+func (l *Link) setID(side Side, id string) {
+	if side == SideGitHub {
+		l.GitHubID = id
+	} else {
+		l.JiraID = id
+	}
 }
 
 // Stamp records issue timestamps at the time of a clean full scan.

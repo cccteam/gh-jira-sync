@@ -3,6 +3,7 @@ package ghjira
 import (
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -38,7 +39,7 @@ func TestRealGitPersistenceReloadAndCompetingWriter(t *testing.T) {
 		t.Fatal("competing writer pushed")
 	}
 	state2 := state.clone()
-	state2.Operations["example"] = Operation{Status: "pending"}
+	state2.Operations["example"] = Operation{Kind: OpIssue, SourceID: "42", GitHub: 1, Status: StatusPending}
 	if b.Save(state2) == nil {
 		t.Fatal("competing writer pushed")
 	}
@@ -51,5 +52,28 @@ func TestRealGitPersistenceReloadAndCompetingWriter(t *testing.T) {
 func TestOnlySyncStateBranchSupported(t *testing.T) {
 	if _, err := NewGitStore("main"); err == nil {
 		t.Fatal("other branches must be rejected")
+	}
+}
+
+func TestStateRejectsUnknownEnumValues(t *testing.T) {
+	valid := NewState(testConfig(t, nil))
+	op := token(testConfig(t, nil), OpIssue, "42")
+	valid.Operations[op] = Operation{Kind: OpIssue, SourceID: "42", GitHub: 1, Status: StatusPending}
+	base := string(canonical(valid, false))
+	if _, err := ParseState([]byte(base)); err != nil {
+		t.Fatalf("valid state rejected: %v", err)
+	}
+	for _, bad := range []struct{ from, to string }{
+		{`"status":"pending"`, `"status":"bogus"`},
+		{`"kind":"issue"`, `"kind":"comment_gitlab"`},
+	} {
+		if _, err := ParseState([]byte(strings.Replace(base, bad.from, bad.to, 1))); err == nil {
+			t.Errorf("state with %s accepted", bad.to)
+		}
+	}
+	link := `{"version":2,"binding":"x","pairs":{},"operations":{},"comments":{"op":{"github":1,"origin":"gitlab",
+		"prefix":"","suffix":"","baseline":"","copy_hash":"","github_id":"1","jira_id":"1"}}}`
+	if _, err := ParseState([]byte(link)); err == nil {
+		t.Error("link with unknown origin accepted")
 	}
 }

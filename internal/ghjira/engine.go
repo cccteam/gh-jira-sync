@@ -10,47 +10,38 @@ import (
 	"time"
 )
 
-var (
-	writeKinds   = map[string]bool{"create_issue": true, "create_comment": true, "edit_comment": true}
-	reviewKinds  = map[string]bool{"blocked": true, "unavailable": true}
-	passiveKinds = map[string]bool{"blocked": true, "noop": true, "excluded": true, "unavailable": true,
-		"deferred": true, "acknowledged": true, "unchanged": true}
-	// 4xx answers about one item; anything else (auth, permissions, rate limits) affects every write.
-	itemRejections = map[int]bool{400: true, 404: true, 409: true, 413: true, 422: true}
-	// Fields that drive sync decisions; reactions or counters changing mid-run do not matter.
-	relevantFields = []string{"id", "number", "title", "body", "html_url", "user", "author", "created",
-		"created_at", "visibility", "jsdPublic", "properties"}
-	sides = []string{"github", "jira"}
-)
+// 4xx answers about one item; anything else (auth, permissions, rate limits) affects every write.
+var itemRejections = map[int]bool{400: true, 404: true, 409: true, 413: true, 422: true}
 
 const textLimit = 30000
 
 // Entry is one planned decision. Exported fields form the report; the rest carry
 // what apply needs and never reach reports (they can hold comment text).
 type Entry struct {
-	GitHub            int    `json:"github"`
-	Operation         string `json:"operation"`
-	Kind              string `json:"kind"`
-	Reason            string `json:"reason,omitempty"`
-	Source            string `json:"source,omitempty"`
-	CommentID         string `json:"comment_id,omitempty"`
-	Destination       string `json:"destination,omitempty"`
-	PreviousRejection int    `json:"previous_rejection,omitempty"`
-	Outcome           string `json:"outcome,omitempty"`
+	GitHub            int     `json:"github"`
+	Operation         string  `json:"operation"`
+	Kind              Kind    `json:"kind"`
+	Reason            string  `json:"reason,omitempty"`
+	Source            Side    `json:"source,omitempty"`
+	CommentID         string  `json:"comment_id,omitempty"`
+	Destination       Side    `json:"destination,omitempty"`
+	PreviousRejection int     `json:"previous_rejection,omitempty"`
+	Outcome           Outcome `json:"outcome,omitempty"`
 
-	source      Object // GitHub issue or source comment as planned
-	pair        Pair
-	link        Link
-	raw         map[string]Object // both sides of a linked comment as planned
-	text        string
-	prefix      string
+	issue       *GitHubIssue     // source issue as planned
+	comment     Comment          // source comment as planned
+	pair        Pair             // pair to create, or the pair a comment belongs to
+	link        Link             // tracked comment mapping
+	raw         map[Side]Comment // both sides of a linked comment as planned
+	text        string           // comment text to copy or apply
+	prefix      string           // copy envelope
 	suffix      string
-	destination Object // copy found for a pending comment
-	record      Operation
-	stamp       Stamp
+	destination Comment   // copy found for a pending comment
+	record      Operation // pending journal entry being recovered
+	stamp       Stamp     // issue timestamps of a clean full scan
 }
 
-func (e *Entry) block(reason string) { e.Kind, e.Reason = "blocked", reason }
+func (e *Entry) block(reason string) { e.Kind, e.Reason = KindBlocked, reason }
 
 func NewState(c *Config) *State {
 	s := &State{Version: 2, Binding: binding(c)}
@@ -76,13 +67,13 @@ func validateState(s *State, c *Config) error {
 		jiraIDs[p.JiraID] = true
 	}
 	for op, r := range s.Operations {
-		if (r.Status != "pending" && r.Status != "done" && r.Status != "rejected") || op != token(c, r.Kind, r.SourceID) {
+		if !r.Status.valid() || op != token(c, r.Kind, r.SourceID) {
 			return syncErr("Invalid operation journal")
 		}
 	}
-	seen := map[string]map[string]bool{"github": {}, "jira": {}}
+	seen := map[Side]map[string]bool{SideGitHub: {}, SideJira: {}}
 	for op, link := range s.Comments {
-		if r, ok := s.Operations[op]; !ok || r.Status != "done" || (link.Origin != "github" && link.Origin != "jira") {
+		if r, ok := s.Operations[op]; !ok || r.Status != StatusDone || !link.Origin.valid() {
 			return syncErr("Invalid comment mapping")
 		}
 		if _, ok := s.Pairs[strconv.Itoa(link.GitHub)]; !ok || len(link.Baseline) != 64 {
@@ -99,23 +90,14 @@ func validateState(s *State, c *Config) error {
 	return nil
 }
 
-func issuePair(source, jira Object) Pair {
-	number, _ := strconv.Atoi(idString(source["number"]))
-	key, _ := jira["key"].(string)
-	return Pair{GitHub: number, GitHubID: idString(source["id"]), JiraID: idString(jira["id"]), JiraKey: key}
-}
-
-func other(side string) string {
-	if side == "github" {
-		return "jira"
-	}
-	return "github"
+func issuePair(source *GitHubIssue, jira *JiraIssue) Pair {
+	return Pair{GitHub: source.Number, GitHubID: source.idString(), JiraID: jira.ID, JiraKey: jira.Key}
 }
 
 // content is a comment's text without the copy envelope.
-func content(side string, raw Object, link Link) (string, error) {
-	text, err := commentText(side, raw)
-	if err != nil || side == link.Origin {
+func content(comment Comment, link Link) (string, error) {
+	text, err := comment.Text()
+	if err != nil || comment.Side == link.Origin {
 		return text, err
 	}
 	if !strings.HasPrefix(text, link.Prefix) || !strings.HasSuffix(text, link.Suffix) || len(text) < len(link.Prefix)+len(link.Suffix) {
@@ -124,43 +106,28 @@ func content(side string, raw Object, link Link) (string, error) {
 	return text[len(link.Prefix) : len(text)-len(link.Suffix)], nil
 }
 
-func rendered(side, text string, link Link) string {
+func rendered(side Side, text string, link Link) string {
 	if side == link.Origin {
 		return text
 	}
 	return link.Prefix + text + link.Suffix
 }
 
-func relevant(raw Object) any {
-	if raw == nil {
-		return nil
-	}
-	out := Object{}
-	for _, k := range relevantFields {
-		out[k] = raw[k]
-	}
-	return out
-}
-
 func retryNote(e *Entry, old *Operation) {
-	if old != nil && old.Status == "rejected" {
+	if old != nil && old.Status == StatusRejected {
 		e.PreviousRejection = old.HTTPStatus
 	}
 }
 
-func envelope(c *Config, side string, raw Object, pair Pair, op string) (string, string) {
-	var author, link string
-	if side == "github" {
-		author, _ = asObject(raw["user"])["login"].(string)
-		link = idString(raw["html_url"])
-	} else {
-		author, _ = asObject(raw["author"])["displayName"].(string)
-		link = c.JiraURL + "/browse/" + pair.JiraKey + "?focusedCommentId=" + idString(raw["id"])
-	}
+func envelope(c *Config, comment Comment, pair Pair, op string) (string, string) {
+	author, link := comment.Author, comment.HTMLURL
 	if author == "" {
 		author = "unknown"
 	}
-	prefix := "Synced from " + side + " — " + author + " (" + createdAt(raw) + ")\nSource: " + link + "\n\n"
+	if comment.Side == SideJira {
+		link = c.JiraURL + "/browse/" + pair.JiraKey + "?focusedCommentId=" + comment.ID
+	}
+	prefix := "Synced from " + string(comment.Side) + " — " + author + " (" + comment.Created + ")\nSource: " + link + "\n\n"
 	return prefix, "\n\n" + marker(op)
 }
 
@@ -178,7 +145,7 @@ func quiet(c *Config, s *State, n string, stamp Stamp, now time.Time) bool {
 	}
 	number, _ := strconv.Atoi(n)
 	for _, r := range s.Operations {
-		if r.Status != "done" && r.GitHub == number {
+		if r.Status != StatusDone && r.GitHub == number {
 			return false
 		}
 	}
@@ -210,13 +177,13 @@ func Plan(c *Config, s *State, api API, now time.Time) ([]*Entry, error) {
 	}
 	// Selected issues in API order, then tracked pairs not selected, by number.
 	var order []string
-	issues := map[string]Object{}
-	for _, i := range listed {
-		n := idString(i["number"])
+	issues := map[string]*GitHubIssue{}
+	for i := range listed {
+		n := strconv.Itoa(listed[i].Number)
 		if _, dup := issues[n]; !dup {
 			order = append(order, n)
 		}
-		issues[n] = i
+		issues[n] = &listed[i]
 	}
 	tracked := sortedKeys(s.Pairs)
 	sort.SliceStable(tracked, func(a, b int) bool { return len(tracked[a]) < len(tracked[b]) })
@@ -224,23 +191,22 @@ func Plan(c *Config, s *State, api API, now time.Time) ([]*Entry, error) {
 		if _, ok := issues[n]; ok {
 			continue
 		}
-		number, _ := strconv.Atoi(n)
-		issue, err := api.Issue(number)
+		issue, err := api.Issue(s.Pairs[n].GitHub)
 		if err != nil {
 			return nil, err
 		}
 		order = append(order, n)
-		issues[n] = issue
+		issues[n] = issue // nil when deleted or transferred
 	}
 	for _, n := range order {
 		source := issues[n]
-		if _, pr := source["pull_request"]; source != nil && pr {
+		if source != nil && source.PullRequest != nil {
 			continue
 		}
 		number, _ := strconv.Atoi(n)
 		pair, tracked := s.Pairs[n]
 		if !tracked {
-			e, err := planIssue(c, s, api, number, source)
+			e, err := planIssue(c, s, api, source)
 			if err != nil {
 				return nil, err
 			}
@@ -249,31 +215,29 @@ func Plan(c *Config, s *State, api API, now time.Time) ([]*Entry, error) {
 			entries = append(entries, e)
 			continue
 		}
-		issueOp := token(c, "issue", pair.GitHubID)
+		issueOp := token(c, OpIssue, pair.GitHubID)
 		// One vanished pair is reported for review; it must not stall every other pair.
-		var jira Object
-		if source != nil && idString(source["id"]) == pair.GitHubID {
+		var jira *JiraIssue
+		if source != nil && source.idString() == pair.GitHubID {
 			if jira, err = api.JiraIssue(pair.JiraID); err != nil {
 				return nil, err
 			}
 		}
-		if jira == nil || idString(jira["id"]) != pair.JiraID {
-			entries = append(entries, &Entry{GitHub: number, Operation: issueOp, Kind: "unavailable",
+		if jira == nil || jira.ID != pair.JiraID {
+			entries = append(entries, &Entry{GitHub: number, Operation: issueOp, Kind: KindUnavailable,
 				Reason: "Linked issue deleted, transferred, moved, or inaccessible; comment sync paused"})
 			continue
 		}
 		if !c.Comments {
 			continue
 		}
-		stamp := Stamp{}
-		stamp.GitHub, _ = source["updated_at"].(string)
-		stamp.Jira, _ = asObject(jira["fields"])["updated"].(string)
+		stamp := Stamp{GitHub: source.UpdatedAt, Jira: jira.Fields.Updated}
 		if quiet(c, s, n, stamp, now) {
-			entries = append(entries, &Entry{GitHub: number, Operation: issueOp, Kind: "unchanged",
+			entries = append(entries, &Entry{GitHub: number, Operation: issueOp, Kind: KindUnchanged,
 				Reason: "No issue activity since full scan at " + s.Reconciled[n].Scanned})
 			continue
 		}
-		pairEntries, err := planComments(c, s, api, number, pair, visited)
+		pairEntries, err := planComments(c, s, api, pair, visited)
 		if err != nil {
 			return nil, err
 		}
@@ -281,53 +245,52 @@ func Plan(c *Config, s *State, api API, now time.Time) ([]*Entry, error) {
 		// A pair with nothing to do or review may skip comment reads until its issues change.
 		clean := stamp.GitHub != "" && stamp.Jira != ""
 		for _, e := range pairEntries {
-			clean = clean && (e.Kind == "noop" || e.Kind == "excluded")
+			clean = clean && (e.Kind == KindNoop || e.Kind == KindExcluded)
 		}
 		if clean {
 			stamp.Scanned = now.UTC().Format("2006-01-02T15:04:05.000000-07:00")
-			entries = append(entries, &Entry{GitHub: number, Operation: issueOp, Kind: "reconciled", stamp: stamp})
+			entries = append(entries, &Entry{GitHub: number, Operation: issueOp, Kind: KindReconciled, stamp: stamp})
 		}
 	}
 	for _, op := range sortedKeys(s.Operations) {
-		if r := s.Operations[op]; r.Status == "pending" && !visited[op] {
-			entries = append(entries, &Entry{Kind: "blocked", Operation: op, GitHub: r.GitHub,
+		if r := s.Operations[op]; r.Status == StatusPending && !visited[op] {
+			entries = append(entries, &Entry{Kind: KindBlocked, Operation: op, GitHub: r.GitHub,
 				Reason: "Pending operation source absent or excluded; review journal"})
 		}
 	}
 	// Writes past the budget wait for a later pass, so a large backfill still makes progress.
 	budget := c.MaxOperations
 	for _, e := range entries {
-		if writeKinds[e.Kind] {
+		if e.Kind.writes() {
 			if budget > 0 {
 				budget--
 			} else {
-				e.Kind, e.Reason = "deferred", "Over max_operations="+strconv.Itoa(c.MaxOperations)+"; planned again next run"
+				e.Kind, e.Reason = KindDeferred, "Over max_operations="+strconv.Itoa(c.MaxOperations)+"; planned again next run"
 			}
 		}
 	}
 	return entries, nil
 }
 
-func planIssue(c *Config, s *State, api API, number int, source Object) (*Entry, error) {
-	op := token(c, "issue", source["id"])
-	e := &Entry{GitHub: number, Operation: op, source: source}
+func planIssue(c *Config, s *State, api API, source *GitHubIssue) (*Entry, error) {
+	op := token(c, OpIssue, source.idString())
+	e := &Entry{GitHub: source.Number, Operation: op, issue: source}
 	existing, err := api.FindIssue(source)
 	if err != nil {
 		return nil, err
 	}
 	old, journaled := s.Operations[op]
-	title, _ := source["title"].(string)
 	switch {
 	case existing != nil:
-		e.Kind, e.pair = "link_issue", issuePair(source, existing)
-	case journaled && old.Status != "rejected":
+		e.Kind, e.pair = KindLinkIssue, issuePair(source, existing)
+	case journaled && old.Status != StatusRejected:
 		e.block("Issue creation outcome unknown or destination missing; never retry automatically")
-	case runeLen(title) > 255:
+	case runeLen(source.Title) > 255:
 		e.block("GitHub title exceeds Jira summary limit")
-	case runeLen("Source: "+idString(source["html_url"])+"\n\n"+normalized(source["body"])) > textLimit:
+	case runeLen("Source: "+source.HTMLURL+"\n\n"+normalized(source.Body)) > textLimit:
 		e.block("Issue description exceeds conservative 30000 character limit")
 	default:
-		e.Kind = "create_issue"
+		e.Kind = KindCreateIssue
 		if journaled {
 			retryNote(e, &old)
 		}
@@ -335,50 +298,48 @@ func planIssue(c *Config, s *State, api API, number int, source Object) (*Entry,
 	return e, nil
 }
 
-func planComments(c *Config, s *State, api API, number int, pair Pair, visited map[string]bool) ([]*Entry, error) {
+func planComments(c *Config, s *State, api API, pair Pair, visited map[string]bool) ([]*Entry, error) {
 	var entries []*Entry
-	lists := map[string][]Object{}
-	byID := map[string]map[string]Object{}
+	lists := map[Side][]Comment{}
+	byID := map[Side]map[string]Comment{}
 	for _, side := range sides {
 		rows, err := api.Comments(side, pair)
 		if err != nil {
 			return nil, err
 		}
 		lists[side] = rows
-		byID[side] = map[string]Object{}
+		byID[side] = map[string]Comment{}
 		for _, row := range rows {
-			byID[side][idString(row["id"])] = row
+			byID[side][row.ID] = row
 		}
 	}
-	paired := map[string]map[string]bool{"github": {}, "jira": {}}
+	paired := map[Side]map[string]bool{SideGitHub: {}, SideJira: {}}
 	for _, op := range sortedKeys(s.Comments) {
 		link := s.Comments[op]
-		if link.GitHub != number {
+		if link.GitHub != pair.GitHub {
 			continue
 		}
 		visited[op] = true
 		for _, side := range sides {
 			paired[side][link.id(side)] = true
 		}
-		e := &Entry{GitHub: number, Operation: op, Kind: "noop", pair: pair, link: link}
+		e := &Entry{GitHub: pair.GitHub, Operation: op, Kind: KindNoop, pair: pair, link: link}
 		entries = append(entries, e)
 		if err := planLinked(e, link, byID); err != nil {
 			e.block(err.Error())
 		}
 	}
 	for _, side := range sides {
-		dest := other(side)
-		for _, raw := range lists[side] {
-			id := idString(raw["id"])
-			if paired[side][id] || hasMarker(side, raw, "") {
+		for _, row := range lists[side] {
+			if paired[side][row.ID] || hasMarker(row, "") {
 				continue
 			}
-			op := token(c, "comment_"+side, raw["id"])
+			op := token(c, commentOp(side), row.ID)
 			visited[op] = true
-			e := &Entry{GitHub: number, Operation: op, Source: side, CommentID: id, Destination: dest,
-				source: raw, pair: pair}
+			e := &Entry{GitHub: pair.GitHub, Operation: op, Source: side, CommentID: row.ID, Destination: side.Other(),
+				comment: row, pair: pair}
 			entries = append(entries, e)
-			if err := planNewComment(c, s, e, lists[dest]); err != nil {
+			if err := planNewComment(c, s, e, lists[side.Other()]); err != nil {
 				e.block(err.Error())
 			}
 		}
@@ -387,71 +348,71 @@ func planComments(c *Config, s *State, api API, number int, pair Pair, visited m
 }
 
 // planLinked decides what a tracked comment pair needs. Errors block only this entry.
-func planLinked(e *Entry, link Link, byID map[string]map[string]Object) error {
-	raw := map[string]Object{}
+func planLinked(e *Entry, link Link, byID map[Side]map[string]Comment) error {
+	raw := map[Side]Comment{}
 	for _, side := range sides {
 		row, ok := byID[side][link.id(side)]
 		if !ok {
-			e.Kind, e.Reason = "unavailable", "Comment removed or inaccessible; no deletion or recreation"
+			e.Kind, e.Reason = KindUnavailable, "Comment removed or inaccessible; no deletion or recreation"
 			return nil
 		}
 		raw[side] = row
 	}
-	if restricted(raw["jira"]) {
+	if raw[SideJira].Restricted {
 		e.block("Jira comment restricted; no export or further edits")
 		return nil
 	}
-	text, hashes := map[string]string{}, map[string]string{}
+	text, hashes := map[Side]string{}, map[Side]string{}
 	for _, side := range sides {
-		t, err := content(side, raw[side], link)
+		t, err := content(raw[side], link)
 		if err != nil {
 			return err
 		}
 		text[side], hashes[side] = t, digest(t)
 	}
 	origin := link.Origin
-	dest := other(origin)
+	dest := origin.Other()
 	expectedText := rendered(dest, text[origin], link)
 	var expectedBody any = expectedText
-	if dest == "jira" {
+	if dest == SideJira {
 		expectedBody = toADF(expectedText)
 	}
 	// Raw body fingerprints protect formatting edits to copied comments.
-	changedCopy := digest(raw[dest]["body"]) != link.CopyHash
-	same := hashes["github"] == hashes["jira"]
-	recoveredEdit := same && hashes[origin] != link.Baseline && sameJSON(raw[dest]["body"], expectedBody)
+	changedCopy := digest(raw[dest].Body) != link.CopyHash
+	same := hashes[SideGitHub] == hashes[SideJira]
+	recoveredEdit := same && hashes[origin] != link.Baseline && sameJSON(raw[dest].Body, expectedBody)
 	switch {
 	case changedCopy && !recoveredEdit:
 		e.block("Copied comment edited; preserve it for manual review")
 	case same:
 		// Steady state stays a noop; only recovered edits need a confirming re-read.
 		if changedCopy || hashes[origin] != link.Baseline {
-			e.Kind, e.raw = "confirm_comment", raw
+			e.Kind, e.raw = KindConfirmComment, raw
 		}
 	case hashes[dest] != link.Baseline:
 		e.block("Copied comment edited; preserve it for manual review")
 	case runeLen(expectedText) > textLimit:
 		e.block("Comment exceeds conservative 30000 character limit")
 	default:
-		e.Kind, e.Destination, e.raw, e.text = "edit_comment", dest, raw, text[origin]
+		e.Kind, e.Destination, e.raw, e.text = KindEditComment, dest, raw, text[origin]
 	}
 	return nil
 }
 
 // planNewComment decides what an untracked original comment needs. Errors block only this entry.
-func planNewComment(c *Config, s *State, e *Entry, destRows []Object) error {
-	var matches []Object
+func planNewComment(c *Config, s *State, e *Entry, destRows []Comment) error {
+	var matches []Comment
 	for _, row := range destRows {
-		if hasMarker(e.Destination, row, e.Operation) {
+		if hasMarker(row, e.Operation) {
 			matches = append(matches, row)
 		}
 	}
 	old, journaled := s.Operations[e.Operation]
-	pending := journaled && old.Status == "pending"
+	pending := journaled && old.Status == StatusPending
 	switch {
 	case len(matches) > 1:
 		e.block("Duplicate comment markers; review manually")
-	case journaled && old.Status == "done":
+	case journaled && old.Status == StatusDone:
 		return syncErr("Completed comment operation has no mapping")
 	case len(matches) == 1 && !pending:
 		e.block("Copy exists without a pending journal entry; restore state or review")
@@ -460,29 +421,29 @@ func planNewComment(c *Config, s *State, e *Entry, destRows []Object) error {
 		if _, err := recoveredLink(e, old, matches[0]); err != nil {
 			return err
 		}
-		e.Kind, e.destination, e.record = "recover_comment", matches[0], old
+		e.Kind, e.destination, e.record = KindRecoverComment, matches[0], old
 	case pending:
 		e.block("Comment creation outcome unknown; never retry automatically")
-	case e.Source == "jira" && restricted(e.source):
-		e.Kind, e.Reason = "excluded", "Restricted Jira comment"
+	case e.comment.Restricted:
+		e.Kind, e.Reason = KindExcluded, "Restricted Jira comment"
 	default:
-		eligible, err := eligibleComment(c, e.source)
+		eligible, err := eligibleComment(c, e.comment)
 		if err != nil {
 			return err
 		}
 		if !eligible {
-			e.Kind, e.Reason = "excluded", "Before comments_since"
+			e.Kind, e.Reason = KindExcluded, "Before comments_since"
 			return nil
 		}
-		text, err := commentText(e.Source, e.source)
+		text, err := e.comment.Text()
 		if err != nil {
 			return err
 		}
-		prefix, suffix := envelope(c, e.Source, e.source, e.pair, e.Operation)
+		prefix, suffix := envelope(c, e.comment, e.pair, e.Operation)
 		if runeLen(prefix+text+suffix) > textLimit {
 			return syncErr("Comment exceeds conservative 30000 character limit")
 		}
-		e.Kind, e.text, e.prefix, e.suffix = "create_comment", text, prefix, suffix
+		e.Kind, e.text, e.prefix, e.suffix = KindCreateComment, text, prefix, suffix
 		if journaled {
 			retryNote(e, &old)
 		}
@@ -490,19 +451,12 @@ func planNewComment(c *Config, s *State, e *Entry, destRows []Object) error {
 	return nil
 }
 
-func recoveredLink(e *Entry, record Operation, destination Object) (Link, error) {
+func recoveredLink(e *Entry, record Operation, destination Comment) (Link, error) {
 	link := Link{GitHub: e.GitHub, Origin: e.Source, Prefix: record.Prefix, Suffix: record.Suffix,
-		Baseline: record.Baseline, CopyHash: digest(destination["body"])}
-	setID := func(side, id string) {
-		if side == "github" {
-			link.GitHubID = id
-		} else {
-			link.JiraID = id
-		}
-	}
-	setID(e.Source, record.SourceID)
-	setID(e.Destination, idString(destination["id"]))
-	text, err := content(e.Destination, destination, link)
+		Baseline: record.Baseline, CopyHash: digest(destination.Body)}
+	link.setID(e.Source, record.SourceID)
+	link.setID(e.Destination, destination.ID)
+	text, err := content(destination, link)
 	if err != nil {
 		return Link{}, err
 	}
@@ -512,13 +466,13 @@ func recoveredLink(e *Entry, record Operation, destination Object) (Link, error)
 	return link, nil
 }
 
-func finishComment(s *State, e *Entry, record Operation, destination Object) error {
+func finishComment(s *State, e *Entry, record Operation, destination Comment) error {
 	link, err := recoveredLink(e, record, destination)
 	if err != nil {
 		return err
 	}
 	s.Comments[e.Operation] = link
-	record.Status = "done"
+	record.Status = StatusDone
 	s.Operations[e.Operation] = record
 	return nil
 }
@@ -526,12 +480,12 @@ func finishComment(s *State, e *Entry, record Operation, destination Object) err
 // reject records a refused write: a 4xx proves nothing was created, so the intent
 // becomes retryable instead of blocking forever.
 func reject(s *State, e *Entry, record Operation, status int, cause error, save func(*State) error) error {
-	record.Status, record.HTTPStatus = "rejected", status
+	record.Status, record.HTTPStatus = StatusRejected, status
 	s.Operations[e.Operation] = record
 	if err := save(s); err != nil {
 		return err
 	}
-	e.Outcome = "rejected"
+	e.Outcome = OutcomeRejected
 	e.Reason = "Rejected with HTTP " + strconv.Itoa(status) + "; fix the cause, retried next run"
 	if !itemRejections[status] {
 		return cause
@@ -544,7 +498,7 @@ func Acknowledge(state *State, entries []*Entry, ops []string) (*State, error) {
 	s := state.clone()
 	current := map[string]*Entry{}
 	for _, e := range entries {
-		if reviewKinds[e.Kind] {
+		if e.Kind.needsReview() {
 			current[e.Operation] = e
 		}
 	}
@@ -560,7 +514,7 @@ func Acknowledge(state *State, entries []*Entry, ops []string) (*State, error) {
 	for op, reason := range acks {
 		if e, ok := current[op]; ok && e.Reason == reason {
 			s.Acknowledged[op] = reason
-			e.Kind = "acknowledged"
+			e.Kind = KindAcknowledged
 		}
 	}
 	return s, nil
@@ -574,19 +528,19 @@ func Apply(c *Config, state *State, api API, entries []*Entry, save func(*State)
 		return nil, err
 	}
 	for _, e := range entries {
-		if passiveKinds[e.Kind] {
+		if e.Kind.passive() {
 			continue
 		}
 		var err error
 		switch e.Kind {
-		case "reconciled":
+		case KindReconciled:
 			// Saved with the final checkpoint; losing it only costs one extra scan.
 			s.Reconciled[strconv.Itoa(e.GitHub)] = e.stamp
-		case "create_issue", "link_issue":
+		case KindCreateIssue, KindLinkIssue:
 			err = applyIssue(s, api, e, save)
-		case "create_comment", "recover_comment":
+		case KindCreateComment, KindRecoverComment:
 			err = applyNewComment(s, api, e, save)
-		case "edit_comment", "confirm_comment":
+		case KindEditComment, KindConfirmComment:
 			err = applyLinked(s, api, e, save)
 		}
 		if err != nil {
@@ -601,16 +555,16 @@ func applyIssue(s *State, api API, e *Entry, save func(*State) error) error {
 	if err != nil {
 		return err
 	}
-	if !sameJSON(relevant(source), relevant(e.source)) {
+	if !source.sameContent(e.issue) {
 		return syncErr("GitHub issue changed after plan; rerun")
 	}
 	existing, err := api.FindIssue(source)
 	if err != nil {
 		return err
 	}
-	record := Operation{Kind: "issue", SourceID: idString(source["id"]), GitHub: e.GitHub, Status: "pending"}
-	if e.Kind == "link_issue" {
-		if existing == nil || idString(existing["id"]) != e.pair.JiraID {
+	record := Operation{Kind: OpIssue, SourceID: source.idString(), GitHub: e.GitHub, Status: StatusPending}
+	if e.Kind == KindLinkIssue {
+		if existing == nil || existing.ID != e.pair.JiraID {
 			return syncErr("Jira identity changed after plan")
 		}
 	} else if existing == nil {
@@ -627,7 +581,7 @@ func applyIssue(s *State, api API, e *Entry, save func(*State) error) error {
 		}
 	}
 	s.Pairs[strconv.Itoa(e.GitHub)] = issuePair(source, existing)
-	record.Status = "done"
+	record.Status = StatusDone
 	s.Operations[e.Operation] = record
 	return save(s)
 }
@@ -637,13 +591,13 @@ func applyNewComment(s *State, api API, e *Entry, save func(*State) error) error
 	if err != nil {
 		return err
 	}
-	var copies []Object
+	var copies []Comment
 	for _, row := range rows {
-		if hasMarker(e.Destination, row, e.Operation) {
+		if hasMarker(row, e.Operation) {
 			copies = append(copies, row)
 		}
 	}
-	if e.Kind == "recover_comment" {
+	if e.Kind == KindRecoverComment {
 		if len(copies) != 1 {
 			return syncErr("Pending comment recovery changed after plan")
 		}
@@ -655,34 +609,35 @@ func applyNewComment(s *State, api API, e *Entry, save func(*State) error) error
 	if len(copies) > 0 {
 		return syncErr("Comment copy appeared after plan; rerun")
 	}
-	raw, err := api.Comment(e.Source, e.pair, e.CommentID)
+	source, err := api.Comment(e.Source, e.pair, e.CommentID)
 	if err != nil {
 		return err
 	}
-	if !sameJSON(relevant(raw), relevant(e.source)) {
+	if !source.sameAs(e.comment) {
 		return syncErr("Source comment changed after plan; rerun")
 	}
-	record := Operation{Kind: "comment_" + e.Source, SourceID: e.CommentID, GitHub: e.GitHub, Status: "pending",
+	record := Operation{Kind: commentOp(e.Source), SourceID: e.CommentID, GitHub: e.GitHub, Status: StatusPending,
 		Prefix: e.prefix, Suffix: e.suffix, Baseline: digest(e.text)}
 	s.Operations[e.Operation] = record
 	if err := save(s); err != nil {
 		return err
 	}
-	result, err := api.CreateComment(e.Destination, e.pair, e.prefix+e.text+e.suffix)
+	created, err := api.CreateComment(e.Destination, e.pair, e.prefix+e.text+e.suffix)
 	if status, refused := refusedStatus(err); refused {
 		return reject(s, e, record, status, err, save)
 	}
 	if err != nil {
 		return err
 	}
-	if result == nil {
+	if created.ID == "" {
 		return syncErr("Invalid API response; write outcome may be unknown")
 	}
 	// Read back the individual comment; never assume a POST response is complete.
-	if result, err = api.Comment(e.Destination, e.pair, idString(result["id"])); err != nil {
+	copied, err := api.Comment(e.Destination, e.pair, created.ID)
+	if err != nil {
 		return err
 	}
-	if err := finishComment(s, e, record, result); err != nil {
+	if err := finishComment(s, e, record, copied); err != nil {
 		return err
 	}
 	return save(s)
@@ -690,8 +645,8 @@ func applyNewComment(s *State, api API, e *Entry, save func(*State) error) error
 
 func applyLinked(s *State, api API, e *Entry, save func(*State) error) error {
 	link := e.link
-	read := func() (map[string]Object, error) {
-		raw := map[string]Object{}
+	read := func() (map[Side]Comment, error) {
+		raw := map[Side]Comment{}
 		for _, side := range sides {
 			row, err := api.Comment(side, e.pair, link.id(side))
 			if err != nil {
@@ -706,15 +661,15 @@ func applyLinked(s *State, api API, e *Entry, save func(*State) error) error {
 		return err
 	}
 	for _, side := range sides {
-		if !sameJSON(relevant(raw[side]), relevant(e.raw[side])) {
+		if !raw[side].sameAs(e.raw[side]) {
 			return syncErr("Comment changed after plan; rerun")
 		}
 	}
-	if e.Kind == "edit_comment" {
+	if e.Kind == KindEditComment {
 		err := api.EditComment(e.Destination, e.pair, link.id(e.Destination), rendered(e.Destination, e.text, link))
 		if status, refused := refusedStatus(err); refused && itemRejections[status] {
 			// Edits are not journaled; a refused edit simply stays planned for next run.
-			e.Outcome, e.Reason = "rejected", "Edit rejected with HTTP "+strconv.Itoa(status)+"; retried next run"
+			e.Outcome, e.Reason = OutcomeRejected, "Edit rejected with HTTP "+strconv.Itoa(status)+"; retried next run"
 			return nil
 		}
 		if err != nil {
@@ -724,14 +679,14 @@ func applyLinked(s *State, api API, e *Entry, save func(*State) error) error {
 			return err
 		}
 	}
-	if restricted(raw["jira"]) {
+	if raw[SideJira].Restricted {
 		return syncErr("Jira comment visibility changed")
 	}
-	g, err := content("github", raw["github"], link)
+	g, err := content(raw[SideGitHub], link)
 	if err != nil {
 		return err
 	}
-	j, err := content("jira", raw["jira"], link)
+	j, err := content(raw[SideJira], link)
 	if err != nil {
 		return err
 	}
@@ -740,7 +695,7 @@ func applyLinked(s *State, api API, e *Entry, save func(*State) error) error {
 	}
 	stored := s.Comments[e.Operation]
 	stored.Baseline = digest(g)
-	stored.CopyHash = digest(raw[other(link.Origin)]["body"])
+	stored.CopyHash = digest(raw[link.Origin.Other()].Body)
 	s.Comments[e.Operation] = stored
 	return save(s)
 }

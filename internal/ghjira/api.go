@@ -17,17 +17,17 @@ import (
 // API is everything planning and applying need from GitHub and Jira.
 type API interface {
 	CheckProject() error
-	Issues() ([]Object, error)
+	Issues() ([]GitHubIssue, error)
 	// Issue returns nil when the issue was deleted or transferred.
-	Issue(number int) (Object, error)
-	FindIssue(source Object) (Object, error)
+	Issue(number int) (*GitHubIssue, error)
+	FindIssue(source *GitHubIssue) (*JiraIssue, error)
 	// JiraIssue returns nil when the issue was deleted, hidden, or moved out of the project.
-	JiraIssue(id string) (Object, error)
-	CreateIssue(source Object) (Object, error)
-	Comments(side string, pair Pair) ([]Object, error)
-	Comment(side string, pair Pair, id string) (Object, error)
-	CreateComment(side string, pair Pair, text string) (Object, error)
-	EditComment(side string, pair Pair, id, text string) error
+	JiraIssue(id string) (*JiraIssue, error)
+	CreateIssue(source *GitHubIssue) (*JiraIssue, error)
+	Comments(side Side, pair Pair) ([]Comment, error)
+	Comment(side Side, pair Pair, id string) (Comment, error)
+	CreateComment(side Side, pair Pair, text string) (Comment, error)
+	EditComment(side Side, pair Pair, id, text string) error
 }
 
 // HTTP is a small JSON REST client. Only GET requests are automatically retried.
@@ -64,19 +64,20 @@ func (h *HTTP) retryDelay(headers http.Header, attempt int) time.Duration {
 	return time.Duration(math.Pow(2, float64(attempt))) * time.Second
 }
 
-// Request sends JSON and decodes a JSON response (nil for an empty body).
-func (h *HTTP) Request(method, path string, body any) (any, error) {
+// Do sends body as JSON and decodes the response into out (unless out is nil).
+// A response that does not fit out's type is an error, never silently zero values.
+func (h *HTTP) Do(method, path string, body, out any) error {
 	var data []byte
 	if body != nil {
 		var err error
 		if data, err = json.Marshal(body); err != nil {
-			return nil, syncErr("Invalid request body")
+			return syncErr("Invalid request body")
 		}
 	}
 	for attempt := 0; ; attempt++ {
 		req, err := http.NewRequest(method, h.base+path, bytes.NewReader(data))
 		if err != nil {
-			return nil, syncErr("%s network failure; write outcome may be unknown", method)
+			return syncErr("%s network failure; write outcome may be unknown", method)
 		}
 		for k, v := range h.headers {
 			req.Header.Set(k, v)
@@ -93,7 +94,7 @@ func (h *HTTP) Request(method, path string, body any) (any, error) {
 				h.sleep(time.Duration(math.Pow(2, float64(attempt))) * time.Second)
 				continue
 			}
-			return nil, syncErr("%s network failure; write outcome may be unknown", method)
+			return syncErr("%s network failure; write outcome may be unknown", method)
 		}
 		if code := resp.StatusCode; code >= 300 {
 			// GitHub signals primary and secondary rate limits with 403 plus these headers.
@@ -104,31 +105,18 @@ func (h *HTTP) Request(method, path string, body any) (any, error) {
 				continue
 			}
 			// API response bodies can contain issue text or credentials; never log them.
-			return nil, &HTTPStatusError{Status: code, Msg: method + " failed with HTTP " + strconv.Itoa(code) + "; writes are not retried"}
+			return &HTTPStatusError{Status: code, Msg: method + " failed with HTTP " + strconv.Itoa(code) + "; writes are not retried"}
 		}
-		if len(result) == 0 {
-			return nil, nil
+		if out == nil {
+			return nil
 		}
 		dec := json.NewDecoder(bytes.NewReader(result))
-		dec.UseNumber()
-		var out any
-		if dec.Decode(&out) != nil || dec.Decode(new(any)) != io.EOF {
-			return nil, syncErr("Invalid API response; write outcome may be unknown")
+		dec.UseNumber() // raw ADF bodies keep exact numbers for hashing
+		if dec.Decode(out) != nil || dec.Decode(new(json.RawMessage)) != io.EOF {
+			return syncErr("Invalid API response; write outcome may be unknown")
 		}
-		return out, nil
+		return nil
 	}
-}
-
-func (h *HTTP) object(method, path string, body any) (Object, error) {
-	v, err := h.Request(method, path, body)
-	if err != nil {
-		return nil, err
-	}
-	o, ok := v.(Object)
-	if !ok {
-		return nil, syncErr("Invalid API response; write outcome may be unknown")
-	}
-	return o, nil
 }
 
 // Client talks to GitHub and Jira Cloud with narrowly scoped requests.
@@ -154,11 +142,13 @@ func NewClient(c *Config) (*Client, error) {
 }
 
 func (a *Client) CheckProject() error {
-	project, err := a.jira.object("GET", "/rest/api/3/project/"+a.c.JiraProject, nil)
-	if err != nil {
+	var project struct {
+		ProjectTypeKey string `json:"projectTypeKey"`
+	}
+	if err := a.jira.Do("GET", "/rest/api/3/project/"+a.c.JiraProject, nil, &project); err != nil {
 		return err
 	}
-	if t := project["projectTypeKey"]; t != "software" && t != "business" {
+	if project.ProjectTypeKey != "software" && project.ProjectTypeKey != "business" {
 		return syncErr("Only Jira Software/business projects supported; service-desk privacy requires separate handling")
 	}
 	return nil
@@ -172,28 +162,19 @@ func (a *Client) ghPath(number int) string {
 	return base + "/" + strconv.Itoa(number)
 }
 
-func (a *Client) ghPages(path string, params url.Values) ([]Object, error) {
-	var result []Object
+// ghPages reads every page or fails; a partial scan could look like deletions.
+func ghPages[T any](a *Client, path string, params url.Values) ([]T, error) {
+	var result []T
 	for page := 1; page <= a.c.MaxPages; page++ {
 		q := url.Values{}
 		maps.Copy(q, params)
 		q.Set("per_page", "100")
 		q.Set("page", strconv.Itoa(page))
-		v, err := a.github.Request("GET", path+"?"+q.Encode(), nil)
-		if err != nil {
+		var batch []T
+		if err := a.github.Do("GET", path+"?"+q.Encode(), nil, &batch); err != nil {
 			return nil, err
 		}
-		batch, ok := v.([]any)
-		if !ok {
-			return nil, syncErr("Invalid GitHub pagination response")
-		}
-		for _, item := range batch {
-			o, ok := item.(Object)
-			if !ok {
-				return nil, syncErr("Invalid GitHub pagination response")
-			}
-			result = append(result, o)
-		}
+		result = append(result, batch...)
 		if len(batch) < 100 {
 			return result, nil
 		}
@@ -201,33 +182,34 @@ func (a *Client) ghPages(path string, params url.Values) ([]Object, error) {
 	return nil, syncErr("GitHub pagination limit exceeded; no partial scan allowed")
 }
 
-func (a *Client) Issues() ([]Object, error) {
+func (a *Client) Issues() ([]GitHubIssue, error) {
 	params := url.Values{"state": {a.c.IssueState}, "sort": {"created"}, "direction": {"asc"}}
 	if a.c.SelectionLabel != nil {
 		params.Set("labels", *a.c.SelectionLabel)
 	}
-	all, err := a.ghPages(a.ghPath(0), params)
+	all, err := ghPages[GitHubIssue](a, a.ghPath(0), params)
 	if err != nil {
 		return nil, err
 	}
-	var issues []Object
+	var issues []GitHubIssue
 	for _, i := range all {
-		if _, pr := i["pull_request"]; !pr {
+		if i.PullRequest == nil {
 			issues = append(issues, i)
 		}
 	}
 	return issues, nil
 }
 
-func (a *Client) Issue(number int) (Object, error) {
-	issue, err := a.github.object("GET", a.ghPath(number), nil)
+func (a *Client) Issue(number int) (*GitHubIssue, error) {
+	issue := &GitHubIssue{}
+	err := a.github.Do("GET", a.ghPath(number), nil, issue)
 	if status, ok := httpStatus(err); ok && (status == 301 || status == 404 || status == 410) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	if _, pr := issue["pull_request"]; pr || idString(issue["number"]) != strconv.Itoa(number) {
+	if issue.PullRequest != nil || issue.Number != number {
 		return nil, syncErr("Issue identity mismatch or pull request")
 	}
 	return issue, nil
@@ -241,117 +223,139 @@ func httpStatus(err error) (int, bool) {
 	return h.Status, true
 }
 
-func (a *Client) JiraIssue(id string) (Object, error) {
-	result, err := a.jira.object("GET", "/rest/api/3/issue/"+id+"?fields=project,labels,updated&properties=gh-jira-sync", nil)
+func (a *Client) JiraIssue(id string) (*JiraIssue, error) {
+	issue := &JiraIssue{}
+	err := a.jira.Do("GET", "/rest/api/3/issue/"+id+"?fields=project,labels,updated&properties=gh-jira-sync", nil, issue)
 	if status, ok := httpStatus(err); ok && status == 404 {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	if asObject(asObject(result["fields"])["project"])["key"] != a.c.JiraProject {
+	if issue.Fields.Project.Key != a.c.JiraProject {
 		return nil, nil
 	}
-	return result, nil
+	return issue, nil
 }
 
-func (a *Client) FindIssue(source Object) (Object, error) {
-	op := token(a.c, "issue", source["id"])
+func (a *Client) FindIssue(source *GitHubIssue) (*JiraIssue, error) {
+	op := token(a.c, OpIssue, source.idString())
 	query := url.Values{"jql": {`project = "` + a.c.JiraProject + `" AND labels = "gh-sync-` + op + `"`},
 		"maxResults": {"2"}, "fields": {"id,key"}}
-	result, err := a.jira.object("GET", "/rest/api/3/search/jql?"+query.Encode(), nil)
-	if err != nil {
+	var result struct {
+		Issues []struct {
+			ID string `json:"id"`
+		} `json:"issues"`
+		NextPageToken string `json:"nextPageToken"`
+	}
+	if err := a.jira.Do("GET", "/rest/api/3/search/jql?"+query.Encode(), nil, &result); err != nil {
 		return nil, err
 	}
-	found := list(result["issues"])
-	if truthy(result["nextPageToken"]) || len(found) > 1 {
+	if result.NextPageToken != "" || len(result.Issues) > 1 {
 		return nil, syncErr("Multiple Jira issues have the same source identity")
 	}
-	if len(found) == 0 {
+	if len(result.Issues) == 0 {
 		return nil, nil
 	}
-	issue, err := a.JiraIssue(idString(asObject(found[0])["id"]))
+	issue, err := a.JiraIssue(result.Issues[0].ID)
 	if err != nil {
 		return nil, err
 	}
 	if issue == nil {
 		return nil, syncErr("Jira search result vanished or moved; rerun")
 	}
-	prop := asObject(issue["properties"])["gh-jira-sync"]
-	if !sameJSON(prop, Object{"operation": op, "github_id": idString(source["id"])}) {
+	if id := issue.Properties.Identity; id == nil || *id != (IssueIdentity{Operation: op, GitHubID: source.idString()}) {
 		return nil, syncErr("Jira source identity marker mismatch")
 	}
 	return issue, nil
 }
 
-func (a *Client) CreateIssue(source Object) (Object, error) {
-	op := token(a.c, "issue", source["id"])
+func (a *Client) CreateIssue(source *GitHubIssue) (*JiraIssue, error) {
+	op := token(a.c, OpIssue, source.idString())
+	// Extra fields are tenant-specific Jira fields, so they stay generic JSON.
 	fields := Object{}
 	maps.Copy(fields, a.c.JiraCreateFields)
 	fields["project"] = Object{"key": a.c.JiraProject}
 	fields["issuetype"] = Object{"id": a.c.JiraIssueType}
-	fields["summary"] = source["title"]
-	fields["description"] = toADF("Source: " + idString(source["html_url"]) + "\n\n" + normalized(source["body"]))
-	fields["labels"] = []any{"gh-sync-" + op}
-	return a.jira.object("POST", "/rest/api/3/issue", Object{"fields": fields, "properties": []any{
-		Object{"key": "gh-jira-sync", "value": Object{"operation": op, "github_id": idString(source["id"])}}}})
+	fields["summary"] = source.Title
+	fields["description"] = toADF("Source: " + source.HTMLURL + "\n\n" + normalized(source.Body))
+	fields["labels"] = []string{"gh-sync-" + op}
+	request := struct {
+		Fields     Object `json:"fields"`
+		Properties []any  `json:"properties"`
+	}{fields, []any{struct {
+		Key   string        `json:"key"`
+		Value IssueIdentity `json:"value"`
+	}{"gh-jira-sync", IssueIdentity{Operation: op, GitHubID: source.idString()}}}}
+	created := &JiraIssue{}
+	if err := a.jira.Do("POST", "/rest/api/3/issue", request, created); err != nil {
+		return nil, err
+	}
+	return created, nil
 }
 
-func (a *Client) Comments(side string, pair Pair) ([]Object, error) {
-	if side == "github" {
-		return a.ghPages(a.ghPath(pair.GitHub)+"/comments", nil)
-	}
-	var result []Object
-	start := 0
-	for range a.c.MaxPages {
-		q := url.Values{"startAt": {strconv.Itoa(start)}, "maxResults": {"100"}, "orderBy": {"created"}, "expand": {"properties"}}
-		batch, err := a.jira.object("GET", "/rest/api/3/issue/"+pair.JiraID+"/comment?"+q.Encode(), nil)
+func (a *Client) Comments(side Side, pair Pair) ([]Comment, error) {
+	if side == SideGitHub {
+		raw, err := ghPages[apiGitHubComment](a, a.ghPath(pair.GitHub)+"/comments", nil)
 		if err != nil {
 			return nil, err
 		}
-		items := list(batch["comments"])
-		for _, item := range items {
-			o, ok := item.(Object)
-			if !ok {
-				return nil, syncErr("Invalid API response; write outcome may be unknown")
-			}
-			result = append(result, o)
+		result := make([]Comment, len(raw))
+		for i, g := range raw {
+			result[i] = g.comment()
 		}
-		start += len(items)
-		total, err := strconv.Atoi(idString(batch["total"]))
-		if err != nil {
-			return nil, syncErr("Invalid API response; write outcome may be unknown")
+		return result, nil
+	}
+	var result []Comment
+	start := 0
+	for range a.c.MaxPages {
+		q := url.Values{"startAt": {strconv.Itoa(start)}, "maxResults": {"100"}, "orderBy": {"created"}, "expand": {"properties"}}
+		var batch struct {
+			Comments []apiJiraComment `json:"comments"`
+			Total    int              `json:"total"`
 		}
-		if start >= total {
+		if err := a.jira.Do("GET", "/rest/api/3/issue/"+pair.JiraID+"/comment?"+q.Encode(), nil, &batch); err != nil {
+			return nil, err
+		}
+		for _, j := range batch.Comments {
+			result = append(result, j.comment())
+		}
+		start += len(batch.Comments)
+		if start >= batch.Total {
 			return result, nil
 		}
-		if len(items) == 0 {
+		if len(batch.Comments) == 0 {
 			return nil, syncErr("Incomplete Jira comment pagination")
 		}
 	}
 	return nil, syncErr("Jira pagination limit exceeded; no partial scan allowed")
 }
 
-func (a *Client) Comment(side string, pair Pair, id string) (Object, error) {
-	if side == "github" {
-		return a.github.object("GET", "/repos/"+a.c.Repository+"/issues/comments/"+id, nil)
+func (a *Client) Comment(side Side, pair Pair, id string) (Comment, error) {
+	if side == SideGitHub {
+		var g apiGitHubComment
+		err := a.github.Do("GET", "/repos/"+a.c.Repository+"/issues/comments/"+id, nil, &g)
+		return g.comment(), err
 	}
-	return a.jira.object("GET", "/rest/api/3/issue/"+pair.JiraID+"/comment/"+id+"?expand=properties", nil)
+	var j apiJiraComment
+	err := a.jira.Do("GET", "/rest/api/3/issue/"+pair.JiraID+"/comment/"+id+"?expand=properties", nil, &j)
+	return j.comment(), err
 }
 
-func (a *Client) CreateComment(side string, pair Pair, text string) (Object, error) {
-	if side == "github" {
-		return a.github.object("POST", a.ghPath(pair.GitHub)+"/comments", Object{"body": text})
+func (a *Client) CreateComment(side Side, pair Pair, text string) (Comment, error) {
+	if side == SideGitHub {
+		var g apiGitHubComment
+		err := a.github.Do("POST", a.ghPath(pair.GitHub)+"/comments", map[string]string{"body": text}, &g)
+		return g.comment(), err
 	}
-	return a.jira.object("POST", "/rest/api/3/issue/"+pair.JiraID+"/comment", Object{"body": toADF(text)})
+	var j apiJiraComment
+	err := a.jira.Do("POST", "/rest/api/3/issue/"+pair.JiraID+"/comment", map[string]any{"body": toADF(text)}, &j)
+	return j.comment(), err
 }
 
-func (a *Client) EditComment(side string, pair Pair, id, text string) error {
-	var err error
-	if side == "github" {
-		_, err = a.github.Request("PATCH", "/repos/"+a.c.Repository+"/issues/comments/"+id, Object{"body": text})
-	} else {
-		_, err = a.jira.Request("PUT", "/rest/api/3/issue/"+pair.JiraID+"/comment/"+id, Object{"body": toADF(text)})
+func (a *Client) EditComment(side Side, pair Pair, id, text string) error {
+	if side == SideGitHub {
+		return a.github.Do("PATCH", "/repos/"+a.c.Repository+"/issues/comments/"+id, map[string]string{"body": text}, nil)
 	}
-	return err
+	return a.jira.Do("PUT", "/rest/api/3/issue/"+pair.JiraID+"/comment/"+id, map[string]any{"body": toADF(text)}, nil)
 }

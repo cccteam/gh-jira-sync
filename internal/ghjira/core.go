@@ -241,8 +241,8 @@ func binding(c *Config) string {
 }
 
 // token is the stable operation identity for one source object.
-func token(c *Config, kind string, sourceID any) string {
-	return digest([]any{binding(c), kind, idString(sourceID)})
+func token(c *Config, kind OpKind, sourceID string) string {
+	return digest([]any{binding(c), string(kind), sourceID})
 }
 
 func marker(op string) string { return "[gh-jira-sync:" + op + "]" }
@@ -340,26 +340,18 @@ func renderADF(node Object) (string, error) {
 }
 
 // normalized unifies GitHub web-editor CRLF line endings so hashes stay stable and ADF text clean.
-func normalized(body any) string {
-	s, _ := body.(string)
-	return strings.ReplaceAll(s, "\r\n", "\n")
-}
-
-func commentText(side string, comment Object) (string, error) {
-	if side == "github" {
-		return normalized(comment["body"]), nil
-	}
-	return adfText(comment["body"])
+func normalized(body string) string {
+	return strings.ReplaceAll(body, "\r\n", "\n")
 }
 
 // trailingMarker returns the operation in a marker that is the body's own last line,
 // where copies carry it. Quote-replies embed a copy's marker inside a quote ("> [...]"
 // or an ADF blockquote), so they remain originals. Only the last top-level ADF
 // paragraph is read, which works even when the rest of the comment uses unsupported ADF.
-func trailingMarker(side string, comment Object) string {
+func trailingMarker(comment Comment) string {
 	var last string
-	if side == "github" {
-		body, _ := comment["body"].(string)
+	if comment.Side == SideGitHub {
+		body, _ := comment.Body.(string)
 		body = strings.TrimRightFunc(body, isPythonSpace)
 		if i := strings.LastIndexFunc(body, isPythonLineBreak); i >= 0 {
 			body = body[i:]
@@ -369,7 +361,7 @@ func trailingMarker(side string, comment Object) string {
 		last = strings.TrimFunc(body, isPythonSpace)
 	} else {
 		var texts []*string // nil entries are non-paragraph nodes
-		for _, node := range list(asObject(comment["body"])["content"]) {
+		for _, node := range list(asObject(comment.Body)["content"]) {
 			n, ok := node.(Object)
 			if !ok || n["type"] != "paragraph" {
 				texts = append(texts, nil)
@@ -406,47 +398,27 @@ func firstRune(s string) (rune, int) {
 }
 
 // hasMarker reports a trailing marker at all (op == "") or for one operation.
-func hasMarker(side string, comment Object, op string) bool {
-	found := trailingMarker(side, comment)
+func hasMarker(comment Comment, op string) bool {
+	found := trailingMarker(comment)
 	if op == "" {
 		return found != ""
 	}
 	return found == op
 }
 
-func restricted(comment Object) bool {
-	if truthy(comment["visibility"]) || comment["jsdPublic"] == false {
-		return true
-	}
-	for _, p := range list(comment["properties"]) {
-		prop := asObject(p)
-		if prop["key"] == "sd.public.comment" && asObject(prop["value"])["internal"] == true {
-			return true
-		}
-	}
-	return false
-}
-
-func createdAt(comment Object) string {
-	if s, _ := comment["created_at"].(string); s != "" {
-		return s
-	}
-	s, _ := comment["created"].(string)
-	return s
-}
-
-func eligibleComment(c *Config, comment Object) (bool, error) {
+func eligibleComment(c *Config, comment Comment) (bool, error) {
 	if c.CommentsSince == nil {
 		return true, nil
 	}
-	created, err := parseTimestamp(createdAt(comment))
+	created, err := parseTimestamp(comment.Created)
 	if err != nil {
 		return false, syncErr("Comment creation time is missing or invalid")
 	}
 	return !created.Before(*c.CommentsSince), nil
 }
 
-// JSON helpers for loosely typed API objects; wrong shapes read as empty values.
+// Helpers for walking raw ADF documents, the one deliberately untyped structure:
+// wrong shapes read as empty values and are then rejected as unsupported content.
 
 func asObject(v any) Object {
 	o, _ := v.(Object)
@@ -456,25 +428,6 @@ func asObject(v any) Object {
 func list(v any) []any {
 	l, _ := v.([]any)
 	return l
-}
-
-func truthy(v any) bool {
-	switch x := v.(type) {
-	case nil:
-		return false
-	case bool:
-		return x
-	case string:
-		return x != ""
-	case Object:
-		return len(x) > 0
-	case []any:
-		return len(x) > 0
-	case json.Number:
-		f, err := x.Float64()
-		return err != nil || f != 0
-	}
-	return true
 }
 
 func isOne(v any) bool {
@@ -488,25 +441,6 @@ func isOne(v any) bool {
 		return x == 1
 	}
 	return false
-}
-
-// idString renders IDs the way Python's str() does for ints and strings.
-func idString(v any) string {
-	switch x := v.(type) {
-	case string:
-		return x
-	case json.Number:
-		return x.String()
-	case int:
-		return strconv.Itoa(x)
-	case int64:
-		return strconv.FormatInt(x, 10)
-	case float64:
-		return pythonFloat(x)
-	case nil:
-		return "None"
-	}
-	return fmt.Sprint(v)
 }
 
 func runeLen(s string) int { return len([]rune(s)) }

@@ -70,7 +70,7 @@ func TestWriteNotRetried(t *testing.T) {
 	srv := newServer(t, ok(nil))
 	h := srv.http()
 	srv.instance.Close() // every request now fails at the network level
-	if _, err := h.Request("POST", "/issue", Object{}); err == nil {
+	if err := h.Do("POST", "/issue", Object{}, nil); err == nil {
 		t.Fatal("expected network failure")
 	}
 	eq(t, len(srv.sleeps), 0)
@@ -80,7 +80,7 @@ func TestReadRetries(t *testing.T) {
 	srv := newServer(t, ok(nil))
 	h := srv.http()
 	srv.instance.Close()
-	if _, err := h.Request("GET", "/issue", nil); err == nil {
+	if err := h.Do("GET", "/issue", nil, nil); err == nil {
 		t.Fatal("expected network failure")
 	}
 	eq(t, srv.sleeps, []time.Duration{time.Second, 2 * time.Second, 4 * time.Second})
@@ -114,13 +114,13 @@ func TestGitHubPaginationAndLimit(t *testing.T) {
 		return 200, nil, page(1, 100)
 	})
 	api := srv.client(t)
-	rows, err := api.ghPages("/test", nil)
+	rows, err := ghPages[Object](api, "/test", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	eq(t, len(rows), 101)
 	api.c.MaxPages = 1
-	if _, err := api.ghPages("/test", nil); err == nil {
+	if _, err := ghPages[Object](api, "/test", nil); err == nil {
 		t.Fatal("partial scan must fail")
 	}
 }
@@ -143,14 +143,15 @@ func TestJiraPagination(t *testing.T) {
 func TestJiraCreationHasAtomicIdentity(t *testing.T) {
 	srv := newServer(t, ok(Object{"id": "200", "key": "ENG-1"}))
 	api := srv.client(t)
-	if _, err := api.CreateIssue(cp(newFake().source)); err != nil {
+	source := newFake().source
+	if _, err := api.CreateIssue(&source); err != nil {
 		t.Fatal(err)
 	}
 	payload := srv.bodies[0]
 	prop := asObject(asObject(list(payload["properties"])[0])["value"])
 	eq(t, prop["github_id"], any("42"))
 	fields := asObject(payload["fields"])
-	eq(t, list(fields["labels"]), []any{"gh-sync-" + token(api.c, "issue", 42)})
+	eq(t, list(fields["labels"]), []any{"gh-sync-" + token(api.c, OpIssue, "42")})
 	eq(t, fields["summary"], any("Original title"))
 }
 
@@ -200,7 +201,7 @@ func TestGoneOrMovedJiraIssueReturnsNil(t *testing.T) {
 
 func TestHTTPErrorCarriesStatus(t *testing.T) {
 	srv := newServer(t, status(301, http.Header{"Location": {"https://elsewhere.test/"}}))
-	_, err := srv.http().Request("GET", "/x", nil)
+	err := srv.http().Do("GET", "/x", nil, nil)
 	code, isHTTP := httpStatus(err)
 	if !isHTTP || code != 301 {
 		t.Fatalf("got %v", err)
@@ -217,20 +218,21 @@ func TestGitHubRateLimit403RetriedForReadsOnly(t *testing.T) {
 		}
 		return 200, nil, Object{"ok": true}
 	})
-	got, err := srv.http().Request("GET", "/x", nil)
+	var got Object
+	err := srv.http().Do("GET", "/x", nil, &got)
 	if err != nil || !sameJSON(got, Object{"ok": true}) {
 		t.Fatalf("got %v %v", got, err)
 	}
 	eq(t, srv.sleeps, []time.Duration{7 * time.Second})
 
 	limited := newServer(t, status(403, http.Header{"Retry-After": {"7"}}))
-	if _, err := limited.http().Request("POST", "/x", Object{}); err == nil {
+	if err := limited.http().Do("POST", "/x", Object{}, nil); err == nil {
 		t.Fatal("rate-limited write must not be retried")
 	}
 	eq(t, len(limited.urls), 1)
 
 	plain := newServer(t, status(403, nil))
-	if _, err := plain.http().Request("GET", "/x", nil); err == nil {
+	if err := plain.http().Do("GET", "/x", nil, nil); err == nil {
 		t.Fatal("plain 403 must fail")
 	}
 	eq(t, len(plain.urls), 1)
@@ -248,8 +250,69 @@ func TestInvalidJSONResponseIsReported(t *testing.T) {
 	srv := newServer(t, ok(nil))
 	for _, body := range []string{`{"a":1} trailing`, `{"a":`} {
 		srv.respond = func(*http.Request) (int, http.Header, any) { return 200, nil, []byte(body) }
-		if _, err := srv.http().Request("GET", "/x", nil); err == nil {
+		var v Object
+		if err := srv.http().Do("GET", "/x", nil, &v); err == nil {
 			t.Fatalf("invalid JSON %q accepted", body)
+		}
+	}
+}
+
+func TestWrongAPIShapesFailLoudly(t *testing.T) {
+	// A string where GitHub promises a number must fail, not read as issue 0.
+	issue := newServer(t, ok(Object{"id": 42, "number": "1", "title": "x"}))
+	if _, err := issue.client(t).Issue(1); err == nil {
+		t.Fatal("mistyped issue number accepted")
+	}
+	comments := newServer(t, ok(Object{"comments": []any{Object{"id": 5}}, "total": 1}))
+	if _, err := comments.client(t).Comments(SideJira, Pair{JiraID: "200"}); err == nil {
+		t.Fatal("numeric Jira comment id accepted")
+	}
+	project := newServer(t, ok([]any{}))
+	if err := project.client(t).CheckProject(); err == nil {
+		t.Fatal("array project response accepted")
+	}
+}
+
+func decodeComment[T interface{ comment() Comment }](t *testing.T, raw string) Comment {
+	t.Helper()
+	var wire T
+	dec := json.NewDecoder(strings.NewReader(raw))
+	dec.UseNumber()
+	if err := dec.Decode(&wire); err != nil {
+		t.Fatal(err)
+	}
+	return wire.comment()
+}
+
+func TestCommentIgnoresFieldsThatDoNotDriveDecisions(t *testing.T) {
+	before := decodeComment[apiGitHubComment](t, `{"id":11,"body":"hi","created_at":"2026-01-01T00:00:00Z",
+		"updated_at":"2026-01-01T00:00:00Z","user":{"login":"alice","id":7},"reactions":{"total_count":0}}`)
+	after := decodeComment[apiGitHubComment](t, `{"id":11,"body":"hi","created_at":"2026-01-01T00:00:00Z",
+		"updated_at":"2026-02-01T00:00:00Z","user":{"login":"alice","id":7},"reactions":{"total_count":3}}`)
+	if !before.sameAs(after) {
+		t.Fatal("reactions or updated_at changed the decision view")
+	}
+	edited := decodeComment[apiGitHubComment](t, `{"id":11,"body":"edited","created_at":"2026-01-01T00:00:00Z"}`)
+	if before.sameAs(edited) {
+		t.Fatal("body edit not detected")
+	}
+	ghost := decodeComment[apiGitHubComment](t, `{"id":12,"body":"x","created_at":"2026-01-01T00:00:00Z","user":null}`)
+	eq(t, ghost.Author, "")
+}
+
+func TestJiraRestrictionSignals(t *testing.T) {
+	adf := `"body":{"type":"doc","version":1,"content":[]}`
+	for raw, want := range map[string]bool{
+		`{"id":"1",` + adf + `}`:                                                                      false,
+		`{"id":"1",` + adf + `,"visibility":{}}`:                                                      false,
+		`{"id":"1",` + adf + `,"visibility":{"type":"role","value":"Developers"}}`:                    true,
+		`{"id":"1",` + adf + `,"jsdPublic":false}`:                                                    true,
+		`{"id":"1",` + adf + `,"jsdPublic":true}`:                                                     false,
+		`{"id":"1",` + adf + `,"properties":[{"key":"sd.public.comment","value":{"internal":true}}]}`: true,
+		`{"id":"1",` + adf + `,"properties":[{"key":"other","value":"any shape"}]}`:                   false,
+	} {
+		if got := decodeComment[apiJiraComment](t, raw).Restricted; got != want {
+			t.Errorf("%s: restricted=%v, want %v", raw, got, want)
 		}
 	}
 }

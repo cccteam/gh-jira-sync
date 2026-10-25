@@ -161,8 +161,8 @@ func Main(args []string, stdout io.Writer) int {
 			return err
 		}
 		rep.Entries = entries // entries are pointers, so apply outcomes appear in the report
-		rep.PlannedWrites = count(entries, func(e *Entry) bool { return writeKinds[e.Kind] })
-		rep.DeferredWrites = count(entries, func(e *Entry) bool { return e.Kind == "deferred" })
+		rep.PlannedWrites = count(entries, func(e *Entry) bool { return e.Kind.writes() })
+		rep.DeferredWrites = count(entries, func(e *Entry) bool { return e.Kind == KindDeferred })
 		if *applyWrites {
 			save := func(s *State) error {
 				// Remote is authoritative; losing local disk must not lose an intent.
@@ -179,7 +179,7 @@ func Main(args []string, stdout io.Writer) int {
 		}
 		code = 0
 		for _, e := range entries {
-			if reviewKinds[e.Kind] || e.Outcome == "rejected" {
+			if e.Kind.needsReview() || e.Outcome == OutcomeRejected {
 				code = 2
 			}
 		}

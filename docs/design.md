@@ -27,9 +27,23 @@ The code is one Go package, `internal/ghjira`, with a thin `main.go`:
 * `storage.go` defines the state types, local checkpoints, and the Git-branch store.
 * `cli.go` provides dry-run/apply, locking, reports, and nonzero failure codes.
 
-API objects stay loosely typed (`map[string]any`, numbers as `json.Number`) because
-only a few fields matter and unknown shapes must round-trip unchanged into hashes.
-State is strictly typed and rejects unknown keys.
+* `types.go` defines named types for every closed set of values (`Side`, `Kind`,
+  `Status`, `OpKind`, `Outcome`) and the GitHub/Jira response shapes.
+
+GitHub and Jira responses decode into typed structs, so a field with an unexpected
+type fails the request instead of reading as an empty value. Both services' comments
+become one `Comment` view (ID, author, creation time, restriction, body), and
+comparisons before writing use that view, so reactions or activity timestamps never
+abort a run. Three things stay generic JSON on purpose:
+
+* Comment bodies (`Comment.Body`): a Markdown string on GitHub, an ADF document on
+  Jira. Copy fingerprints hash the body exactly as received (numbers as
+  `json.Number`), which keeps them identical to the Python release.
+* The ADF tree itself, which `adfText` walks and rejects when unsupported.
+* `jira_create_fields`, which holds tenant-specific Jira fields.
+
+State is strictly typed: unknown keys and unknown enum values (status, operation
+kind, origin side) are rejected when it is loaded.
 
 No runtime dependencies beyond the Go standard library; Linux/macOS. Git is needed for remote
 state persistence. Scheduled reconciliation avoids operating a public webhook

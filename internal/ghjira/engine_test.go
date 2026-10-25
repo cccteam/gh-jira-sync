@@ -1,6 +1,7 @@
 package ghjira
 
 import (
+	"cmp"
 	"encoding/json"
 	"maps"
 	"reflect"
@@ -17,7 +18,7 @@ func eq[T any](t *testing.T, got, want T) {
 	}
 }
 
-func sorted(s []string) []string {
+func sorted[T cmp.Ordered](s []T) []T {
 	out := slices.Clone(s)
 	slices.Sort(out)
 	return out
@@ -43,7 +44,7 @@ func TestCreationThenRepeatNoop(t *testing.T) {
 func TestNeverSyncLaterIssueFieldEdits(t *testing.T) {
 	x := newSyncer(t)
 	s := x.linked()
-	x.api.source["title"] = "New title"
+	x.api.source.Title = "New title"
 	x.ok(s)
 	eq(t, len(x.api.writes), 1)
 }
@@ -95,8 +96,8 @@ func TestJournalFailurePreventsDispatch(t *testing.T) {
 func TestTwoWayCommentsAndNoEcho(t *testing.T) {
 	x := newSyncer(t)
 	s := x.linked()
-	x.api.rows["github"] = []Object{ghComment(11, "GitHub original")}
-	x.api.rows["jira"] = []Object{jiraComment(22, "Jira original")}
+	x.api.rows["github"] = []Comment{ghComment(11, "GitHub original")}
+	x.api.rows["jira"] = []Comment{jiraComment(22, "Jira original")}
 	s, _ = x.ok(s)
 	eq(t, len(s.Comments), 2)
 	eq(t, x.api.writes[1:], []write{{"create", "jira"}, {"create", "github"}})
@@ -107,20 +108,20 @@ func TestTwoWayCommentsAndNoEcho(t *testing.T) {
 func TestEditOriginalsBothDirections(t *testing.T) {
 	x := newSyncer(t)
 	s := x.linked()
-	x.api.rows["github"] = []Object{ghComment(11, "GitHub original")}
-	x.api.rows["jira"] = []Object{jiraComment(22, "Jira original")}
+	x.api.rows["github"] = []Comment{ghComment(11, "GitHub original")}
+	x.api.rows["jira"] = []Comment{jiraComment(22, "Jira original")}
 	s, _ = x.ok(s)
-	x.api.rows["github"][0]["body"] = "GitHub edited"
-	x.api.rows["jira"][0]["body"] = toADF("Jira edited")
+	x.api.rows["github"][0].Body = "GitHub edited"
+	x.api.rows["jira"][0].Body = toADF("Jira edited")
 	s, _ = x.ok(s)
 	eq(t, x.api.writes[len(x.api.writes)-2:], []write{{"edit", "jira"}, {"edit", "github"}})
 	x.ok(s)
 	eq(t, len(x.api.writes), 5)
 }
 
-func jiraText(t *testing.T, row Object) string {
+func jiraText(t *testing.T, row Comment) string {
 	t.Helper()
-	text, err := adfText(row["body"])
+	text, err := adfText(row.Body)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,10 +131,10 @@ func jiraText(t *testing.T, row Object) string {
 func TestEditCopyIsReportedNeverOverwritten(t *testing.T) {
 	x := newSyncer(t)
 	s := x.linked()
-	x.api.rows["github"] = []Object{ghComment(11, "Original")}
+	x.api.rows["github"] = []Comment{ghComment(11, "Original")}
 	s, _ = x.ok(s)
-	x.api.rows["jira"][0]["body"] = toADF(strings.Replace(jiraText(t, x.api.rows["jira"][0]), "Original", "Changed copy", 1))
-	x.api.rows["github"][0]["body"] = "Changed original too"
+	x.api.rows["jira"][0].Body = toADF(strings.Replace(jiraText(t, x.api.rows["jira"][0]), "Original", "Changed copy", 1))
+	x.api.rows["github"][0].Body = "Changed original too"
 	_, entries := x.ok(s)
 	eq(t, entries[0].Kind, "blocked")
 	eq(t, len(x.api.writes), 2)
@@ -142,13 +143,13 @@ func TestEditCopyIsReportedNeverOverwritten(t *testing.T) {
 func TestFormattingOnlyEditToCopyIsPreserved(t *testing.T) {
 	x := newSyncer(t)
 	s := x.linked()
-	x.api.rows["github"] = []Object{ghComment(11, "Original")}
+	x.api.rows["github"] = []Comment{ghComment(11, "Original")}
 	s, _ = x.ok(s)
-	firstText := asObject(list(asObject(list(asObject(x.api.rows["jira"][0]["body"])["content"])[0])["content"])[0])
+	firstText := asObject(list(asObject(list(asObject(x.api.rows["jira"][0].Body)["content"])[0])["content"])[0])
 	firstText["marks"] = []any{Object{"type": "strong"}}
 	_, entries := x.ok(s)
 	eq(t, entries[0].Kind, "blocked")
-	x.api.rows["github"][0]["body"] = "Edited original"
+	x.api.rows["github"][0].Body = "Edited original"
 	_, entries = x.ok(s)
 	eq(t, entries[0].Kind, "blocked")
 	eq(t, len(x.api.writes), 2)
@@ -157,22 +158,22 @@ func TestFormattingOnlyEditToCopyIsPreserved(t *testing.T) {
 func TestDeletedOriginalDoesNotTurnCopyIntoSource(t *testing.T) {
 	x := newSyncer(t)
 	s := x.linked()
-	x.api.rows["github"] = []Object{ghComment(11, "Original")}
+	x.api.rows["github"] = []Comment{ghComment(11, "Original")}
 	s, _ = x.ok(s)
 	x.api.rows["github"] = nil
 	_, entries := x.ok(s)
-	eq(t, kinds(entries), []string{"unavailable"})
+	eq(t, kinds(entries), []Kind{"unavailable"})
 	eq(t, len(x.api.writes), 2)
 }
 
 func TestSourceEditedBeforePendingCopyRecovered(t *testing.T) {
 	x := newSyncer(t)
 	s := x.linked()
-	x.api.rows["github"] = []Object{ghComment(11, "Original")}
+	x.api.rows["github"] = []Comment{ghComment(11, "Original")}
 	x.api.loseResponse = true
 	x.fails(s)
 	pending := x.last()
-	x.api.rows["github"][0]["body"] = "Edited before recovery"
+	x.api.rows["github"][0].Body = "Edited before recovery"
 	x.api.loseResponse = false
 	s, _ = x.ok(pending)
 	x.ok(s)
@@ -183,7 +184,7 @@ func TestSourceEditedBeforePendingCopyRecovered(t *testing.T) {
 func TestDeletionsNeverPropagateOrRecreate(t *testing.T) {
 	x := newSyncer(t)
 	s := x.linked()
-	x.api.rows["github"] = []Object{ghComment(11, "Original")}
+	x.api.rows["github"] = []Comment{ghComment(11, "Original")}
 	s, _ = x.ok(s)
 	x.api.rows["jira"] = nil
 	_, entries := x.ok(s)
@@ -194,7 +195,7 @@ func TestDeletionsNeverPropagateOrRecreate(t *testing.T) {
 func TestCommentLostResponseRecoversWithoutDuplicate(t *testing.T) {
 	x := newSyncer(t)
 	s := x.linked()
-	x.api.rows["github"] = []Object{ghComment(11, "Original")}
+	x.api.rows["github"] = []Comment{ghComment(11, "Original")}
 	x.api.loseResponse = true
 	x.fails(s)
 	pending := x.last()
@@ -209,9 +210,9 @@ func TestCommentLostResponseRecoversWithoutDuplicate(t *testing.T) {
 func TestEditLostResponseConvergesWithoutSecondWrite(t *testing.T) {
 	x := newSyncer(t)
 	s := x.linked()
-	x.api.rows["github"] = []Object{ghComment(11, "Original")}
+	x.api.rows["github"] = []Comment{ghComment(11, "Original")}
 	s, _ = x.ok(s)
-	x.api.rows["github"][0]["body"] = "Edited"
+	x.api.rows["github"][0].Body = "Edited"
 	x.api.loseResponse = true
 	x.fails(s)
 	x.api.loseResponse = false
@@ -222,7 +223,7 @@ func TestEditLostResponseConvergesWithoutSecondWrite(t *testing.T) {
 func TestPendingCommentWithoutVisibleCopyBlocks(t *testing.T) {
 	x := newSyncer(t)
 	s := x.linked()
-	x.api.rows["github"] = []Object{ghComment(11, "Original")}
+	x.api.rows["github"] = []Comment{ghComment(11, "Original")}
 	x.api.loseResponse = true
 	x.fails(s)
 	x.api.rows["jira"] = nil
@@ -235,8 +236,8 @@ func TestRestrictedJiraCommentsNeverExport(t *testing.T) {
 	x := newSyncer(t)
 	s := x.linked()
 	raw := jiraComment(22, "private")
-	raw["visibility"] = Object{"type": "role", "value": "Developers"}
-	x.api.rows["jira"] = []Object{raw}
+	raw.Restricted = true
+	x.api.rows["jira"] = []Comment{raw}
 	_, entries := x.ok(s)
 	eq(t, entries[0].Kind, "excluded")
 	eq(t, len(x.api.writes), 1)
@@ -246,8 +247,8 @@ func TestUnsupportedJiraContentBlocksWithoutLoss(t *testing.T) {
 	x := newSyncer(t)
 	s := x.linked()
 	raw := jiraComment(22, "")
-	asObject(raw["body"])["content"] = []any{Object{"type": "mediaSingle"}}
-	x.api.rows["jira"] = []Object{raw}
+	asObject(raw.Body)["content"] = []any{Object{"type": "mediaSingle"}}
+	x.api.rows["jira"] = []Comment{raw}
 	_, entries := x.ok(s)
 	eq(t, entries[0].Kind, "blocked")
 }
@@ -256,12 +257,12 @@ func TestBudgetDefersExcessWritesToLaterRuns(t *testing.T) {
 	x := newSyncer(t)
 	s := x.linked()
 	x.c.MaxOperations = 1
-	x.api.rows["github"] = []Object{ghComment(11, "one"), ghComment(12, "two")}
+	x.api.rows["github"] = []Comment{ghComment(11, "one"), ghComment(12, "two")}
 	s, entries := x.ok(s)
-	eq(t, kinds(entries), []string{"create_comment", "deferred"})
+	eq(t, kinds(entries), []Kind{"create_comment", "deferred"})
 	eq(t, len(x.api.writes), 2)
 	s, entries = x.ok(s)
-	eq(t, kinds(entries), []string{"noop", "create_comment"})
+	eq(t, kinds(entries), []Kind{"noop", "create_comment"})
 	eq(t, len(x.api.writes), 3)
 	eq(t, len(s.Comments), 2)
 }
@@ -269,12 +270,12 @@ func TestBudgetDefersExcessWritesToLaterRuns(t *testing.T) {
 func TestUnchangedCommentsAreNoopsWithoutRereads(t *testing.T) {
 	x := newSyncer(t)
 	s := x.linked()
-	x.api.rows["github"] = []Object{ghComment(11, "GitHub original")}
-	x.api.rows["jira"] = []Object{jiraComment(22, "Jira original")}
+	x.api.rows["github"] = []Comment{ghComment(11, "GitHub original")}
+	x.api.rows["jira"] = []Comment{jiraComment(22, "Jira original")}
 	s, _ = x.ok(s)
 	x.api.reads = nil
 	_, entries := x.ok(s)
-	eq(t, kinds(entries), []string{"noop", "noop"})
+	eq(t, kinds(entries), []Kind{"noop", "noop"})
 	eq(t, len(x.api.reads), 0)
 }
 
@@ -282,9 +283,9 @@ func TestDeletedGitHubIssueReportedWithoutStallingOtherPairs(t *testing.T) {
 	x := newSyncer(t)
 	s := x.linked()
 	s.Pairs["2"] = Pair{GitHub: 2, GitHubID: "43", JiraID: "201", JiraKey: "ENG-2"}
-	x.api.rows["github"] = []Object{ghComment(11, "still syncs")}
+	x.api.rows["github"] = []Comment{ghComment(11, "still syncs")}
 	s, entries := x.ok(s)
-	eq(t, sorted(kinds(entries)), []string{"create_comment", "unavailable"})
+	eq(t, sorted(kinds(entries)), []Kind{"create_comment", "unavailable"})
 	eq(t, lastWrite(x.api), write{"create", "jira"})
 	if _, ok := s.Pairs["1"]; !ok {
 		t.Fatal("pair 1 lost")
@@ -296,34 +297,34 @@ func TestTransferredOrDeletedTrackedIssueIsUnavailable(t *testing.T) {
 	s := x.linked()
 	x.api.githubGone = true
 	_, entries := x.ok(s)
-	eq(t, kinds(entries), []string{"unavailable"})
+	eq(t, kinds(entries), []Kind{"unavailable"})
 }
 
 func TestReplacedGitHubIssueIsUnavailable(t *testing.T) {
 	x := newSyncer(t)
 	s := x.linked()
-	x.api.source["id"] = 99
+	x.api.source.ID = 99
 	_, entries := x.ok(s)
-	eq(t, kinds(entries), []string{"unavailable"})
+	eq(t, kinds(entries), []Kind{"unavailable"})
 	eq(t, len(x.api.writes), 1)
 }
 
 func TestDeletedOrMovedJiraIssueIsUnavailable(t *testing.T) {
 	x := newSyncer(t)
 	s := x.linked()
-	x.api.rows["github"] = []Object{ghComment(11, "Original")}
+	x.api.rows["github"] = []Comment{ghComment(11, "Original")}
 	x.api.jiraGone = true
 	_, entries := x.ok(s)
-	eq(t, kinds(entries), []string{"unavailable"})
+	eq(t, kinds(entries), []Kind{"unavailable"})
 	eq(t, len(x.api.writes), 1)
 }
 
 func TestGitHubQuoteReplyOfCopyStillSyncs(t *testing.T) {
 	x := newSyncer(t)
 	s := x.linked()
-	x.api.rows["jira"] = []Object{jiraComment(22, "Jira original")}
+	x.api.rows["jira"] = []Comment{jiraComment(22, "Jira original")}
 	s, _ = x.ok(s)
-	lines := strings.Split(x.api.rows["github"][0]["body"].(string), "\n")
+	lines := strings.Split(x.api.rows["github"][0].Body.(string), "\n")
 	for i, line := range lines {
 		lines[i] = "> " + line
 	}
@@ -331,22 +332,22 @@ func TestGitHubQuoteReplyOfCopyStillSyncs(t *testing.T) {
 	x.api.rows["github"] = append(x.api.rows["github"],
 		ghComment(31, quoted+"\n\nBottom reply"), ghComment(32, "Top reply\n\n"+quoted))
 	s, entries := x.ok(s)
-	eq(t, sorted(kinds(entries)), []string{"create_comment", "create_comment", "noop"})
+	eq(t, sorted(kinds(entries)), []Kind{"create_comment", "create_comment", "noop"})
 	eq(t, len(s.Comments), 3)
 }
 
 func TestJiraQuoteReplyOfCopyStillSyncs(t *testing.T) {
 	x := newSyncer(t)
 	s := x.linked()
-	x.api.rows["github"] = []Object{ghComment(11, "GitHub original")}
+	x.api.rows["github"] = []Comment{ghComment(11, "GitHub original")}
 	s, _ = x.ok(s)
 	reply := jiraComment(41, "Top reply")
-	body := asObject(reply["body"])
+	body := asObject(reply.Body)
 	body["content"] = append(list(body["content"]),
-		Object{"type": "blockquote", "content": asObject(x.api.rows["jira"][0]["body"])["content"]})
+		Object{"type": "blockquote", "content": asObject(x.api.rows["jira"][0].Body)["content"]})
 	x.api.rows["jira"] = append(x.api.rows["jira"], reply)
 	_, entries := x.ok(s)
-	eq(t, sorted(kinds(entries)), []string{"create_comment", "noop"})
+	eq(t, sorted(kinds(entries)), []Kind{"create_comment", "noop"})
 	eq(t, lastWrite(x.api), write{"create", "github"})
 }
 
@@ -366,13 +367,13 @@ func TestRejectedIssueCreationIsRetriedOnNextRun(t *testing.T) {
 func TestRejectedCommentDoesNotStopLaterWrites(t *testing.T) {
 	x := newSyncer(t)
 	s := x.linked()
-	x.api.rows["github"] = []Object{ghComment(11, "one"), ghComment(12, "two")}
+	x.api.rows["github"] = []Comment{ghComment(11, "one"), ghComment(12, "two")}
 	x.api.refuse = []int{422}
 	s, entries := x.ok(s)
-	eq(t, []string{entries[0].Outcome, entries[1].Outcome}, []string{"rejected", ""})
+	eq(t, []Outcome{entries[0].Outcome, entries[1].Outcome}, []Outcome{"rejected", ""})
 	eq(t, len(s.Comments), 1)
 	s, entries = x.ok(s)
-	eq(t, sorted(kinds(entries)), []string{"create_comment", "noop"})
+	eq(t, sorted(kinds(entries)), []Kind{"create_comment", "noop"})
 	eq(t, len(s.Comments), 2)
 }
 
@@ -392,9 +393,9 @@ func TestAuthRejectionStopsRunButLeavesIntentRetryable(t *testing.T) {
 func TestRejectedEditIsPlannedAgain(t *testing.T) {
 	x := newSyncer(t)
 	s := x.linked()
-	x.api.rows["github"] = []Object{ghComment(11, "Original")}
+	x.api.rows["github"] = []Comment{ghComment(11, "Original")}
 	s, _ = x.ok(s)
-	x.api.rows["github"][0]["body"] = "Edited"
+	x.api.rows["github"][0].Body = "Edited"
 	x.api.refuse = []int{400}
 	s, entries := x.ok(s)
 	eq(t, entries[0].Outcome, "rejected")
@@ -406,13 +407,13 @@ func TestRejectedEditIsPlannedAgain(t *testing.T) {
 func TestCRLFBodiesCopyCleanlyAndStayStable(t *testing.T) {
 	x := newSyncer(t)
 	s := x.linked()
-	x.api.rows["github"] = []Object{ghComment(11, "line one\r\nline two")}
+	x.api.rows["github"] = []Comment{ghComment(11, "line one\r\nline two")}
 	s, _ = x.ok(s)
 	copied := jiraText(t, x.api.rows["jira"][0])
 	if strings.Contains(copied, "\r") || !strings.Contains(copied, "line one\nline two") {
 		t.Fatalf("copy not normalized: %q", copied)
 	}
-	x.api.rows["github"][0]["body"] = "line one\nline two"
+	x.api.rows["github"][0].Body = "line one\nline two"
 	_, entries := x.ok(s)
 	eq(t, entries[0].Kind, "noop")
 }
@@ -420,38 +421,22 @@ func TestCRLFBodiesCopyCleanlyAndStayStable(t *testing.T) {
 func TestMismatchedRecoveryBlocksOnlyThatComment(t *testing.T) {
 	x := newSyncer(t)
 	s := x.linked()
-	x.api.rows["github"] = []Object{ghComment(11, "Original")}
+	x.api.rows["github"] = []Comment{ghComment(11, "Original")}
 	x.api.loseResponse = true
 	x.fails(s)
 	pending := x.last()
 	x.api.loseResponse = false
-	x.api.rows["jira"][0]["body"] = toADF(strings.Replace(jiraText(t, x.api.rows["jira"][0]), "Original", "Tampered", 1))
+	x.api.rows["jira"][0].Body = toADF(strings.Replace(jiraText(t, x.api.rows["jira"][0]), "Original", "Tampered", 1))
 	x.api.rows["github"] = append(x.api.rows["github"], ghComment(12, "Later comment"))
 	_, entries := x.ok(pending)
-	eq(t, kinds(entries), []string{"blocked", "create_comment"})
+	eq(t, kinds(entries), []Kind{"blocked", "create_comment"})
 	eq(t, lastWrite(x.api), write{"create", "jira"})
-}
-
-func TestIrrelevantChangesBetweenPlanAndApplyAreIgnored(t *testing.T) {
-	x := newSyncer(t)
-	s := x.linked()
-	x.api.rows["github"] = []Object{ghComment(11, "original")}
-	entries, err := Plan(x.c, s, x.api, time.Now())
-	if err != nil {
-		t.Fatal(err)
-	}
-	x.api.rows["github"][0]["reactions"] = Object{"total_count": 1}
-	s, err = Apply(x.c, s, x.api, entries, x.save)
-	if err != nil {
-		t.Fatal(err)
-	}
-	eq(t, len(s.Comments), 1)
 }
 
 func TestAcknowledgedEntriesStayQuietUntilReasonChanges(t *testing.T) {
 	x := newSyncer(t)
 	s := x.linked()
-	x.api.rows["github"] = []Object{ghComment(11, "Original")}
+	x.api.rows["github"] = []Comment{ghComment(11, "Original")}
 	s, _ = x.ok(s)
 	x.api.rows["github"] = nil
 	plan := func() []*Entry {
@@ -472,8 +457,8 @@ func TestAcknowledgedEntriesStayQuietUntilReasonChanges(t *testing.T) {
 	again, _ := Acknowledge(s, entries, nil)
 	eq(t, again.Acknowledged, s.Acknowledged)
 	eq(t, entries[0].Kind, "acknowledged")
-	x.api.rows["github"] = []Object{ghComment(11, "Original")}
-	x.api.rows["jira"][0]["visibility"] = Object{"type": "role", "value": "Developers"}
+	x.api.rows["github"] = []Comment{ghComment(11, "Original")}
+	x.api.rows["jira"][0].Restricted = true
 	entries = plan()
 	lapsed, _ := Acknowledge(s, entries, nil)
 	eq(t, len(lapsed.Acknowledged), 0)
@@ -484,12 +469,12 @@ func TestAcknowledgedEntriesStayQuietUntilReasonChanges(t *testing.T) {
 func quietPair(t *testing.T, x *syncer) *State {
 	t.Helper()
 	s := x.linked()
-	x.api.source["updated_at"] = "2026-01-02T00:00:00Z"
-	x.api.jira["fields"] = Object{"updated": "2026-01-02T00:00:00.000+0000"}
-	x.api.rows["github"] = []Object{ghComment(11, "GitHub original")}
+	x.api.source.UpdatedAt = "2026-01-02T00:00:00Z"
+	x.api.jira.Fields.Updated = "2026-01-02T00:00:00.000+0000"
+	x.api.rows["github"] = []Comment{ghComment(11, "GitHub original")}
 	s, _ = x.ok(s)
 	s, entries := x.ok(s)
-	eq(t, kinds(entries), []string{"noop", "reconciled"})
+	eq(t, kinds(entries), []Kind{"noop", "reconciled"})
 	if _, ok := s.Reconciled["1"]; !ok {
 		t.Fatal("pair not recorded as reconciled")
 	}
@@ -501,19 +486,19 @@ func TestUnchangedPairSkipsCommentReads(t *testing.T) {
 	x := newSyncer(t)
 	s := quietPair(t, x)
 	_, entries := x.ok(s)
-	eq(t, kinds(entries), []string{"unchanged"})
+	eq(t, kinds(entries), []Kind{"unchanged"})
 	eq(t, len(x.api.listReads), 0)
 }
 
 func TestIssueActivityTriggersFullScan(t *testing.T) {
 	for _, side := range sides {
-		t.Run(side, func(t *testing.T) {
+		t.Run(string(side), func(t *testing.T) {
 			x := newSyncer(t)
 			s := quietPair(t, x)
 			if side == "github" {
-				x.api.source["updated_at"] = "2026-01-03T00:00:00Z"
+				x.api.source.UpdatedAt = "2026-01-03T00:00:00Z"
 			} else {
-				asObject(x.api.jira["fields"])["updated"] = "2026-01-03T00:00:00.000+0000"
+				x.api.jira.Fields.Updated = "2026-01-03T00:00:00.000+0000"
 			}
 			x.api.rows["jira"] = append(x.api.rows["jira"], jiraComment(22, "New Jira comment"))
 			_, entries := x.ok(s)
@@ -528,33 +513,33 @@ func TestIssueActivityTriggersFullScan(t *testing.T) {
 func TestPeriodicRescanCatchesEditsWithoutIssueActivity(t *testing.T) {
 	x := newSyncer(t)
 	s := quietPair(t, x)
-	x.api.rows["github"][0]["body"] = "Edited without bumping issue timestamps"
+	x.api.rows["github"][0].Body = "Edited without bumping issue timestamps"
 	scanned, err := parseTimestamp(s.Reconciled["1"].Scanned)
 	if err != nil {
 		t.Fatal(err)
 	}
 	entries, _ := Plan(x.c, s, x.api, scanned.Add(23*time.Hour))
-	eq(t, kinds(entries), []string{"unchanged"})
+	eq(t, kinds(entries), []Kind{"unchanged"})
 	entries, _ = Plan(x.c, s, x.api, scanned.Add(24*time.Hour))
-	eq(t, kinds(entries), []string{"edit_comment"})
+	eq(t, kinds(entries), []Kind{"edit_comment"})
 }
 
 func TestPairsNeedingAttentionAreNeverMarkedQuiet(t *testing.T) {
 	x := newSyncer(t)
 	s := quietPair(t, x)
-	x.api.source["updated_at"] = "2026-01-03T00:00:00Z"
+	x.api.source.UpdatedAt = "2026-01-03T00:00:00Z"
 	x.api.rows["github"] = nil
 	s, entries := x.ok(s)
-	eq(t, kinds(entries), []string{"unavailable"})
+	eq(t, kinds(entries), []Kind{"unavailable"})
 	eq(t, s.Reconciled["1"].GitHub, "2026-01-02T00:00:00Z")
 	_, entries = x.ok(s)
-	eq(t, kinds(entries), []string{"unavailable"})
+	eq(t, kinds(entries), []Kind{"unavailable"})
 }
 
 func TestPendingOperationForcesFullScan(t *testing.T) {
 	x := newSyncer(t)
 	s := quietPair(t, x)
-	s.Operations[token(x.c, "comment_github", 99)] = Operation{Kind: "comment_github", SourceID: "99", GitHub: 1, Status: "pending"}
+	s.Operations[token(x.c, OpGitHubComment, "99")] = Operation{Kind: "comment_github", SourceID: "99", GitHub: 1, Status: "pending"}
 	_, entries := x.ok(s)
 	if slices.Contains(kinds(entries), "unchanged") || len(x.api.listReads) == 0 {
 		t.Fatalf("pending operation did not force a scan: %v", kinds(entries))
@@ -564,22 +549,22 @@ func TestPendingOperationForcesFullScan(t *testing.T) {
 func TestTrailingMarkerIdentifiesOnlyRealCopies(t *testing.T) {
 	op := strings.Repeat("a", 64)
 	m := marker(op)
-	eq(t, hasMarker("github", Object{"body": "Synced\n\n" + m + "\n"}, op), true)
-	eq(t, hasMarker("github", Object{"body": "> " + m + "\n\nreply"}, ""), false)
-	eq(t, hasMarker("github", Object{"body": "reply\n\n> " + m}, ""), false)
-	eq(t, hasMarker("github", Object{"body": "mentions " + m + " inline"}, ""), false)
+	eq(t, hasMarker(Comment{Side: SideGitHub, Body: "Synced\n\n" + m + "\n"}, op), true)
+	eq(t, hasMarker(Comment{Side: SideGitHub, Body: "> " + m + "\n\nreply"}, ""), false)
+	eq(t, hasMarker(Comment{Side: SideGitHub, Body: "reply\n\n> " + m}, ""), false)
+	eq(t, hasMarker(Comment{Side: SideGitHub, Body: "mentions " + m + " inline"}, ""), false)
 	doc := toADF("Synced\n\n" + m)
 	doc["content"] = append(list(doc["content"]), Object{"type": "paragraph", "content": []any{}})
-	eq(t, hasMarker("jira", Object{"body": doc}, op), true)
-	eq(t, hasMarker("jira", Object{"body": doc}, strings.Repeat("b", 64)), false)
+	eq(t, hasMarker(Comment{Side: SideJira, Body: doc}, op), true)
+	eq(t, hasMarker(Comment{Side: SideJira, Body: doc}, strings.Repeat("b", 64)), false)
 }
 
 func TestPrewriteSourceChangeAborts(t *testing.T) {
 	x := newSyncer(t)
 	s := x.linked()
-	x.api.rows["github"] = []Object{ghComment(11, "original")}
+	x.api.rows["github"] = []Comment{ghComment(11, "original")}
 	entries, _ := Plan(x.c, s, x.api, time.Now())
-	x.api.rows["github"][0]["body"] = "changed"
+	x.api.rows["github"][0].Body = "changed"
 	if _, err := Apply(x.c, s, x.api, entries, func(*State) error { return nil }); err == nil {
 		t.Fatal("expected abort")
 	}
@@ -589,11 +574,11 @@ func TestPrewriteSourceChangeAborts(t *testing.T) {
 func TestPrewriteCopyChangeAbortsEdit(t *testing.T) {
 	x := newSyncer(t)
 	s := x.linked()
-	x.api.rows["github"] = []Object{ghComment(11, "original")}
+	x.api.rows["github"] = []Comment{ghComment(11, "original")}
 	s, _ = x.ok(s)
-	x.api.rows["github"][0]["body"] = "changed"
+	x.api.rows["github"][0].Body = "changed"
 	entries, _ := Plan(x.c, s, x.api, time.Now())
-	x.api.rows["jira"][0]["body"] = toADF("human changed copy")
+	x.api.rows["jira"][0].Body = toADF("human changed copy")
 	if _, err := Apply(x.c, s, x.api, entries, func(*State) error { return nil }); err == nil {
 		t.Fatal("expected abort")
 	}
@@ -625,7 +610,7 @@ func TestBindingAndBadConfigFailClosed(t *testing.T) {
 func TestReportOmitsCommentBodies(t *testing.T) {
 	x := newSyncer(t)
 	s := x.linked()
-	x.api.rows["github"] = []Object{ghComment(11, "secret comment")}
+	x.api.rows["github"] = []Comment{ghComment(11, "secret comment")}
 	entries, _ := Plan(x.c, s, x.api, time.Now())
 	data, _ := json.Marshal(entries)
 	if strings.Contains(string(data), "secret comment") {
@@ -638,7 +623,7 @@ func TestCommentCutoff(t *testing.T) {
 	s := x.linked()
 	cutoff, _ := parseTimestamp("2026-02-01T00:00:00Z")
 	x.c.CommentsSince = &cutoff
-	x.api.rows["github"] = []Object{ghComment(11, "old")}
+	x.api.rows["github"] = []Comment{ghComment(11, "old")}
 	_, entries := x.ok(s)
 	eq(t, entries[0].Kind, "excluded")
 }
