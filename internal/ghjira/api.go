@@ -42,6 +42,12 @@ type API interface {
 	ProjectItem(itemID, fieldID int64) (ProjectItem, error)
 	AddProjectItem(number int) error
 	SetProjectStatus(itemID, fieldID int64, optionID string) error
+	// Parent sync. Parents are GitHub issue numbers in the synced repository; 0 means none.
+	SubIssues(number int) ([]GitHubIssue, error)
+	GitHubParent(number int) (int, error)
+	SetGitHubParent(childID int64, parent, oldParent int) error
+	// SetJiraParent sets a Jira issue's parent by key, or removes it when key is "".
+	SetJiraParent(id, key string) error
 }
 
 // HTTP is a small JSON REST client. Only GET requests are automatically retried.
@@ -291,7 +297,7 @@ func httpStatus(err error) (int, bool) {
 
 func (a *Client) JiraIssue(id string) (*JiraIssue, error) {
 	issue := &JiraIssue{}
-	err := a.jira.Do("GET", "/rest/api/3/issue/"+id+"?fields=project,labels,updated,status&properties=gh-jira-sync", nil, issue)
+	err := a.jira.Do("GET", "/rest/api/3/issue/"+id+"?fields=project,labels,updated,status,parent&properties=gh-jira-sync", nil, issue)
 	if status, ok := httpStatus(err); ok && status == 404 {
 		return nil, nil
 	}
@@ -691,4 +697,61 @@ func (a *Client) withProperties(comments []apiJiraComment) ([]Comment, error) {
 		result[i] = c.comment()
 	}
 	return result, nil
+}
+
+// inRepository reports an issue in the synced repository; sub-issues may live in
+// other repositories of the same owner, which are not synced.
+func (a *Client) inRepository(issue *GitHubIssue) bool {
+	return strings.EqualFold(issue.RepositoryURL, a.c.GitHubURL+"/repos/"+a.c.Repository)
+}
+
+func (a *Client) SubIssues(number int) ([]GitHubIssue, error) {
+	all, err := ghPages[GitHubIssue](a, a.ghPath(number)+"/sub_issues", nil)
+	if err != nil {
+		return nil, err
+	}
+	var result []GitHubIssue
+	for _, child := range all {
+		if a.inRepository(&child) {
+			result = append(result, child)
+		}
+	}
+	return result, nil
+}
+
+// GitHubParent returns the issue's parent number, or 0 when it has none or the
+// parent is in another repository.
+func (a *Client) GitHubParent(number int) (int, error) {
+	parent := &GitHubIssue{}
+	err := a.github.Do("GET", a.ghPath(number)+"/parent", nil, parent)
+	if status, ok := httpStatus(err); ok && status == 404 {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	if !a.inRepository(parent) {
+		return 0, nil
+	}
+	return parent.Number, nil
+}
+
+// SetGitHubParent makes the issue with ID childID a sub-issue of parent, replacing
+// any current parent, or removes it from oldParent when parent is 0. GitHub takes the
+// sub-issue's ID here, not its number.
+func (a *Client) SetGitHubParent(childID int64, parent, oldParent int) error {
+	if parent == 0 {
+		return a.github.Do("DELETE", a.ghPath(oldParent)+"/sub_issue", map[string]int64{"sub_issue_id": childID}, nil)
+	}
+	body := map[string]any{"sub_issue_id": childID, "replace_parent": true}
+	return a.github.Do("POST", a.ghPath(parent)+"/sub_issues", body, nil)
+}
+
+func (a *Client) SetJiraParent(id, key string) error {
+	body := map[string]any{"fields": map[string]any{"parent": map[string]string{"key": key}}}
+	if key == "" {
+		// Jira documents removing a parent with update.parent.set.none = true.
+		body = map[string]any{"update": map[string]any{"parent": []any{map[string]any{"set": map[string]bool{"none": true}}}}}
+	}
+	return a.jira.Do("PUT", "/rest/api/3/issue/"+id, body, nil)
 }

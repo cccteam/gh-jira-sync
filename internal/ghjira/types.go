@@ -65,12 +65,16 @@ const (
 	KindAddToProject        Kind = "add_to_project"
 	KindSyncProjectStatus   Kind = "sync_project_status"
 	KindProjectStatusAgreed Kind = "project_status_agreed"
+	// Parent sync: GitHub sub-issues mirror Jira parent links (for example Epic → Story).
+	KindSyncParent   Kind = "sync_parent"
+	KindParentAgreed Kind = "parent_agreed"
 )
 
 // writes reports kinds that perform a remote write and count against max_operations.
 func (k Kind) writes() bool {
 	switch k {
-	case KindCreateIssue, KindCreateComment, KindEditComment, KindSyncStatus, KindAddToProject, KindSyncProjectStatus:
+	case KindCreateIssue, KindCreateComment, KindEditComment, KindSyncStatus, KindAddToProject, KindSyncProjectStatus,
+		KindSyncParent:
 		return true
 	}
 	return false
@@ -124,6 +128,9 @@ const OpStatus OpKind = "status"
 // OpProjectStatus identifies a pair's project status decisions, like OpStatus.
 const OpProjectStatus OpKind = "project_status"
 
+// OpParent identifies a pair's parent decisions, like OpStatus.
+const OpParent OpKind = "parent"
+
 // commentOp is the operation kind for copying a comment that originates on side.
 func commentOp(side Side) OpKind {
 	if side == SideGitHub {
@@ -165,6 +172,11 @@ type GitHubIssue struct {
 	} `json:"type"`
 	UpdatedAt   string    `json:"updated_at"`
 	PullRequest *struct{} `json:"pull_request"` // present only on pull requests
+	// SubIssuesSummary counts sub-issues; only parents are asked for their children.
+	SubIssuesSummary *struct {
+		Total int `json:"total"`
+	} `json:"sub_issues_summary"`
+	RepositoryURL string `json:"repository_url"`
 }
 
 func (i *GitHubIssue) idString() string { return strconv.FormatInt(i.ID, 10) }
@@ -210,6 +222,9 @@ type JiraIssue struct {
 		} `json:"project"`
 		Updated string     `json:"updated"`
 		Status  JiraStatus `json:"status"`
+		Parent  *struct {
+			Key string `json:"key"`
+		} `json:"parent"`
 	} `json:"fields"`
 	Properties struct {
 		Identity *IssueIdentity `json:"gh-jira-sync"`

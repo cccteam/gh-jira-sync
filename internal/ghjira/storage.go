@@ -42,6 +42,9 @@ type Pair struct {
 	// ProjectStatus is the project option both sides last agreed on, in project
 	// status mode; nil until they first agree. It works like Closed.
 	ProjectStatus *string `json:"project_status,omitempty"`
+	// Parent is the parent both sides last agreed on, as a GitHub issue number (0 for
+	// none); nil until they first agree. It works like Closed.
+	Parent *int `json:"parent,omitempty"`
 }
 
 // Operation is a journaled create: pending before dispatch, done after confirmation,

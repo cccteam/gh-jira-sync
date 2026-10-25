@@ -30,6 +30,7 @@ type Entry struct {
 	Outcome           Outcome `json:"outcome,omitempty"`
 	Status            string  `json:"status,omitempty"`     // target "open" or "closed" for status entries
 	IssueType         string  `json:"issue_type,omitempty"` // Jira issue type ID for create_issue
+	Parent            string  `json:"parent,omitempty"`     // target parent, "#<number>" or "none", for parent entries
 
 	issue       *GitHubIssue     // source issue as planned
 	comment     Comment          // source comment as planned
@@ -49,6 +50,9 @@ type Entry struct {
 	option      string      // project option to apply or record
 	fieldID     int64       // project status field
 	optionID    string      // ID of option, for project writes
+	parent      int         // parent to apply or record (GitHub number, 0 for none)
+	ghParent    int         // GitHub parent as planned
+	jiraParent  int         // Jira parent as planned, as a GitHub number
 }
 
 func (e *Entry) block(reason string) { e.Kind, e.Reason = KindBlocked, reason }
@@ -234,6 +238,12 @@ func Plan(c *Config, s *State, api API, now time.Time) ([]*Entry, error) {
 		order = append(order, n)
 		issues[n] = issue // nil when deleted or transferred
 	}
+	var ghParents map[int]int
+	if c.SyncParents {
+		if ghParents, err = gitHubParents(s, api, issues); err != nil {
+			return nil, err
+		}
+	}
 	for _, n := range order {
 		source := issues[n]
 		if source != nil && source.PullRequest != nil {
@@ -280,6 +290,11 @@ func Plan(c *Config, s *State, api API, now time.Time) ([]*Entry, error) {
 			}
 			if projectEntry != nil {
 				entries = append(entries, projectEntry)
+			}
+		}
+		if c.SyncParents {
+			if parentEntry := planParent(c, s, pair, source, jira, ghParents); parentEntry != nil {
+				entries = append(entries, parentEntry)
 			}
 		}
 		if !c.Comments {
@@ -740,6 +755,10 @@ func Apply(c *Config, state *State, api API, entries []*Entry, save func(*State)
 			setAgreedStatus(s, e.GitHub, e.closed)
 		case KindSyncStatus:
 			err = applyStatus(s, api, e, save)
+		case KindParentAgreed:
+			setAgreedParent(s, e.GitHub, e.parent)
+		case KindSyncParent:
+			err = applyParent(s, api, e, save)
 		case KindProjectStatusAgreed:
 			setAgreedProjectStatus(s, e.GitHub, e.option)
 		case KindAddToProject:
@@ -764,6 +783,10 @@ func Apply(c *Config, state *State, api API, entries []*Entry, save func(*State)
 			// already closed close its Jira issue on the next run.
 			if err == nil && e.Kind == KindCreateIssue && e.Outcome == "" && (c.StatusSync != nil || c.ProjectStatus != nil) {
 				setAgreedStatus(s, e.GitHub, false)
+			}
+			// Likewise a new Jira issue has no parent; a GitHub parent is applied next run.
+			if err == nil && e.Kind == KindCreateIssue && e.Outcome == "" && c.SyncParents {
+				setAgreedParent(s, e.GitHub, 0)
 			}
 		case KindCreateComment, KindRecoverComment:
 			err = applyNewComment(s, api, e, save)
@@ -1060,4 +1083,158 @@ func isSyncError(err error) bool {
 	var s *SyncError
 	var h *HTTPStatusError
 	return errors.As(err, &s) || errors.As(err, &h)
+}
+
+// gitHubParents maps each linked issue to its linked GitHub parent. Only linked
+// issues with sub-issues are asked for their children, one request each. A parent
+// that is not linked counts as no parent: it has no Jira issue to point at yet.
+func gitHubParents(s *State, api API, issues map[string]*GitHubIssue) (map[int]int, error) {
+	parents := map[int]int{}
+	for _, n := range sortedKeys(s.Pairs) {
+		issue := issues[n]
+		if issue == nil || issue.SubIssuesSummary == nil || issue.SubIssuesSummary.Total == 0 {
+			continue
+		}
+		children, err := api.SubIssues(issue.Number)
+		if err != nil {
+			return nil, err
+		}
+		for _, child := range children {
+			if _, linked := s.Pairs[strconv.Itoa(child.Number)]; linked {
+				parents[child.Number] = issue.Number
+			}
+		}
+	}
+	return parents, nil
+}
+
+func parentName(number int) string {
+	if number == 0 {
+		return "none"
+	}
+	return "#" + strconv.Itoa(number)
+}
+
+// linkedNumber returns the GitHub issue linked to a Jira key.
+func linkedNumber(s *State, key string) (int, bool) {
+	for _, p := range s.Pairs {
+		if p.JiraKey == key {
+			return p.GitHub, true
+		}
+	}
+	return 0, false
+}
+
+// planParent mirrors parent links between linked issues: a GitHub sub-issue's parent
+// and the Jira issue's parent (for example an Epic above a Story). Like status, the
+// pair records the parent both sides last agreed on; the side that differs from it
+// changed. Conflicting changes, disagreement with nothing recorded, and Jira parents
+// that are not linked to a GitHub issue block for review.
+func planParent(c *Config, s *State, pair Pair, source *GitHubIssue, jira *JiraIssue, ghParents map[int]int) *Entry {
+	e := &Entry{GitHub: pair.GitHub, Operation: token(c, OpParent, pair.GitHubID), pair: pair, issue: source, jira: jira}
+	gh, jr := ghParents[pair.GitHub], 0
+	if p := jira.Fields.Parent; p != nil {
+		number, linked := linkedNumber(s, p.Key)
+		if !linked {
+			e.block("Jira parent " + p.Key + " is not linked to a GitHub issue; parent sync paused for this issue")
+			return e
+		}
+		jr = number
+	}
+	e.ghParent, e.jiraParent = gh, jr
+	agreed := pair.Parent
+	switch {
+	case gh == jr:
+		if agreed != nil && *agreed == gh {
+			return nil
+		}
+		e.Kind, e.parent = KindParentAgreed, gh
+	case agreed == nil:
+		e.block("GitHub parent " + parentName(gh) + " and Jira parent " + parentName(jr) +
+			" differ, with no agreed parent recorded; align them manually")
+		return e
+	case gh == *agreed: // Jira moved
+		e.Kind, e.Destination, e.parent = KindSyncParent, SideGitHub, jr
+	case jr == *agreed: // GitHub moved
+		e.Kind, e.Destination, e.parent = KindSyncParent, SideJira, gh
+	default:
+		e.block("Both sides changed since the agreed parent " + parentName(*agreed) + ": GitHub has " +
+			parentName(gh) + ", Jira has " + parentName(jr) + "; align them manually")
+		return e
+	}
+	e.Parent = parentName(e.parent)
+	return e
+}
+
+func setAgreedParent(s *State, number, parent int) {
+	n := strconv.Itoa(number)
+	pair := s.Pairs[n]
+	pair.Parent = &parent
+	s.Pairs[n] = pair
+}
+
+// applyParent moves one side's parent link to match the other, re-checking both
+// sides before and after. Like status changes it is idempotent and not journaled.
+func applyParent(s *State, api API, e *Entry, save func(*State) error) error {
+	current := func() (int, int, error) {
+		gh, err := api.GitHubParent(e.GitHub)
+		if err != nil {
+			return 0, 0, err
+		}
+		if _, linked := s.Pairs[strconv.Itoa(gh)]; !linked {
+			gh = 0
+		}
+		jira, err := api.JiraIssue(e.pair.JiraID)
+		if err != nil {
+			return 0, 0, err
+		}
+		if jira == nil {
+			return 0, 0, syncErr("Linked Jira issue vanished after plan; rerun")
+		}
+		jr := 0
+		if p := jira.Fields.Parent; p != nil {
+			number, linked := linkedNumber(s, p.Key)
+			if !linked {
+				return 0, 0, syncErr("Jira parent changed to an unlinked issue after plan; rerun")
+			}
+			jr = number
+		}
+		return gh, jr, nil
+	}
+	gh, jr, err := current()
+	if err != nil {
+		return err
+	}
+	if gh == e.parent && jr == e.parent {
+		return alreadyDone(s, e, save, func() { setAgreedParent(s, e.GitHub, e.parent) })
+	}
+	if gh != e.ghParent || jr != e.jiraParent {
+		return syncErr("Parent changed after plan; rerun")
+	}
+	if e.Destination == SideGitHub {
+		err = api.SetGitHubParent(e.issue.ID, e.parent, gh)
+	} else {
+		key := ""
+		if e.parent != 0 {
+			key = s.Pairs[strconv.Itoa(e.parent)].JiraKey
+		}
+		err = api.SetJiraParent(e.pair.JiraID, key)
+	}
+	if status, refused := refusedStatus(err); refused && itemRejections[status] {
+		// For example a Jira hierarchy rule: a Story's parent must be an Epic.
+		e.Outcome, e.Reason = OutcomeRejected, "Parent change rejected with HTTP "+strconv.Itoa(status)+
+			"; check that the issue types allow this parent (for example an Epic above a Story). Retried next run"
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if gh, jr, err = current(); err != nil {
+		return err
+	}
+	if gh != e.parent || jr != e.parent {
+		return syncErr("Parent change not confirmed; GitHub has %s, Jira has %s", parentName(gh), parentName(jr))
+	}
+	setAgreedParent(s, e.GitHub, e.parent)
+	return save(s)
 }

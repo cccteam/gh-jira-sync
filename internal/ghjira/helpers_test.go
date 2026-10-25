@@ -354,3 +354,9 @@ var fakeConfig = func() *Config {
 	}
 	return c
 }()
+
+// Parent sync on the single-issue fake: never any parent.
+func (f *fakeAPI) SubIssues(int) ([]GitHubIssue, error)  { return nil, nil }
+func (f *fakeAPI) GitHubParent(int) (int, error)         { return 0, nil }
+func (f *fakeAPI) SetGitHubParent(int64, int, int) error { return nil }
+func (f *fakeAPI) SetJiraParent(string, string) error    { return nil }

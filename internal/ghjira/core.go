@@ -63,8 +63,11 @@ type Config struct {
 	Comments         bool
 	CommentsSince    *time.Time
 	JiraCreateFields Object
-	StatusSync       *StatusSync    // nil leaves issue status alone
-	ProjectStatus    *ProjectStatus // nil disables project status mode
+	StatusSync       *StatusSync // nil leaves issue status alone
+	// SyncParents mirrors GitHub sub-issue parents and Jira parent links between
+	// linked issues, such as an Epic and its stories.
+	SyncParents   bool
+	ProjectStatus *ProjectStatus // nil disables project status mode
 }
 
 // ProjectStatus mirrors a GitHub Project's single-select field (normally Status)
@@ -214,6 +217,7 @@ var configKeys = map[string]bool{
 	"jira_issue_type": true, "selection_label": true, "issue_state": true, "max_operations": true,
 	"max_pages": true, "comments": true, "comments_since": true, "jira_create_fields": true,
 	"full_rescan_hours": true, "status_sync": true, "project_status": true, "jira_issue_types": true,
+	"sync_parents": true,
 }
 
 // ParseConfig validates sync.json. Unknown keys and wrong types fail closed.
@@ -315,6 +319,9 @@ func ParseConfig(data []byte) (*Config, error) {
 	}
 	if c.Comments, ok = value("comments", true).(bool); !ok {
 		return nil, syncErr("comments must be boolean")
+	}
+	if c.SyncParents, ok = value("sync_parents", false).(bool); !ok {
+		return nil, syncErr("sync_parents must be boolean")
 	}
 	if since := value("comments_since", nil); since != nil {
 		s, isString := since.(string)

@@ -31,7 +31,7 @@ Set credentials through your secret manager or shell environment:
 
 The Jira account needs Browse Projects, Create Issues, Add Comments, Edit Own
 Comments, and access to issue properties, plus Transition Issues when status sync
-is on. Jira Software and business projects are
+is on and Edit Issues when `sync_parents` is on. Jira Software and business projects are
 supported; Jira Service Management projects are rejected to avoid mishandling
 internal comments. HTTPS is mandatory and credentials never follow redirects.
 
@@ -244,6 +244,7 @@ See [sync.example.json](sync.example.json). Unknown keys fail validation.
 | `jira_project` | Required project key, e.g. `ENG` |
 | `jira_issue_type` | Required **issue type ID string**, e.g. `10001` |
 | `jira_issue_types` | `{}`; maps GitHub issue types to Jira issue type IDs for new issues, e.g. `{"Bug": "10004", "Feature": "10005"}`; see [Issue types](#issue-types) |
+| `sync_parents` | `false`; mirror GitHub sub-issue parents and Jira parent links (for example Epic → Story) between linked issues; see [Epics and parent links](#epics-and-parent-links) |
 | `github_url` | `https://api.github.com`; compatible custom API bases allowed |
 | `selection_label` | `sync-jira`; `null` explicitly opts into all issues |
 | `issue_state` | `open`; `closed` or `all` also supported for creation selection |
@@ -312,6 +313,31 @@ entries. List a project's issue type IDs with:
 ```sh
 curl -s -u "$JIRA_EMAIL:$JIRA_API_TOKEN" "$JIRA_SITE/rest/api/3/project/<KEY>" | jq '.issueTypes[] | {id, name, subtask}'
 ```
+
+## Epics and parent links
+
+Jira groups work under parents, such as an Epic above its stories. GitHub does the
+same with **sub-issues**. To match them:
+
+1. Have an organization admin add an **Epic** issue type in GitHub (organization
+   **Settings → Planning → Issue types**) and map it in `jira_issue_types`, for example
+   `"Epic": "10216"`, so GitHub Epics create Jira Epics.
+2. Set `"sync_parents": true`.
+3. Make issues sub-issues of an Epic on GitHub, or set their parent in Jira.
+
+With `sync_parents`, each linked pair's parent link is mirrored in both directions
+between **linked** issues. Like status, each pair records the parent both sides last
+agreed on; the side that differs changed, and the other side is updated to match,
+checked before and after. Both sides changing to different parents, disagreement with
+nothing recorded, or a Jira parent that is not linked to a GitHub issue blocks that
+issue for review. A GitHub parent that is not linked yet counts as no parent until it
+is, so a new Epic and its stories converge over a few runs whatever order they are
+created in. New Jira issues are created without a parent and get it on the next run.
+
+Jira enforces its hierarchy: a Story, Task, or Bug can have an Epic as parent, but not
+another Story. A change Jira refuses is reported as `rejected` and retried next run.
+One level is synced; sub-issues of stories are not turned into Jira subtasks. Each run
+lists the sub-issues of linked issues that have any, one request per parent.
 
 ## Issue status
 
@@ -484,6 +510,7 @@ Every entry has `github`, `operation`, and `kind`; the rest appear only when the
 | `status` | Target: `open` or `closed` for `sync_status` and `status_agreed`; the project option for `sync_project_status` and `project_status_agreed` |
 | `previous_rejection` | HTTP status of an earlier refused attempt that this entry retries |
 | `issue_type` | Jira issue type ID a `create_issue` entry will use |
+| `parent` | Target parent for `sync_parent` and `parent_agreed`: `#<GitHub number>` or `none` |
 | `outcome` | Set during apply: `rejected` when the service refused the write (nothing changed; retried next run), or `already_done` when a status change was already in place, for example made by a project workflow, so nothing was written and the agreement was recorded |
 
 Entries are planned before any write. In apply mode, only `outcome` and `reason` can
@@ -508,6 +535,8 @@ others write nothing to either service; some only update the state journal.
 | `add_to_project` | write | Add the GitHub issue to the project; its status is synced on the next run |
 | `sync_project_status` | write | Set the project item's option, or transition Jira, to match the other side (`destination`, `status`) |
 | `project_status_agreed` | state | The project option and Jira status already match; record it as the agreed option |
+| `sync_parent` | write | Set or remove a parent link on the `destination` side to match the other (`parent`) |
+| `parent_agreed` | state | Both sides already have the same parent; record it as the agreed parent |
 | `noop` | none | A tracked comment pair is in sync |
 | `reconciled` | state | Every comment on this pair is in sync; record the issues' timestamps so later runs can skip reading its comments |
 | `unchanged` | none | Neither issue has changed since the last full scan; its comments were not read this run |

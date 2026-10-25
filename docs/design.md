@@ -8,6 +8,7 @@
   GitHub issue type when `jira_issue_types` maps it. Do not subsequently sync issue fields,
   labels, assignees, or deletions. Never create GitHub issues from Jira.
 * Optionally mirror open/closed status in both directions (`status_sync`).
+* Optionally mirror parent links: GitHub sub-issues and Jira parents (`sync_parents`).
 * Or mirror a GitHub Project's Status field and Jira statuses (`project_status`).
 * Copy original comments in both directions, including later edits to originals.
 * Report edits to copied comments; preserve them for human review.
@@ -231,3 +232,17 @@ scoped to organization Projects (the reusable workflow mints separate App tokens
 the tool checkout, issues, and projects, each limited to one repository or owner), and API version `2026-03-10`, under which the
 Projects REST endpoints are documented. Adding items and setting the field are
 idempotent and not journaled.
+
+## Parent links
+
+`sync_parents` mirrors one level of hierarchy between linked issues: a GitHub
+sub-issue's parent and the Jira issue's `parent` (an Epic above a Story, in Jira's
+terms). It reuses the agreed-value design of status sync: each pair stores the parent
+both sides last agreed on, as a GitHub issue number (0 for none). GitHub parents are
+read by listing the children of linked issues whose `sub_issues_summary` is non-zero;
+Jira parents come with the issue fields already read. Only linked issues count, so an
+unlinked GitHub parent reads as no parent until it is linked, letting creation order
+not matter. A Jira parent that is not linked has no GitHub counterpart and blocks.
+Writes use GitHub's sub-issue endpoints (`replace_parent` to move, the sub-issue's ID
+rather than its number) and Jira's issue edit (`fields.parent` to set,
+`update.parent.set.none` to remove). Hierarchy refusals are item-level rejections.
