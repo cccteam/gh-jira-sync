@@ -329,7 +329,9 @@ How it behaves:
   change reaches Jira through project sync.
 * **Safety.** Like other writes, adding items and status changes count toward
   `max_operations`, are re-checked before and after, and are retried next run if
-  refused.
+  refused. If the re-check finds both sides already at the target (for example
+  because the project's "Item closed" workflow moved the card after the tool closed
+  the issue), the entry is reported as `already_done` and the agreement is recorded.
 
 ### Credentials for projects
 
@@ -429,7 +431,7 @@ Every entry has `github`, `operation`, and `kind`; the rest appear only when the
 | `destination` | Side that receives the write: `github` or `jira` for comment copies and status changes, or `project` for the GitHub Project item |
 | `status` | Target: `open` or `closed` for `sync_status` and `status_agreed`; the project option for `sync_project_status` and `project_status_agreed` |
 | `previous_rejection` | HTTP status of an earlier refused attempt that this entry retries |
-| `outcome` | `rejected` when the service refused this entry's write during apply; nothing changed and it is retried next run |
+| `outcome` | Set during apply: `rejected` when the service refused the write (nothing changed; retried next run), or `already_done` when a status change was already in place, for example made by a project workflow, so nothing was written and the agreement was recorded |
 
 Entries are planned before any write. In apply mode, only `outcome` and `reason` can
 change afterwards. If a run fails part way (exit code 1), entries before the failure

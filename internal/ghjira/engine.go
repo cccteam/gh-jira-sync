@@ -485,6 +485,7 @@ func planProjectStatus(c *Config, api API, project *ProjectSnapshot, pair Pair, 
 				strconv.Quote(transitions[i].To.Name) + ", which is not mapped to " + strconv.Quote(current))
 		default:
 			e.Kind, e.Destination, e.option, e.Status = KindSyncProjectStatus, SideJira, current, current
+			e.optionID = item.OptionID // the project already shows the target
 			e.transition = transitions[i].ID
 		}
 	default:
@@ -795,6 +796,10 @@ func applyStatus(s *State, api API, e *Entry, save func(*State) error) error {
 	if err != nil {
 		return err
 	}
+	if source.closed() == e.closed && jira.done() == e.closed {
+		// Something else, such as a project workflow, already made the change.
+		return alreadyDone(s, e, save, func() { setAgreedStatus(s, e.GitHub, e.closed) })
+	}
 	if source.closed() != e.issue.closed() || jira.done() != e.jira.done() {
 		return syncErr("Issue status changed after plan; rerun")
 	}
@@ -822,6 +827,15 @@ func applyStatus(s *State, api API, e *Entry, save func(*State) error) error {
 	return save(s)
 }
 
+// alreadyDone handles a status change whose target both sides reached before this
+// write, for example through a project workflow reacting to an earlier write in the
+// same run. Nothing is written; the agreement is recorded.
+func alreadyDone(s *State, e *Entry, save func(*State) error, record func()) error {
+	record()
+	e.Outcome, e.Reason = OutcomeAlreadyDone, "Both sides already matched before this write; agreement recorded"
+	return save(s)
+}
+
 func setAgreedProjectStatus(s *State, number int, option string) {
 	n := strconv.Itoa(number)
 	pair := s.Pairs[n]
@@ -846,6 +860,10 @@ func applyProjectStatus(c *Config, s *State, api API, e *Entry, save func(*State
 	item, jira, err := current()
 	if err != nil {
 		return err
+	}
+	if fromJira, _ := c.ProjectStatus.forJira(jira.Fields.Status.Name); item.OptionID == e.optionID && fromJira == e.option {
+		// Something else, such as the project's own workflows, already made the change.
+		return alreadyDone(s, e, save, func() { setAgreedProjectStatus(s, e.GitHub, e.option) })
 	}
 	if item.OptionID != e.item.OptionID || jira.Fields.Status.Name != e.jira.Fields.Status.Name {
 		return syncErr("Project or Jira status changed after plan; rerun")

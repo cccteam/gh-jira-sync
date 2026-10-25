@@ -174,11 +174,31 @@ func TestStatusChangedAfterPlanAborts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	x.api.jira.Fields.Status = jiraStatus("Done", "done")
+	x.api.source.State = "open" // reopened again: no longer what was planned, nor the target
 	if _, err := Apply(x.c, s, x.api, entries, x.save); err == nil {
 		t.Fatal("expected abort")
 	}
 	eq(t, len(x.api.writes), 1)
+}
+
+func TestStatusAlreadyReachedRecordsAgreement(t *testing.T) {
+	x := newSyncer(t)
+	enableStatus(x)
+	s := x.linked()
+	x.api.source.State = "closed"
+	entries, err := Plan(x.c, s, x.api, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Someone moves Jira to Done before apply writes: the target is already in place.
+	x.api.jira.Fields.Status = jiraStatus("Done", "done")
+	s, err = Apply(x.c, s, x.api, entries, x.save)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := statusEntries(entries)[0]
+	eq(t, []any{e.Outcome, len(x.api.writes)}, []any{OutcomeAlreadyDone, 1})
+	eq(t, agreed(t, s), "closed")
 }
 
 func TestStatusSyncedWhenCommentsOffOrPairQuiet(t *testing.T) {

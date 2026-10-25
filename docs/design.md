@@ -30,7 +30,10 @@ agreement). Comparing each side with it identifies which side moved. Two states 
 true conflicts impossible: if both moved, both now agree. Only disagreement with no
 agreed status is ambiguous, and it blocks rather than guessing a winner. Status
 writes are idempotent, so unlike creates they are not journaled; they are verified
-before and after the write and confirmed by recording the new agreed status.
+before and after the write and confirmed by recording the new agreed status. A
+re-check that finds the target already reached (another actor, such as a project
+workflow reacting to an earlier write in the same run, made it) records the
+agreement as `already_done` instead of failing the run.
 
 ## Architecture
 

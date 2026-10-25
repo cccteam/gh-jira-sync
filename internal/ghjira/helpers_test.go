@@ -57,6 +57,7 @@ type fakeAPI struct {
 	transitions  []JiraTransition
 	project      *ProjectSnapshot // the GitHub Project, in project status mode
 	searches     []string         // started values passed to FindIssue
+	itemClosed   bool             // mimic the project workflow: closing the issue sets Done
 	nextID       int
 }
 
@@ -293,6 +294,11 @@ func (f *fakeAPI) SetGitHubState(_ int, closed bool) error {
 		return err
 	}
 	f.source.State = statusName(closed)
+	if closed && f.itemClosed {
+		item := f.project.Items[f.source.ID]
+		item.OptionID = f.project.Options["Done"]
+		f.project.Items[f.source.ID] = item
+	}
 	f.writes = append(f.writes, write{"state", f.source.State})
 	return f.lost()
 }

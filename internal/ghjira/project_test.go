@@ -334,3 +334,27 @@ func TestProjectTokenRequired(t *testing.T) {
 		t.Fatal("issue client API version changed")
 	}
 }
+
+// TestProjectAutomationRaceRecordsAgreement replays a live run: Jira moved to Done,
+// so the tool closed the GitHub issue, and the project's "Item closed" workflow set
+// the card to Done before the tool's own card update ran.
+func TestProjectAutomationRaceRecordsAgreement(t *testing.T) {
+	x := projectSyncer(t)
+	s := projectInSync(t, x)
+	x.api.itemClosed = true
+	x.api.jira.Fields.Status = jiraStatus("Done", "done")
+	s, entries, err := x.run(s)
+	if err != nil {
+		t.Fatalf("run failed: %v", err)
+	}
+	eq(t, kinds(entries)[:2], []Kind{KindSyncStatus, KindSyncProjectStatus})
+	eq(t, projectEntry(t, x, entries).Outcome, OutcomeAlreadyDone)
+	eq(t, lastWrite(x.api), write{"state", "closed"}) // the card update was not repeated
+	eq(t, []string{agreed(t, s), agreedOption(s)}, []string{"closed", "Done"})
+	writes := len(x.api.writes)
+	_, entries = x.ok(s)
+	eq(t, len(x.api.writes), writes)
+	if projectEntry(t, x, entries) != nil {
+		t.Fatal("agreement was not recorded")
+	}
+}

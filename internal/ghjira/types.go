@@ -144,7 +144,12 @@ func (k *OpKind) UnmarshalText(b []byte) error {
 // Outcome records what apply did that the plan could not predict.
 type Outcome string
 
-const OutcomeRejected Outcome = "rejected"
+const (
+	OutcomeRejected Outcome = "rejected"
+	// OutcomeAlreadyDone: the planned status change was already in place when apply
+	// re-checked, so nothing was written and the agreement was recorded.
+	OutcomeAlreadyDone Outcome = "already_done"
+)
 
 // GitHubIssue is the part of a GitHub issue the sync reads.
 type GitHubIssue struct {
