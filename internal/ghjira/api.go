@@ -194,12 +194,27 @@ func NewClient(c *Config) (*Client, error) {
 func (a *Client) CheckProject() error {
 	var project struct {
 		ProjectTypeKey string `json:"projectTypeKey"`
+		IssueTypes     []struct {
+			ID      string `json:"id"`
+			Subtask bool   `json:"subtask"`
+		} `json:"issueTypes"`
 	}
 	if err := a.jira.Do("GET", "/rest/api/3/project/"+a.c.JiraProject, nil, &project); err != nil {
 		return err
 	}
 	if project.ProjectTypeKey != "software" && project.ProjectTypeKey != "business" {
 		return syncErr("Only Jira Software/business projects supported; service-desk privacy requires separate handling")
+	}
+	// A wrong type ID would fail every creation, or create issues of an unintended type.
+	usable := map[string]bool{}
+	for _, t := range project.IssueTypes {
+		usable[t.ID] = !t.Subtask
+	}
+	configured := append([]string{a.c.JiraIssueType}, slices.Collect(maps.Values(a.c.JiraIssueTypes))...)
+	for _, id := range configured {
+		if !usable[id] {
+			return syncErr("Jira issue type %s is not a standard issue type in project %s", id, a.c.JiraProject)
+		}
 	}
 	return nil
 }
@@ -359,7 +374,7 @@ func (a *Client) CreateIssue(source *GitHubIssue) (*JiraIssue, error) {
 	fields := Object{}
 	maps.Copy(fields, a.c.JiraCreateFields)
 	fields["project"] = Object{"key": a.c.JiraProject}
-	fields["issuetype"] = Object{"id": a.c.JiraIssueType}
+	fields["issuetype"] = Object{"id": a.c.issueTypeFor(source)}
 	fields["summary"] = source.Title
 	fields["description"] = toADF(issueDescription(source))
 	// Identity lives only in this issue property, written atomically with the issue.

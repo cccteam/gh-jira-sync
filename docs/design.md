@@ -4,7 +4,8 @@
 
 * Jira Cloud, initially Software and business projects.
 * Create a Jira issue for each eligible GitHub issue labeled `sync-jira`.
-* Copy title and description at creation. Do not subsequently sync issue fields,
+* Copy title and description at creation, choosing the Jira issue type from the
+  GitHub issue type when `jira_issue_types` maps it. Do not subsequently sync issue fields,
   labels, assignees, or deletions. Never create GitHub issues from Jira.
 * Optionally mirror open/closed status in both directions (`status_sync`).
 * Or mirror a GitHub Project's Status field and Jira statuses (`project_status`).

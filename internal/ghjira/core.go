@@ -47,11 +47,14 @@ func refusedStatus(err error) (int, bool) {
 
 // Config is a validated sync.json.
 type Config struct {
-	Repository       string
-	GitHubURL        string
-	JiraURL          string
-	JiraProject      string
-	JiraIssueType    string
+	Repository    string
+	GitHubURL     string
+	JiraURL       string
+	JiraProject   string
+	JiraIssueType string
+	// JiraIssueTypes maps GitHub issue type names (matched ignoring case) to Jira
+	// issue type IDs for new issues; others use JiraIssueType.
+	JiraIssueTypes   map[string]string
 	SelectionLabel   *string // nil explicitly opts into all issues
 	IssueState       string
 	MaxOperations    int
@@ -210,7 +213,7 @@ var configKeys = map[string]bool{
 	"repository": true, "github_url": true, "jira_url": true, "jira_project": true,
 	"jira_issue_type": true, "selection_label": true, "issue_state": true, "max_operations": true,
 	"max_pages": true, "comments": true, "comments_since": true, "jira_create_fields": true,
-	"full_rescan_hours": true, "status_sync": true, "project_status": true,
+	"full_rescan_hours": true, "status_sync": true, "project_status": true, "jira_issue_types": true,
 }
 
 // ParseConfig validates sync.json. Unknown keys and wrong types fail closed.
@@ -265,6 +268,25 @@ func ParseConfig(data []byte) (*Config, error) {
 	}
 	if c.JiraIssueType, str = raw["jira_issue_type"].(string); !str || !isDigits(c.JiraIssueType) {
 		return nil, syncErr("jira_issue_type must be an issue type ID string")
+	}
+	c.JiraIssueTypes = map[string]string{}
+	if raw, present := raw["jira_issue_types"]; present && raw != nil {
+		types, ok := raw.(Object)
+		if !ok {
+			return nil, syncErr("jira_issue_types must map GitHub issue type names to Jira issue type ID strings")
+		}
+		for name, id := range types {
+			idString, _ := id.(string)
+			if strings.TrimSpace(name) == "" || !isDigits(idString) {
+				return nil, syncErr("jira_issue_types must map GitHub issue type names to Jira issue type ID strings")
+			}
+			for existing := range c.JiraIssueTypes {
+				if strings.EqualFold(existing, name) {
+					return nil, syncErr("jira_issue_types lists %q twice (names ignore case)", name)
+				}
+			}
+			c.JiraIssueTypes[name] = idString
+		}
 	}
 	switch label := value("selection_label", "sync-jira").(type) {
 	case nil:
@@ -623,3 +645,16 @@ func isOne(v any) bool {
 }
 
 func runeLen(s string) int { return len([]rune(s)) }
+
+// issueTypeFor returns the Jira issue type ID for a new issue: the one mapped to its
+// GitHub issue type, or jira_issue_type when it has no type or an unmapped one.
+func (c *Config) issueTypeFor(source *GitHubIssue) string {
+	if source.Type != nil {
+		for name, id := range c.JiraIssueTypes {
+			if strings.EqualFold(name, source.Type.Name) {
+				return id
+			}
+		}
+	}
+	return c.JiraIssueType
+}

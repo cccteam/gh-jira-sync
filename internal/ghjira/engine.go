@@ -28,7 +28,8 @@ type Entry struct {
 	Destination       Side    `json:"destination,omitempty"`
 	PreviousRejection int     `json:"previous_rejection,omitempty"`
 	Outcome           Outcome `json:"outcome,omitempty"`
-	Status            string  `json:"status,omitempty"` // target "open" or "closed" for status entries
+	Status            string  `json:"status,omitempty"`     // target "open" or "closed" for status entries
+	IssueType         string  `json:"issue_type,omitempty"` // Jira issue type ID for create_issue
 
 	issue       *GitHubIssue     // source issue as planned
 	comment     Comment          // source comment as planned
@@ -348,6 +349,7 @@ func planIssue(c *Config, s *State, api API, source *GitHubIssue) (*Entry, error
 		e.block("Issue description exceeds conservative 30000 character limit")
 	default:
 		e.Kind = KindCreateIssue
+		e.IssueType = c.issueTypeFor(source)
 		if journaled {
 			retryNote(e, &old)
 		}

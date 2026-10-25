@@ -153,12 +153,16 @@ const (
 
 // GitHubIssue is the part of a GitHub issue the sync reads.
 type GitHubIssue struct {
-	ID          int64     `json:"id"`
-	Number      int       `json:"number"`
-	Title       string    `json:"title"`
-	Body        string    `json:"body"` // null decodes as ""
-	HTMLURL     string    `json:"html_url"`
-	State       string    `json:"state"` // "open" or "closed"
+	ID      int64  `json:"id"`
+	Number  int    `json:"number"`
+	Title   string `json:"title"`
+	Body    string `json:"body"` // null decodes as ""
+	HTMLURL string `json:"html_url"`
+	State   string `json:"state"` // "open" or "closed"
+	// Type is the GitHub issue type (organization-defined, such as Bug or Feature).
+	Type *struct {
+		Name string `json:"name"`
+	} `json:"type"`
 	UpdatedAt   string    `json:"updated_at"`
 	PullRequest *struct{} `json:"pull_request"` // present only on pull requests
 }
@@ -173,7 +177,7 @@ func (i *GitHubIssue) sameContent(o *GitHubIssue) bool {
 		return i == o
 	}
 	return i.ID == o.ID && i.Number == o.Number && i.Title == o.Title && i.Body == o.Body &&
-		i.HTMLURL == o.HTMLURL && i.State == o.State
+		i.HTMLURL == o.HTMLURL && i.State == o.State && i.typeName() == o.typeName()
 }
 
 type gitHubUser struct {
@@ -392,4 +396,11 @@ func (i apiProjectItem) item(fieldID int64) ProjectItem {
 		}
 	}
 	return item
+}
+
+func (i *GitHubIssue) typeName() string {
+	if i.Type == nil {
+		return ""
+	}
+	return i.Type.Name
 }

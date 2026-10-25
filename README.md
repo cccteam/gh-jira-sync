@@ -201,6 +201,7 @@ See [sync.example.json](sync.example.json). Unknown keys fail validation.
 | `jira_url` | Required Jira Cloud HTTPS site URL |
 | `jira_project` | Required project key, e.g. `ENG` |
 | `jira_issue_type` | Required **issue type ID string**, e.g. `10001` |
+| `jira_issue_types` | `{}`; maps GitHub issue types to Jira issue type IDs for new issues, e.g. `{"Bug": "10004", "Feature": "10005"}`; see [Issue types](#issue-types) |
 | `github_url` | `https://api.github.com`; compatible custom API bases allowed |
 | `selection_label` | `sync-jira`; `null` explicitly opts into all issues |
 | `issue_state` | `open`; `closed` or `all` also supported for creation selection |
@@ -248,6 +249,27 @@ problem with the same object alerts again. Acknowledging never permits a retry. 
 authoritative, and the local file is only a checkpoint copy. Dry-run creates a
 report/lock file but does not modify state or either service. Apply computes a
 fresh plan; a previous report is not executable authorization.
+
+## Issue types
+
+By default every Jira issue is created with `jira_issue_type`. To follow GitHub's
+organization issue types instead, map them:
+
+```json
+"jira_issue_type": "10001",
+"jira_issue_types": {"Bug": "10004", "Feature": "10005", "Task": "10001"}
+```
+
+Names match GitHub's issue type names, ignoring case. An issue with no type, or a
+type missing from the map, uses `jira_issue_type`. Every configured ID must be a
+standard (non-subtask) issue type in the Jira project; otherwise the run fails
+before doing anything. The type is chosen when the Jira issue is created and is not
+synced afterwards. Dry runs show the chosen type as `issue_type` on `create_issue`
+entries. List a project's issue type IDs with:
+
+```sh
+curl -s -u "$JIRA_EMAIL:$JIRA_API_TOKEN" "$JIRA_SITE/rest/api/3/project/<KEY>" | jq '.issueTypes[] | {id, name, subtask}'
+```
 
 ## Issue status
 
@@ -431,6 +453,7 @@ Every entry has `github`, `operation`, and `kind`; the rest appear only when the
 | `destination` | Side that receives the write: `github` or `jira` for comment copies and status changes, or `project` for the GitHub Project item |
 | `status` | Target: `open` or `closed` for `sync_status` and `status_agreed`; the project option for `sync_project_status` and `project_status_agreed` |
 | `previous_rejection` | HTTP status of an earlier refused attempt that this entry retries |
+| `issue_type` | Jira issue type ID a `create_issue` entry will use |
 | `outcome` | Set during apply: `rejected` when the service refused the write (nothing changed; retried next run), or `already_done` when a status change was already in place, for example made by a project workflow, so nothing was written and the agreement was recorded |
 
 Entries are planned before any write. In apply mode, only `outcome` and `reason` can
