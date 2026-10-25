@@ -289,6 +289,99 @@ is reported without deleting or recreating its counterpart. If visibility become
 restricted after export, the existing copy remains under the no-delete policy and
 requires manual review.
 
+## Reading the report
+
+Every run writes the report to `--report` (default `sync-report.json`) and prints it;
+in Actions it appears in the job summary. It holds identifiers and decisions, never
+comment or issue text.
+
+```json
+{
+  "mode": "apply",
+  "planned_writes": 2,
+  "deferred_writes": 0,
+  "exit_code": 2,
+  "entries": [
+    {"github": 12, "operation": "3f9c…", "kind": "create_comment",
+     "source": "github", "comment_id": "2210", "destination": "jira"},
+    {"github": 12, "operation": "a71e…", "kind": "sync_status",
+     "destination": "jira", "status": "closed", "outcome": "rejected",
+     "reason": "Status change rejected with HTTP 400; retried next run"},
+    {"github": 15, "operation": "c04d…", "kind": "unavailable",
+     "reason": "Linked issue deleted, transferred, moved, or inaccessible; comment sync paused"}
+  ]
+}
+```
+
+### Report fields
+
+| Field | Meaning |
+| --- | --- |
+| `mode` | `dry-run` or `apply` |
+| `entries` | One decision per issue, comment pair, or comment, in processing order; empty if the run failed before planning |
+| `planned_writes` | Writes planned for this run, after deferral; absent if planning failed |
+| `deferred_writes` | Writes pushed to a later run by `max_operations`; absent if planning failed |
+| `error` | Present only when the run failed (exit code 1); never includes response bodies |
+| `exit_code` | `0`, `1`, or `2`; see [exit codes](#safety-recovery-and-limits) |
+
+### Entry fields
+
+Every entry has `github`, `operation`, and `kind`; the rest appear only when they apply.
+
+| Field | Meaning |
+| --- | --- |
+| `github` | GitHub issue number the entry belongs to |
+| `operation` | Stable 64-character ID of the decision; pass it to `--acknowledge` |
+| `kind` | The decision; see the table below |
+| `reason` | Why an entry is blocked, unavailable, excluded, deferred, unchanged, or rejected (kept on `acknowledged`) |
+| `source` | Side of the original comment: `github` or `jira` |
+| `comment_id` | ID of that original comment on its own side |
+| `destination` | Side that receives the write: the copy's side, or the side whose status changes |
+| `status` | Target status, `open` or `closed`, for `sync_status` and `status_agreed` |
+| `previous_rejection` | HTTP status of an earlier refused attempt that this entry retries |
+| `outcome` | `rejected` when the service refused this entry's write during apply; nothing changed and it is retried next run |
+
+Entries are planned before any write. In apply mode, only `outcome` and `reason` can
+change afterwards. If a run fails part way (exit code 1), entries before the failure
+may already be done; rerun a dry-run to see what remains.
+
+### Entry kinds
+
+Kinds marked **write** change GitHub or Jira and count toward `max_operations`. The
+others write nothing to either service; some only update the state journal.
+
+| Kind | Type | Meaning |
+| --- | --- | --- |
+| `create_issue` | write | Create a Jira issue for a newly selected GitHub issue |
+| `link_issue` | state | A Jira issue with this GitHub issue's identity already exists (for example after a lost response); record the pair instead of creating another |
+| `create_comment` | write | Copy an original comment to the other side |
+| `recover_comment` | state | A copy from an interrupted earlier run exists; record it instead of copying again |
+| `edit_comment` | write | The original comment was edited; update its copy (`destination`) |
+| `confirm_comment` | state | Both sides already show the new text (for example an edit whose response was lost); re-read and record it |
+| `sync_status` | write | Close or reopen the `destination` side to match the other (`status`) |
+| `status_agreed` | state | Both sides already have the same status; record it as the agreed status |
+| `noop` | none | A tracked comment pair is in sync |
+| `reconciled` | state | Every comment on this pair is in sync; record the issues' timestamps so later runs can skip reading its comments |
+| `unchanged` | none | Neither issue has changed since the last full scan; its comments were not read this run |
+| `excluded` | none | A comment is intentionally not copied: a restricted Jira comment, or older than `comments_since` |
+| `deferred` | none | A write over the `max_operations` budget; planned again next run |
+| `blocked` | review | Needs a person; `reason` says why. Causes exit code 2 |
+| `unavailable` | review | An issue or comment was deleted, moved, or became inaccessible; nothing is deleted or recreated. Causes exit code 2 |
+| `acknowledged` | none | A `blocked` or `unavailable` entry someone acknowledged; it stays quiet while its reason is unchanged |
+
+To handle a `blocked` or `unavailable` entry, read its `reason`, fix the cause if
+there is one, and either let the next run resolve it or acknowledge it:
+
+```sh
+./gh-jira-sync --config sync.json --apply --acknowledge <operation>
+```
+
+Acknowledgements are saved only with `--apply`, so that run also performs any other
+planned writes; run a dry-run first if that matters. The workflow has no acknowledge
+input yet. For an Actions deployment, run the command from a clone of the repository
+that holds the state branch, adding `--git-state-branch <branch>` and the same
+credentials the workflow uses.
+
 ## Safety, recovery, and limits
 
 This aims for repeatable, duplicate-resistant synchronization, not a promise of
