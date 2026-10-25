@@ -747,6 +747,13 @@ func Apply(c *Config, state *State, api API, entries []*Entry, save func(*State)
 			err = api.AddProjectItem(e.GitHub)
 			if status, refused := refusedStatus(err); refused && itemRejections[status] {
 				e.Outcome, e.Reason = OutcomeRejected, "Adding to the project was rejected with HTTP "+strconv.Itoa(status)+"; retried next run"
+				if status == 422 {
+					// Seen live: a projects token without read access to the issue's
+					// repository sees the item's issue hidden, so the tool tries to add an
+					// issue that is already there, and the add is refused.
+					e.Reason += ". If the issue is already in the project, the projects token likely " +
+						"lacks read access to its repository (GH_PROJECT_TOKEN needs Issues: read)"
+				}
 				err = nil
 			}
 		case KindSyncProjectStatus:

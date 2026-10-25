@@ -358,3 +358,20 @@ func TestProjectAutomationRaceRecordsAgreement(t *testing.T) {
 		t.Fatal("agreement was not recorded")
 	}
 }
+
+func TestRefusedProjectAddExplainsMissingRepositoryAccess(t *testing.T) {
+	x := projectSyncer(t)
+	s := x.linked()
+	x.api.refuse = []int{422}
+	_, entries := x.ok(s)
+	e := projectEntry(t, x, entries)
+	eq(t, e.Outcome, OutcomeRejected)
+	if !strings.Contains(e.Reason, "HTTP 422") || !strings.Contains(e.Reason, "GH_PROJECT_TOKEN needs Issues: read") {
+		t.Fatalf("reason: %s", e.Reason)
+	}
+	x.api.refuse = []int{400}
+	_, entries = x.ok(s)
+	if strings.Contains(projectEntry(t, x, entries).Reason, "Issues: read") {
+		t.Fatal("hint shown for an unrelated refusal")
+	}
+}

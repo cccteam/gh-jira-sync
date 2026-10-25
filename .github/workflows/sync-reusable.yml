@@ -130,7 +130,10 @@ jobs:
           owner: ${{ steps.config.outputs.repo-owner }}
           repositories: ${{ steps.config.outputs.repo-name }}
           permission-issues: write
-      # Workflow tokens cannot reach organization projects at all.
+      # Workflow tokens cannot reach organization projects at all. Project items only
+      # show which issue they hold to a token that can read that issue, so this token
+      # also gets Issues: read, limited to the synced repository when it belongs to the
+      # project's owner (otherwise to the App's installed repositories of that owner).
       - name: Projects token
         id: projects-token
         if: inputs.app-client-id != '' && steps.config.outputs.project-owner != ''
@@ -139,7 +142,9 @@ jobs:
           client-id: ${{ inputs.app-client-id }}
           private-key: ${{ secrets.app-private-key }}
           owner: ${{ steps.config.outputs.project-owner }}
+          repositories: ${{ steps.config.outputs.repo-owner == steps.config.outputs.project-owner && steps.config.outputs.repo-name || '' }}
           permission-organization-projects: write
+          permission-issues: read
       - name: Reconcile
         env:
           GH_TOKEN: ${{ secrets.github-token || steps.issues-token.outputs.token || github.token }}

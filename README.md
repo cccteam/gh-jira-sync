@@ -117,7 +117,7 @@ person (copied comments show the App as their author).
 | --- | --- | --- |
 | Tool checkout | the caller is not `cccteam/gh-jira-sync` | Contents: read, on `cccteam/gh-jira-sync` only |
 | Issues and comments | always | Issues: read and write, on the config's `repository` only |
-| Projects | the config has `project_status` | Organization Projects: read and write, for `project_status.owner` |
+| Projects | the config has `project_status` | Organization Projects: read and write, for `project_status.owner`, plus Issues: read on the synced repository, because project items hide which issue they hold from tokens that cannot read it |
 
 The workflow reads `repository` and `project_status.owner` from the config, so the
 same App works for any repository it is installed on. The calling repository's own
