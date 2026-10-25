@@ -26,12 +26,10 @@ on:
         default: main
       app-client-id:
         description: >-
-          Client ID of a GitHub App with Projects read/write, for project_status.
-          Its token is limited to organization projects.
-        type: string
-        default: ''
-      app-owner:
-        description: Organization the App is installed on; defaults to the calling repository's owner
+          Client ID of a GitHub App that supplies every GitHub token: Contents read on
+          cccteam/gh-jira-sync, Issues read/write on the configured repository, and
+          organization Projects read/write for project_status. Each run mints a separate
+          short-lived token per purpose, limited to that repository and permission.
         type: string
         default: ''
     secrets:
@@ -41,23 +39,23 @@ on:
       jira-api-token:
         description: API token for that account
         required: true
-      github-token:
-        description: >-
-          Token with issue read/write on the configured repository. Defaults to the
-          caller's GITHUB_TOKEN, which only covers the calling repository.
-        required: false
-      tool-token:
-        description: >-
-          Token with read access to cccteam/gh-jira-sync, needed while that repository
-          is private and the caller is another repository.
-        required: false
       app-private-key:
         description: Private key of the GitHub App named by app-client-id
         required: false
+      # Alternatives to the App, for callers that cannot use one. Each, when passed,
+      # takes precedence over the matching App token.
+      github-token:
+        description: >-
+          Token with issue read/write on the configured repository. Without it or the
+          App, the caller's GITHUB_TOKEN is used, which only covers the calling repository.
+        required: false
+      tool-token:
+        description: Token with read access to cccteam/gh-jira-sync, for callers in other repositories without the App
+        required: false
       project-token:
         description: >-
-          Alternative to the App for project_status: a token with Projects read/write,
-          for example a fine-grained token for a user-owned project.
+          Token with Projects read/write for project_status, for example a fine-grained
+          token for a user-owned project.
         required: false
 
 jobs:
@@ -75,13 +73,43 @@ jobs:
       cancel-in-progress: false
     steps:
       # The calling repository: its config, and the remote that holds the state branch.
+      # The workflow's own token pushes the state branch; App tokens never need contents write.
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      # Which repository and project owner to mint tokens for comes from the config.
+      - name: Read config
+        id: config
+        env:
+          CONFIG: ${{ inputs.config }}
+        run: |
+          repo=$(jq -r '.repository // ""' "$CONFIG")
+          project_owner=$(jq -r '.project_status.owner // ""' "$CONFIG")
+          if [[ ! "$repo" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || [[ ! "$project_owner" =~ ^[A-Za-z0-9-]*$ ]]; then
+            echo "::error::$CONFIG needs a repository of the form owner/name"
+            exit 1
+          fi
+          {
+            echo "repo-owner=${repo%%/*}"
+            echo "repo-name=${repo#*/}"
+            echo "project-owner=$project_owner"
+          } >> "$GITHUB_OUTPUT"
+      # Each App token below covers one purpose, one repository or owner, and only the
+      # permissions it needs. They expire within an hour and are revoked when the job ends.
+      - name: Tool token
+        id: tool-token
+        if: inputs.app-client-id != '' && github.repository != 'cccteam/gh-jira-sync'
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ inputs.app-client-id }}
+          private-key: ${{ secrets.app-private-key }}
+          owner: cccteam
+          repositories: gh-jira-sync
+          permission-contents: read
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           repository: cccteam/gh-jira-sync
           ref: ${{ inputs.tool-ref }}
           path: .gh-jira-sync-tool
-          token: ${{ secrets.tool-token || github.token }}
+          token: ${{ secrets.tool-token || steps.tool-token.outputs.token || github.token }}
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
@@ -92,21 +120,30 @@ jobs:
         run: |
           go build -C .gh-jira-sync-tool -o "$RUNNER_TEMP/gh-jira-sync" .
           rm -rf .gh-jira-sync-tool
-      # Workflow tokens cannot reach organization projects, so project_status uses an
-      # App installation token, scoped down to Projects and revoked when the job ends.
-      - name: Project token
-        id: app
+      - name: Issues token
+        id: issues-token
         if: inputs.app-client-id != ''
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
           client-id: ${{ inputs.app-client-id }}
           private-key: ${{ secrets.app-private-key }}
-          owner: ${{ inputs.app-owner || github.repository_owner }}
+          owner: ${{ steps.config.outputs.repo-owner }}
+          repositories: ${{ steps.config.outputs.repo-name }}
+          permission-issues: write
+      # Workflow tokens cannot reach organization projects at all.
+      - name: Projects token
+        id: projects-token
+        if: inputs.app-client-id != '' && steps.config.outputs.project-owner != ''
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ inputs.app-client-id }}
+          private-key: ${{ secrets.app-private-key }}
+          owner: ${{ steps.config.outputs.project-owner }}
           permission-organization-projects: write
       - name: Reconcile
         env:
-          GH_TOKEN: ${{ secrets.github-token || github.token }}
-          GH_PROJECT_TOKEN: ${{ steps.app.outputs.token || secrets.project-token }}
+          GH_TOKEN: ${{ secrets.github-token || steps.issues-token.outputs.token || github.token }}
+          GH_PROJECT_TOKEN: ${{ secrets.project-token || steps.projects-token.outputs.token }}
           JIRA_EMAIL: ${{ secrets.jira-email }}
           JIRA_API_TOKEN: ${{ secrets.jira-api-token }}
           APPLY: ${{ inputs.apply }}

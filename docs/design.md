@@ -225,6 +225,7 @@ The project is read once per run: the field's options by name, then every item w
 that field's value, following `Link` cursors. A next-page link must stay on the
 configured GitHub host. Items are matched to issues by GitHub issue ID. Project calls
 use their own client: `GH_PROJECT_TOKEN`, normally a GitHub App installation token
-scoped to organization Projects, and API version `2026-03-10`, under which the
+scoped to organization Projects (the reusable workflow mints separate App tokens for
+the tool checkout, issues, and projects, each limited to one repository or owner), and API version `2026-03-10`, under which the
 Projects REST endpoints are documented. Adding items and setting the field are
 idempotent and not journaled.

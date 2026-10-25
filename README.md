@@ -86,22 +86,63 @@ repository with one Jira project.
 | `apply` | `false` | Perform writes; otherwise dry-run |
 | `initialize` | `false` | Allow creating new state (first run only) |
 | `tool-ref` | `main` | Ref of this repository to build; pin it to the ref in `uses:` |
-| `app-client-id` | empty | GitHub App client ID, for `project_status`; see [Project status](#project-status) |
-| `app-owner` | calling repository's owner | Organization the App is installed on |
+| `app-client-id` | empty | GitHub App that supplies every GitHub token; see [GitHub App](#github-app-recommended) |
 
 | Secret | Required | Purpose |
 | --- | --- | --- |
 | `jira-email`, `jira-api-token` | yes | Jira Cloud service account |
-| `github-token` | no | Issue read/write on the configured repository; defaults to the caller's `GITHUB_TOKEN` |
-| `tool-token` | no | Read access to `cccteam/gh-jira-sync`, needed by other repositories while it is private |
 | `app-private-key` | with `app-client-id` | The GitHub App's private key |
-| `project-token` | no | Instead of the App: a token with Projects read/write, for example for a user-owned project |
+| `github-token` | no | Instead of the App: issue read/write on the configured repository. Without either, the caller's `GITHUB_TOKEN` is used |
+| `tool-token` | no | Instead of the App: read access to `cccteam/gh-jira-sync`, for callers in other repositories |
+| `project-token` | no | Instead of the App: Projects read/write, for example for a user-owned project |
+
+An explicitly passed `github-token`, `tool-token`, or `project-token` takes precedence
+over the matching App token.
 
 The calling workflow must grant `contents: write` (for the state branch) and
 `issues: write`, and branch rules must allow pushes to the state branch. The
 reusable job runs only on the default branch, so secret-bearing code never runs
 from pull requests or other branches. It serializes runs per repository and state
 branch and never cancels an active run.
+
+### GitHub App (recommended)
+
+One GitHub App can supply every GitHub token, so no personal access tokens are
+needed. Each run mints a separate installation token per purpose, each limited to
+one repository or owner and only the permission that purpose needs. They expire
+within an hour, are revoked when the job ends, and act as the App rather than a
+person (copied comments show the App as their author).
+
+| Token | Minted when | Scope |
+| --- | --- | --- |
+| Tool checkout | the caller is not `cccteam/gh-jira-sync` | Contents: read, on `cccteam/gh-jira-sync` only |
+| Issues and comments | always | Issues: read and write, on the config's `repository` only |
+| Projects | the config has `project_status` | Organization Projects: read and write, for `project_status.owner` |
+
+The workflow reads `repository` and `project_status.owner` from the config, so the
+same App works for any repository it is installed on. The calling repository's own
+`GITHUB_TOKEN` still pushes the state branch, so App tokens never need write access
+to code.
+
+Set it up once per organization:
+
+1. **Settings → Developer settings → GitHub Apps → New GitHub App**, owned by the
+   organization. Turn off the webhook. Repository permissions: **Contents: Read**,
+   **Issues: Read and write** (Metadata: Read is added automatically). Organization
+   permissions: **Projects: Read and write** if you use `project_status`.
+2. Install it on the organization for **only** `cccteam/gh-jira-sync` and the
+   repositories being synced.
+3. Note its **Client ID** and generate a private key. Store the key as an
+   organization secret visible only to the repositories that run the sync, or as an
+   environment secret whose deployment branch policy allows only the default branch.
+4. Pass both to the workflow:
+
+```yaml
+    with:
+      app-client-id: Iv23liExampleClientId
+    secrets:
+      app-private-key: ${{ secrets.GH_JIRA_SYNC_APP_KEY }}
+```
 
 ### This repository's deployment
 
@@ -118,7 +159,7 @@ branch and never cancels an active run.
 ### Another repository syncing itself
 
 Commit a `sync.json` whose `repository` is that repository, add the Jira secrets
-and a `tool-token`, then add a workflow like this. Pin `uses:` and `tool-ref` to the
+and the App's private key, then add a workflow like this. Pin `uses:` and `tool-ref` to the
 same tag or commit so the workflow and the tool always match:
 
 ```yaml
@@ -138,24 +179,25 @@ jobs:
     uses: cccteam/gh-jira-sync/.github/workflows/sync-reusable.yml@<commit-or-tag>
     with:
       tool-ref: <commit-or-tag>
+      app-client-id: Iv23liExampleClientId
       apply: ${{ inputs.apply || (github.event_name == 'schedule' && vars.SYNC_APPLY == 'true') }}
       initialize: ${{ inputs.initialize || false }}
     secrets:
       jira-email: ${{ secrets.JIRA_EMAIL }}
       jira-api-token: ${{ secrets.JIRA_API_TOKEN }}
-      tool-token: ${{ secrets.GH_JIRA_SYNC_READ_TOKEN }}
+      app-private-key: ${{ secrets.GH_JIRA_SYNC_APP_KEY }}
 ```
 
 While `cccteam/gh-jira-sync` is private, other repositories can call its workflow
 only if its **Settings → Actions → General → Access** allows repositories in the
-organization, and its code checkout needs `tool-token`: a fine-grained token or
-GitHub App token with read-only Contents access to this repository.
+organization. The App mints the read-only token that checks out its code.
 
 ### One repository serving several
 
 A single hub repository can run several deployments. Give each its own config file
-and state branch, and a `github-token` that can read and write issues in its target
-repository (the default `GITHUB_TOKEN` only covers the hub itself):
+and state branch. With the App installed on every target repository, each
+deployment gets an issues token for its own config's repository; the hub's
+`GITHUB_TOKEN` would only cover the hub itself:
 
 ```yaml
 jobs:
@@ -169,13 +211,13 @@ jobs:
       tool-ref: <commit-or-tag>
       config: sync/${{ matrix.deployment }}.json
       state-branch: sync-state-${{ matrix.deployment }}
+      app-client-id: Iv23liExampleClientId
       apply: ${{ inputs.apply || (github.event_name == 'schedule' && vars.SYNC_APPLY == 'true') }}
       initialize: ${{ inputs.initialize || false }}
     secrets:
       jira-email: ${{ secrets.JIRA_EMAIL }}
       jira-api-token: ${{ secrets.JIRA_API_TOKEN }}
-      github-token: ${{ secrets.ISSUES_TOKEN }}
-      tool-token: ${{ secrets.GH_JIRA_SYNC_READ_TOKEN }}
+      app-private-key: ${{ secrets.GH_JIRA_SYNC_APP_KEY }}
 ```
 
 Deployments are independent: one failing or blocked does not stop the others, and
@@ -358,26 +400,14 @@ How it behaves:
 ### Credentials for projects
 
 Workflow tokens cannot reach organization projects, so project calls use a separate
-token in `GH_PROJECT_TOKEN`. Issues and comments keep using `GH_TOKEN`.
+token in `GH_PROJECT_TOKEN`; issues and comments use `GH_TOKEN`. In Actions, the
+[GitHub App](#github-app-recommended) mints it with organization Projects permission;
+for a user-owned project, pass a fine-grained token as `project-token` instead.
 
-1. Create a GitHub App owned by the organization (**Settings → Developer settings →
-   GitHub Apps → New GitHub App**). Turn off its webhook. Under **Organization
-   permissions**, set **Projects** to **Read and write**; it needs nothing else.
-2. Install it on the organization, note its **Client ID**, and generate a private key.
-3. In the repository running the workflow, add the private key as a secret and pass:
-
-```yaml
-    with:
-      app-client-id: Iv23liExampleClientId
-    secrets:
-      app-private-key: ${{ secrets.GH_JIRA_SYNC_APP_KEY }}
-```
-
-The workflow then creates a short-lived installation token limited to organization
-projects and revokes it when the job ends. For a user-owned project, pass a
-fine-grained token with Projects read/write as `project-token` instead. When running
-locally, export `GH_PROJECT_TOKEN`, for example `gh auth token` after
-`gh auth refresh -s project`.
+For local runs, prefer a fine-grained personal access token with an expiry, limited
+to the synced repository (Issues: read and write) and organization Projects (read and
+write), over a broad `gh auth token`. Export it as both `GH_TOKEN` and
+`GH_PROJECT_TOKEN`.
 
 ## Comments and formatting
 
