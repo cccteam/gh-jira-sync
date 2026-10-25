@@ -361,6 +361,7 @@ type ProjectSnapshot struct {
 	FieldID int64
 	Options map[string]string     // option name → option ID
 	Items   map[int64]ProjectItem // keyed by GitHub issue ID
+	Backlog map[string]bool       // Jira issue IDs in the board's backlog, with jira_board
 }
 
 // ProjectItem is one issue's entry in the project.

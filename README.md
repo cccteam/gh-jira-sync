@@ -425,6 +425,8 @@ and the Jira issue's workflow status in step, in both directions. It replaces
 | `add_to_project` | `true` | Add linked issues that are not in the project yet; otherwise report them as `excluded` |
 | `map` | required | Each project option and the Jira statuses it covers (a name or a list) |
 | `map[].transition` | none | Jira transition to use when several lead to the target status |
+| `map[].jira_backlog` | `false` | This option means "in the Jira board's backlog" instead of covering statuses; see [Backlog and board](#backlog-and-board) |
+| `jira_board` | none | Board ID whose backlog `jira_backlog` mirrors (the number in the board's URL); required with `jira_backlog` |
 
 How it behaves:
 
@@ -451,6 +453,41 @@ How it behaves:
   refused. If the re-check finds both sides already at the target (for example
   because the project's "Item closed" workflow moved the card after the tool closed
   the issue), the entry is reported as `already_done` and the agreement is recorded.
+
+### Backlog and board
+
+Teams that treat "on the board" as "ready" can mirror the board's backlog instead
+of a status. Mark one option `jira_backlog` and name the board:
+
+```json
+"project_status": {
+  "owner": "cccteam",
+  "project_number": 7,
+  "jira_board": 150,
+  "map": [
+    {"project": "Backlog",     "jira_backlog": true},
+    {"project": "Ready",       "jira": "To Do"},
+    {"project": "In Progress", "jira": "In Progress"},
+    {"project": "Done",        "jira": "Done"}
+  ]
+}
+```
+
+* **Jira → project.** An issue in the board's backlog shows the backlog option,
+  whatever its status; once on the board, it shows the option covering its status.
+  Dragging a To Do issue from the backlog onto the board therefore moves the card to
+  Ready.
+* **Project → Jira.** Moving the card to the backlog option moves the Jira issue into
+  the backlog (its status is unchanged). Moving it to any other option takes the
+  issue out of the backlog onto the board, then transitions it if its status still
+  does not map to that option. On a Kanban board, Jira puts issues it moves onto the
+  board in the first column, so the transition is looked up again after the move.
+* **Done issues.** Jira lists only incomplete issues in a backlog, so moving a Done
+  issue's card to the backlog option is blocked; reopen it in Jira first.
+* **Setup.** Turn on the board's backlog (board settings → Features → Backlog for a
+  team-managed board, or a Kanban backlog column for a company-managed one). If it is
+  off, the run fails with a message saying so. The Jira account needs to be able to
+  browse the board and rank issues.
 
 ### Credentials for projects
 

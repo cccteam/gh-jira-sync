@@ -58,6 +58,8 @@ type fakeAPI struct {
 	project      *ProjectSnapshot // the GitHub Project, in project status mode
 	searches     []string         // started values passed to FindIssue
 	itemClosed   bool             // mimic the project workflow: closing the issue sets Done
+	backlog      bool             // the Jira issue is in the board's backlog
+	boardColumn  *JiraStatus      // status a board move sets, like a Kanban board's first column
 	nextID       int
 }
 
@@ -341,6 +343,36 @@ func (f *fakeAPI) SetProjectStatus(itemID, _ int64, optionID string) error {
 		}
 	}
 	f.writes = append(f.writes, write{"project", f.project.optionName(optionID)})
+	return f.lost()
+}
+
+func (f *fakeAPI) BacklogIssues() (map[string]bool, error) {
+	if f.jira == nil {
+		return map[string]bool{}, nil
+	}
+	return map[string]bool{f.jira.ID: f.backlog}, nil
+}
+
+func (f *fakeAPI) InBacklog(string) (bool, error) { return f.backlog, nil }
+
+func (f *fakeAPI) MoveToBacklog(key string) error {
+	if err := f.maybeRefuse(); err != nil {
+		return err
+	}
+	f.backlog = true
+	f.writes = append(f.writes, write{"backlog", key})
+	return f.lost()
+}
+
+func (f *fakeAPI) MoveToBoard(key string) error {
+	if err := f.maybeRefuse(); err != nil {
+		return err
+	}
+	f.backlog = false
+	if f.boardColumn != nil {
+		f.jira.Fields.Status = *f.boardColumn
+	}
+	f.writes = append(f.writes, write{"board", key})
 	return f.lost()
 }
 

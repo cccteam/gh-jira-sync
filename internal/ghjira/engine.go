@@ -51,6 +51,9 @@ type Entry struct {
 	option      string       // project option to apply or record
 	fieldID     int64        // project status field
 	optionID    string       // ID of option, for project writes
+	inBacklog   bool         // Jira issue in the board's backlog, as planned
+	toBacklog   bool         // move the Jira issue into the board's backlog
+	toBoard     bool         // move the Jira issue out of the backlog onto the board
 	parent      int          // parent to apply or record (GitHub number, 0 for none)
 	ghParent    int          // GitHub parent as planned
 	jiraParent  int          // Jira parent as planned, as a GitHub number
@@ -211,6 +214,11 @@ func Plan(c *Config, s *State, api API, now time.Time) ([]*Entry, error) {
 			if _, ok := project.Options[m.Project]; !ok {
 				return nil, syncErr("project_status maps option %q, which the project's %s field does not have",
 					m.Project, c.ProjectStatus.Field)
+			}
+		}
+		if c.ProjectStatus.backlogOption() != "" {
+			if project.Backlog, err = api.BacklogIssues(); err != nil {
+				return nil, err
 			}
 		}
 	}
@@ -478,7 +486,8 @@ func planProjectStatus(c *Config, api API, project *ProjectSnapshot, pair Pair, 
 	e.item = item
 	current := project.optionName(item.OptionID)
 	jiraStatus := jira.Fields.Status.Name
-	fromJira, mapped := ps.forJira(jiraStatus)
+	e.inBacklog = project.Backlog[jira.ID]
+	fromJira, mapped := ps.optionFor(jiraStatus, e.inBacklog)
 	if !mapped {
 		e.block("Jira status " + strconv.Quote(jiraStatus) + " is not mapped in project_status")
 		return e, nil
@@ -507,32 +516,61 @@ func planProjectStatus(c *Config, api API, project *ProjectSnapshot, pair Pair, 
 		setProject()
 	case fromJira == *agreed: // the project moved
 		m, _ := ps.mapping(current)
-		transitions, err := api.JiraTransitions(pair.JiraID)
-		if err != nil {
-			return nil, err
-		}
-		i := slices.IndexFunc(transitions, func(t JiraTransition) bool {
-			if m.Transition != "" {
-				return t.Name == m.Transition
-			}
-			return t.To.Name == m.Jira[0]
-		})
 		switch {
-		case i < 0:
-			e.block("No Jira transition from " + strconv.Quote(jiraStatus) + " to " + strconv.Quote(m.Jira[0]))
-		case !slices.Contains(m.Jira, transitions[i].To.Name):
-			e.block("Jira transition " + strconv.Quote(transitions[i].Name) + " leads to " +
-				strconv.Quote(transitions[i].To.Name) + ", which is not mapped to " + strconv.Quote(current))
+		case m.JiraBacklog && jira.Fields.Status.done():
+			e.block("Jira lists only incomplete issues in the backlog; reopen " + jira.Key + " before moving it to " +
+				strconv.Quote(current))
+		case m.JiraBacklog:
+			e.toBacklog = true
 		default:
+			// Leaving the backlog may be all it takes, as for To Do; otherwise a transition
+			// follows, planned from today's status and checked again after the board move.
+			e.toBoard = e.inBacklog
+			if !slices.Contains(m.Jira, jiraStatus) {
+				id, blocked, err := projectTransition(api, pair.JiraID, jiraStatus, m)
+				if err != nil {
+					return nil, err
+				}
+				if blocked != "" {
+					e.block(blocked)
+					return e, nil
+				}
+				e.transition = id
+			}
+		}
+		if e.Kind != KindBlocked {
 			e.Kind, e.Destination, e.option, e.Status = KindSyncProjectStatus, SideJira, current, current
 			e.optionID = item.OptionID // the project already shows the target
-			e.transition = transitions[i].ID
 		}
 	default:
 		e.block("Both sides changed since the agreed status " + strconv.Quote(*agreed) + ": project is " +
 			strconv.Quote(current) + ", Jira is " + strconv.Quote(jiraStatus) + "; align them manually")
 	}
 	return e, nil
+}
+
+// projectTransition finds the Jira transition to a mapping's status: the named one,
+// or the first leading to its first Jira status. A missing or mismapped transition is
+// returned as a reason to block.
+func projectTransition(api API, jiraID, status string, m ProjectStatusMapping) (string, string, error) {
+	transitions, err := api.JiraTransitions(jiraID)
+	if err != nil {
+		return "", "", err
+	}
+	i := slices.IndexFunc(transitions, func(t JiraTransition) bool {
+		if m.Transition != "" {
+			return t.Name == m.Transition
+		}
+		return t.To.Name == m.Jira[0]
+	})
+	switch {
+	case i < 0:
+		return "", "No Jira transition from " + strconv.Quote(status) + " to " + strconv.Quote(m.Jira[0]), nil
+	case !slices.Contains(m.Jira, transitions[i].To.Name):
+		return "", "Jira transition " + strconv.Quote(transitions[i].Name) + " leads to " +
+			strconv.Quote(transitions[i].To.Name) + ", which is not mapped to " + strconv.Quote(m.Project), nil
+	}
+	return transitions[i].ID, "", nil
 }
 
 func planComments(c *Config, s *State, api API, pair Pair, visited map[string]bool) ([]*Entry, error) {
@@ -903,32 +941,54 @@ func setAgreedProjectStatus(s *State, number int, option string) {
 // applyProjectStatus sets the project item or transitions Jira. Like status changes
 // it is idempotent and not journaled, and both sides are checked before and after.
 func applyProjectStatus(c *Config, s *State, api API, e *Entry, save func(*State) error) error {
-	current := func() (ProjectItem, *JiraIssue, error) {
+	ps := c.ProjectStatus
+	type snapshot struct {
+		item      ProjectItem
+		jira      *JiraIssue
+		inBacklog bool
+		option    string // project option the Jira side maps to
+	}
+	current := func() (snapshot, error) {
+		var now snapshot
 		item, err := api.ProjectItem(e.item.ID, e.fieldID)
 		if err != nil {
-			return ProjectItem{}, nil, err
+			return now, err
 		}
 		jira, err := api.JiraIssue(e.pair.JiraID)
 		if err == nil && jira == nil {
 			err = syncErr("Linked Jira issue vanished after plan; rerun")
 		}
-		return item, jira, err
+		if err != nil {
+			return now, err
+		}
+		now.item, now.jira = item, jira
+		if ps.backlogOption() != "" {
+			if now.inBacklog, err = api.InBacklog(jira.ID); err != nil {
+				return now, err
+			}
+		}
+		now.option, _ = ps.optionFor(jira.Fields.Status.Name, now.inBacklog)
+		return now, nil
 	}
-	item, jira, err := current()
+	now, err := current()
 	if err != nil {
 		return err
 	}
-	if fromJira, _ := c.ProjectStatus.forJira(jira.Fields.Status.Name); item.OptionID == e.optionID && fromJira == e.option {
+	if now.item.OptionID == e.optionID && now.option == e.option {
 		// Something else, such as the project's own workflows, already made the change.
 		return alreadyDone(s, e, save, func() { setAgreedProjectStatus(s, e.GitHub, e.option) })
 	}
-	if item.OptionID != e.item.OptionID || jira.Fields.Status.Name != e.jira.Fields.Status.Name {
+	if now.item.OptionID != e.item.OptionID || now.jira.Fields.Status.Name != e.jira.Fields.Status.Name ||
+		now.inBacklog != e.inBacklog {
 		return syncErr("Project or Jira status changed after plan; rerun")
 	}
-	if e.Destination == SideProject {
+	switch {
+	case e.Destination == SideProject:
 		err = api.SetProjectStatus(e.item.ID, e.fieldID, e.optionID)
-	} else {
-		err = api.TransitionJira(e.pair.JiraID, e.transition)
+	case e.toBacklog:
+		err = api.MoveToBacklog(now.jira.Key)
+	default:
+		err = moveJiraToOption(ps, api, e, now.jira)
 	}
 	if status, refused := refusedStatus(err); refused && itemRejections[status] {
 		e.Outcome, e.Reason = OutcomeRejected, "Project status change rejected with HTTP "+strconv.Itoa(status)+"; retried next run"
@@ -937,15 +997,55 @@ func applyProjectStatus(c *Config, s *State, api API, e *Entry, save func(*State
 	if err != nil {
 		return err
 	}
-	if item, jira, err = current(); err != nil {
+	if now, err = current(); err != nil {
 		return err
 	}
-	fromJira, _ := c.ProjectStatus.forJira(jira.Fields.Status.Name)
-	if e.Destination == SideProject && item.OptionID != e.optionID || fromJira != e.option {
-		return syncErr("Project status change not confirmed; Jira status is %s", jira.Fields.Status.Name)
+	if e.Destination == SideProject && now.item.OptionID != e.optionID || now.option != e.option {
+		if e.toBacklog || e.toBoard {
+			return syncErr("Project status change not confirmed; Jira status is %s, in backlog: %t",
+				now.jira.Fields.Status.Name, now.inBacklog)
+		}
+		return syncErr("Project status change not confirmed; Jira status is %s", now.jira.Fields.Status.Name)
 	}
 	setAgreedProjectStatus(s, e.GitHub, e.option)
 	return save(s)
+}
+
+// moveJiraToOption takes a Jira issue off the backlog when planned, then transitions
+// it unless its status already maps to the option. Moving onto a Kanban board can
+// change the status, so the transition is looked up again after the move.
+func moveJiraToOption(ps *ProjectStatus, api API, e *Entry, jira *JiraIssue) error {
+	m, _ := ps.mapping(e.option)
+	transition := e.transition
+	if e.toBoard {
+		if err := api.MoveToBoard(jira.Key); err != nil {
+			return err
+		}
+		moved, err := api.JiraIssue(jira.ID)
+		if err == nil && moved == nil {
+			err = syncErr("Linked Jira issue vanished during the board move; rerun")
+		}
+		if err != nil {
+			return err
+		}
+		if slices.Contains(m.Jira, moved.Fields.Status.Name) {
+			return nil
+		}
+		if moved.Fields.Status.Name != jira.Fields.Status.Name {
+			id, blocked, err := projectTransition(api, jira.ID, moved.Fields.Status.Name, m)
+			if err != nil {
+				return err
+			}
+			if blocked != "" {
+				return syncErr("%s after moving %s onto the board", blocked, jira.Key)
+			}
+			transition = id
+		}
+	}
+	if transition == "" {
+		return nil
+	}
+	return api.TransitionJira(e.pair.JiraID, transition)
 }
 
 func applyIssue(s *State, api API, e *Entry, save func(*State) error) error {

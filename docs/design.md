@@ -206,6 +206,8 @@ fields, and branch rules still require a live sandbox pilot.
 * https://developer.atlassian.com/cloud/jira/platform/rest/v3/api-group-issues/
 * https://developer.atlassian.com/cloud/jira/platform/rest/v3/api-group-issue-comments/
 * https://developer.atlassian.com/cloud/jira/platform/search-and-reconcile/
+* https://developer.atlassian.com/cloud/jira/software/rest/api-group-backlog/
+* https://developer.atlassian.com/cloud/jira/software/rest/api-group-board/
 
 ## Project status
 
@@ -233,6 +235,23 @@ scoped to organization Projects (the reusable workflow mints separate App tokens
 the tool checkout, issues, and projects, each limited to one repository or owner), and API version `2026-03-10`, under which the
 Projects REST endpoints are documented. Adding items and setting the field are
 idempotent and not journaled.
+
+Backlog mode (`jira_board` plus one `jira_backlog` option) adds board-backlog
+membership to the Jira side, since in team-managed projects it is independent of
+status. The Jira side's option becomes "the backlog option if the issue is in the
+backlog, else the option covering its status", and everything above applies to it
+unchanged, including the agreed baseline. Membership is read once per run from the
+board's backlog listing (Agile API `GET /board/{id}/backlog`, every page or the run
+fails) and re-read per issue with a JQL filter before and after each write. Writes use
+`POST /backlog/{board}/issue` and `POST /board/{board}/issue`; both may answer 207 with
+per-issue failures, which the confirming re-read catches. The backlog listing lags a
+move by about a second (observed live), so each move polls membership for up to ten
+seconds before the confirmation reads it. A board move can itself
+change the status (Kanban boards put the issue in the first column), so the
+transition planned from the old status is recomputed from the new one when they
+differ, and skipped when the new status already maps to the target. Jira omits done
+issues from backlog listings, so moving a done issue to the backlog option is
+blocked instead of attempted.
 
 ## Parent links
 

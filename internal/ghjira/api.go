@@ -53,6 +53,11 @@ type API interface {
 	CreateGitHubIssue(title, body string, labels []string, issueType string) (*GitHubIssue, error)
 	// FindGitHubIssue looks for an issue a pending creation may have made, by its marker.
 	FindGitHubIssue(op, started string) (*GitHubIssue, error)
+	// Board backlog (project_status jira_board). Membership is by Jira issue ID.
+	BacklogIssues() (map[string]bool, error)
+	InBacklog(id string) (bool, error)
+	MoveToBacklog(key string) error
+	MoveToBoard(key string) error
 }
 
 // HTTP is a small JSON REST client. Only GET requests are automatically retried.
@@ -836,4 +841,87 @@ func (a *Client) FindGitHubIssue(op, started string) (*GitHubIssue, error) {
 		return nil, nil
 	}
 	return &found[0], nil
+}
+
+func (a *Client) boardPath() string {
+	return "/rest/agile/1.0/board/" + strconv.Itoa(a.c.ProjectStatus.JiraBoard)
+}
+
+type backlogPage struct {
+	StartAt int `json:"startAt"`
+	Total   int `json:"total"`
+	Issues  []struct {
+		ID string `json:"id"`
+	} `json:"issues"`
+}
+
+// BacklogIssues returns the IDs of the issues in the board's backlog. Jira only lists
+// incomplete issues there. Every page is read or the run fails.
+func (a *Client) BacklogIssues() (map[string]bool, error) {
+	ids := map[string]bool{}
+	start := 0
+	for range a.c.MaxPages {
+		var page backlogPage
+		q := url.Values{"startAt": {strconv.Itoa(start)}, "maxResults": {"100"}, "fields": {"id"}}
+		if err := a.jira.Do("GET", a.boardPath()+"/backlog?"+q.Encode(), nil, &page); err != nil {
+			if status, ok := httpStatus(err); ok && status == 400 {
+				return nil, syncErr("Jira board %d has no backlog; enable it in the board's features", a.c.ProjectStatus.JiraBoard)
+			}
+			return nil, err
+		}
+		for _, issue := range page.Issues {
+			ids[issue.ID] = true
+		}
+		start += len(page.Issues)
+		if start >= page.Total {
+			return ids, nil
+		}
+		if len(page.Issues) == 0 {
+			return nil, syncErr("Incomplete Jira backlog pagination")
+		}
+	}
+	return nil, syncErr("Jira backlog pagination limit exceeded; no partial scan allowed")
+}
+
+// InBacklog takes an issue ID or key.
+func (a *Client) InBacklog(issue string) (bool, error) {
+	var page backlogPage
+	q := url.Values{"jql": {"issue = " + issue}, "maxResults": {"1"}, "fields": {"id"}}
+	if err := a.jira.Do("GET", a.boardPath()+"/backlog?"+q.Encode(), nil, &page); err != nil {
+		return false, err
+	}
+	return page.Total > 0, nil
+}
+
+// MoveToBacklog and MoveToBoard may answer 207 with per-issue failures; callers
+// confirm the move by reading membership again.
+func (a *Client) MoveToBacklog(key string) error {
+	path := "/rest/agile/1.0/backlog/" + strconv.Itoa(a.c.ProjectStatus.JiraBoard) + "/issue"
+	if err := a.jira.Do("POST", path, map[string][]string{"issues": {key}}, nil); err != nil {
+		return err
+	}
+	return a.settleBacklog(key, true)
+}
+
+// settleBacklog waits until the backlog listing shows a move, which lags the write by
+// about a second (observed live). Giving up is not an error: the caller's
+// confirmation reports a move that never shows.
+func (a *Client) settleBacklog(key string, want bool) error {
+	for range 10 {
+		in, err := a.InBacklog(key)
+		if err != nil || in == want {
+			return err
+		}
+		a.jira.sleep(time.Second)
+	}
+	return nil
+}
+
+// MoveToBoard puts an issue on the board; on a Kanban board with a backlog, Jira also
+// moves it to the first column.
+func (a *Client) MoveToBoard(key string) error {
+	if err := a.jira.Do("POST", a.boardPath()+"/issue", map[string][]string{"issues": {key}}, nil); err != nil {
+		return err
+	}
+	return a.settleBacklog(key, false)
 }
