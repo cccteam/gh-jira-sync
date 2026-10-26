@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.1.2](https://github.com/cccteam/gh-jira-sync/compare/v0.1.1...v0.1.2) (2026-10-26)
+
+
+### Bug Fixes
+
+* stop failing hourly sync, bind release attestations to the tag, and simplify the README ([6dd9c13](https://github.com/cccteam/gh-jira-sync/commit/6dd9c135248dc95dd322e1e2397390fd761b43f1))
+* stop failing hourly sync, verify release tag, simplify README ([#7](https://github.com/cccteam/gh-jira-sync/issues/7)) ([6dd9c13](https://github.com/cccteam/gh-jira-sync/commit/6dd9c135248dc95dd322e1e2397390fd761b43f1))
+
+
+### Documentation
+
+* add a project icon to the README ([#9](https://github.com/cccteam/gh-jira-sync/issues/9)) ([c447dbf](https://github.com/cccteam/gh-jira-sync/commit/c447dbf09ae33310567c06b272d08fa342cb59c9))
+
 ## [0.1.1](https://github.com/cccteam/gh-jira-sync/compare/v0.1.0...v0.1.1) (2026-10-26)
 
 
