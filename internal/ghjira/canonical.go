@@ -22,12 +22,14 @@ type Object = map[string]any
 func canonical(v any, indent bool) []byte {
 	var b bytes.Buffer
 	writeValue(&b, generic(v), indent, 0)
+
 	return b.Bytes()
 }
 
 // digest is the SHA-256 hex of v's compact canonical JSON.
 func digest(v any) string {
 	sum := sha256.Sum256(canonical(v, false))
+
 	return hex.EncodeToString(sum[:])
 }
 
@@ -46,6 +48,7 @@ func generic(v any) any {
 	if err != nil {
 		panic(fmt.Sprintf("canonical: %v", err))
 	}
+
 	return decodeJSON(data)
 }
 
@@ -56,6 +59,7 @@ func decodeJSON(data []byte) any {
 	if err := dec.Decode(&out); err != nil {
 		panic(fmt.Sprintf("canonical: %v", err))
 	}
+
 	return out
 }
 
@@ -157,5 +161,6 @@ func pythonFloat(f float64) string {
 	if f == math.Trunc(f) && math.Abs(f) < 1e16 {
 		return strconv.FormatFloat(f, 'f', 1, 64)
 	}
+
 	return strconv.FormatFloat(f, 'g', -1, 64)
 }

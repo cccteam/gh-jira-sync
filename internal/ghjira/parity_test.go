@@ -58,6 +58,7 @@ func loadGolden(t *testing.T) golden {
 }
 
 func TestPythonParityDigestsAndTokens(t *testing.T) {
+	t.Parallel()
 	g := loadGolden(t)
 	for i, d := range g.Digests {
 		if got := digest(decodeJSON(mustMarshal(t, d.Value))); got != d.Digest {
@@ -79,6 +80,7 @@ func TestPythonParityDigestsAndTokens(t *testing.T) {
 }
 
 func TestPythonParityTextConversion(t *testing.T) {
+	t.Parallel()
 	g := loadGolden(t)
 	for _, a := range g.ToADF {
 		if !sameJSON(toADF(a.Text), a.ADF) {

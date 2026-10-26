@@ -63,12 +63,13 @@ func (w *reverseWorld) ok(t *testing.T, x *syncer, s *State) (*State, []*Entry) 
 }
 
 func (w *reverseWorld) Issues() ([]GitHubIssue, error) {
-	var out []GitHubIssue
+	out := make([]GitHubIssue, 0, len(w.github))
 	for _, issue := range w.github {
 		out = append(out, *issue)
 	}
 	return out, nil
 }
+
 func (w *reverseWorld) Issue(n int) (*GitHubIssue, error) {
 	if issue, ok := w.github[n]; ok {
 		c := *issue
@@ -76,6 +77,7 @@ func (w *reverseWorld) Issue(n int) (*GitHubIssue, error) {
 	}
 	return nil, nil
 }
+
 func (w *reverseWorld) JiraIssue(id string) (*JiraIssue, error) {
 	for _, j := range w.selected {
 		if j.ID == id {
@@ -85,15 +87,17 @@ func (w *reverseWorld) JiraIssue(id string) (*JiraIssue, error) {
 	}
 	return nil, nil
 }
+
 func (w *reverseWorld) SelectedJiraIssues() ([]JiraIssue, error) {
 	w.searches++
-	var out []JiraIssue
+	out := make([]JiraIssue, 0, len(w.selected))
 	for _, j := range w.selected {
 		out = append(out, *j)
 	}
 	return out, nil
 }
-func (w *reverseWorld) CreateGitHubIssue(title, body string, labels []string, issueType string) (*GitHubIssue, error) {
+
+func (w *reverseWorld) CreateGitHubIssue(title, body string, _ []string, issueType string) (*GitHubIssue, error) {
 	if err := w.maybeRefuse(); err != nil {
 		return nil, err
 	}
@@ -114,6 +118,7 @@ func (w *reverseWorld) CreateGitHubIssue(title, body string, labels []string, is
 	}
 	return issue, nil
 }
+
 func (w *reverseWorld) FindGitHubIssue(op, started string) (*GitHubIssue, error) {
 	w.finds = append(w.finds, started)
 	for _, issue := range w.github {
@@ -135,6 +140,7 @@ func reverseEntry(entries []*Entry, key string) *Entry {
 }
 
 func TestJiraIssueCreatesGitHubIssueOnce(t *testing.T) {
+	t.Parallel()
 	x, w := newReverseWorld(t)
 	w.addJira(5, "Login fails on Safari", "Steps:\n- open\n- click", "10387")
 	s, entries := w.ok(t, x, nil)
@@ -158,6 +164,7 @@ func TestJiraIssueCreatesGitHubIssueOnce(t *testing.T) {
 }
 
 func TestLostGitHubCreationIsRecoveredByMarker(t *testing.T) {
+	t.Parallel()
 	x, w := newReverseWorld(t)
 	w.addJira(5, "Title", "", "")
 	w.loseCreate = true
@@ -175,10 +182,13 @@ func TestLostGitHubCreationIsRecoveredByMarker(t *testing.T) {
 }
 
 func TestPendingGitHubCreationWithoutMarkerBlocks(t *testing.T) {
+	t.Parallel()
 	x, w := newReverseWorld(t)
 	w.addJira(5, "Title", "", "")
 	w.loseCreate = true
-	w.run(x, nil)
+	if _, _, err := w.run(x, nil); err == nil {
+		t.Fatal("expected the lost creation response to fail the run")
+	}
 	delete(w.github, 21) // not visible yet
 	w.loseCreate = false
 	_, entries := w.ok(t, x, x.last())
@@ -187,6 +197,7 @@ func TestPendingGitHubCreationWithoutMarkerBlocks(t *testing.T) {
 }
 
 func TestRefusedGitHubCreationRetriesAndTypeFallback(t *testing.T) {
+	t.Parallel()
 	x, w := newReverseWorld(t)
 	w.addJira(5, "Title", "", "10387")
 	w.refuse = []int{400}
@@ -206,6 +217,7 @@ func TestRefusedGitHubCreationRetriesAndTypeFallback(t *testing.T) {
 }
 
 func TestUncopyableJiraIssuesBlock(t *testing.T) {
+	t.Parallel()
 	x, w := newReverseWorld(t)
 	media := w.addJira(5, "Has media", "", "")
 	media.Fields.Description = Object{"type": "doc", "version": 1, "content": []any{Object{"type": "mediaSingle"}}}
@@ -217,6 +229,7 @@ func TestUncopyableJiraIssuesBlock(t *testing.T) {
 }
 
 func TestJiraIssueChangedAfterPlanAborts(t *testing.T) {
+	t.Parallel()
 	x, w := newReverseWorld(t)
 	j := w.addJira(5, "Before", "", "")
 	entries, err := Plan(x.c, NewState(x.c), w, time.Now())
@@ -231,6 +244,7 @@ func TestJiraIssueChangedAfterPlanAborts(t *testing.T) {
 }
 
 func TestReverseCreationOffAndBaselines(t *testing.T) {
+	t.Parallel()
 	x, w := newReverseWorld(t)
 	x.c.JiraSelectionLabel = nil
 	w.addJira(5, "Title", "", "")
@@ -254,6 +268,7 @@ func TestReverseCreationOffAndBaselines(t *testing.T) {
 }
 
 func TestReverseAPIRequests(t *testing.T) {
+	t.Parallel()
 	var jql []string
 	op := strings.Repeat("f", 64)
 	srv := newServer(t, func(r *http.Request) (int, http.Header, any) {
@@ -273,7 +288,8 @@ func TestReverseAPIRequests(t *testing.T) {
 			return 200, nil, []any{
 				Object{"id": 1, "number": 20, "body": "> <!-- gh-jira-sync:" + op + " -->\n\nquoted"},
 				Object{"id": 2, "number": 21, "body": "From Jira\n\n<!-- gh-jira-sync:" + op + " -->"},
-				Object{"id": 3, "number": 22, "body": "<!-- gh-jira-sync:" + op + " -->", "pull_request": Object{}}}
+				Object{"id": 3, "number": 22, "body": "<!-- gh-jira-sync:" + op + " -->", "pull_request": Object{}},
+			}
 		}
 		return 200, nil, nil
 	})
@@ -307,10 +323,13 @@ func TestReverseAPIRequests(t *testing.T) {
 }
 
 func TestGitHubIssueFromJiraIsNeverSentBackToJira(t *testing.T) {
+	t.Parallel()
 	x, w := newReverseWorld(t)
 	w.addJira(5, "Title", "", "")
 	w.loseCreate = true
-	w.run(x, nil)
+	if _, _, err := w.run(x, nil); err == nil {
+		t.Fatal("expected the lost creation response to fail the run")
+	}
 	w.loseCreate = false
 	// #21 now exists in GitHub with the selection label but is unlinked; GitHub → Jira
 	// creation must leave it to recovery instead of making a second Jira issue.
@@ -338,6 +357,7 @@ func TestGitHubIssueFromJiraIsNeverSentBackToJira(t *testing.T) {
 }
 
 func TestJiraIssueFromGitHubIsNeverSentBackToGitHub(t *testing.T) {
+	t.Parallel()
 	x, w := newReverseWorld(t)
 	j := w.addJira(5, "Came from GitHub", "", "")
 	op := token(x.c, OpIssue, "42")

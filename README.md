@@ -38,7 +38,10 @@ supported; Jira Service Management projects are rejected to avoid mishandling
 internal comments. HTTPS is mandatory and credentials never follow redirects.
 
 ```sh
-# Build the binary.
+# Install a release (or download its binary from the GitHub release).
+go install github.com/cccteam/gh-jira-sync@latest
+
+# Or build this checkout.
 go build -o gh-jira-sync .
 
 # Local durable-disk usage: inspect without changing either service.
@@ -57,12 +60,7 @@ go build -o gh-jira-sync .
 go test -race ./...
 ```
 
-To install from GitHub instead, while the repository is private, tell Go to skip the
-public module proxy and give Git access to `cccteam` repositories:
-
-```sh
-GOPRIVATE=github.com/cccteam/* go install github.com/cccteam/gh-jira-sync@latest
-```
+`gh-jira-sync -version` prints the release a binary was built from.
 
 Flags accept one or two dashes (`-apply` or `--apply`).
 Supported platforms are Linux/macOS (the local lock uses `flock`). No live
@@ -87,7 +85,8 @@ repository with one Jira project.
 | `state-branch` | `sync-state` | State branch in the calling repository: `sync-state` or `sync-state-<name>` |
 | `apply` | `false` | Perform writes; otherwise dry-run |
 | `initialize` | `false` | Allow creating new state (first run only) |
-| `tool-ref` | `main` | Ref of this repository to build; pin it to the ref in `uses:` |
+| `version` | this file's release | Release to run; leave unset so `uses: …@vX.Y.Z` runs vX.Y.Z |
+| `tool-ref` | empty | Build from this ref of this repository instead of a release, to test unreleased commits |
 | `app-client-id` | empty | GitHub App that supplies every GitHub token; see [GitHub App](#github-app-recommended) |
 
 | Secret | Required | Purpose |
@@ -95,11 +94,11 @@ repository with one Jira project.
 | `jira-email`, `jira-api-token` | yes | Jira Cloud service account |
 | `app-private-key` | with `app-client-id` | The GitHub App's private key |
 | `github-token` | no | Instead of the App: issue read/write on the configured repository. Without either, the caller's `GITHUB_TOKEN` is used |
-| `tool-token` | no | Instead of the App: read access to `cccteam/gh-jira-sync`, for callers in other repositories |
+| `tool-token` | no | Deprecated and ignored: this repository is public |
 | `project-token` | no | Instead of the App: Projects read/write, for example for a user-owned project |
 
-An explicitly passed `github-token`, `tool-token`, or `project-token` takes precedence
-over the matching App token.
+An explicitly passed `github-token` or `project-token` takes precedence over the
+matching App token.
 
 The calling workflow must grant `contents: write` (for the state branch) and
 `issues: write`, and branch rules must allow pushes to the state branch. The
@@ -117,7 +116,6 @@ person (copied comments show the App as their author).
 
 | Token | Minted when | Scope |
 | --- | --- | --- |
-| Tool checkout | the caller is not `cccteam/gh-jira-sync` | Contents: read, on `cccteam/gh-jira-sync` only |
 | Issues and comments | always | Issues: read and write, on the config's `repository` only |
 | Projects | the config has `project_status` | Organization Projects: read and write, for `project_status.owner`, plus Issues: read on the synced repository, because project items hide which issue they hold from tokens that cannot read it |
 
@@ -129,11 +127,10 @@ to code.
 Set it up once per organization:
 
 1. **Settings → Developer settings → GitHub Apps → New GitHub App**, owned by the
-   organization. Turn off the webhook. Repository permissions: **Contents: Read**,
-   **Issues: Read and write** (Metadata: Read is added automatically). Organization
-   permissions: **Projects: Read and write** if you use `project_status`.
-2. Install it on the organization for **only** `cccteam/gh-jira-sync` and the
-   repositories being synced.
+   organization. Turn off the webhook. Repository permissions: **Issues: Read and
+   write** (Metadata: Read is added automatically). Organization permissions:
+   **Projects: Read and write** if you use `project_status`.
+2. Install it on the organization for **only** the repositories being synced.
 3. Note its **Client ID** and generate a private key. Store the key as an
    organization secret visible only to the repositories that run the sync, or as an
    environment secret whose deployment branch policy allows only the default branch.
@@ -161,8 +158,9 @@ Set it up once per organization:
 ### Another repository syncing itself
 
 Commit a `sync.json` whose `repository` is that repository, add the Jira secrets
-and the App's private key, then add a workflow like this. Pin `uses:` and `tool-ref` to the
-same tag or commit so the workflow and the tool always match:
+and the App's private key, then add a workflow like this. It works the same from any
+organization: this repository is public, and the App is your own, installed in your
+organization. Call a release; the workflow runs that release's binary:
 
 ```yaml
 name: Sync GitHub and Jira
@@ -178,9 +176,8 @@ permissions:
   issues: write
 jobs:
   sync:
-    uses: cccteam/gh-jira-sync/.github/workflows/sync-reusable.yml@<commit-or-tag>
+    uses: cccteam/gh-jira-sync/.github/workflows/sync-reusable.yml@v0.1.0 # x-release-please-version
     with:
-      tool-ref: <commit-or-tag>
       app-client-id: Iv23liExampleClientId
       apply: ${{ inputs.apply || (github.event_name == 'schedule' && vars.SYNC_APPLY == 'true') }}
       initialize: ${{ inputs.initialize || false }}
@@ -190,9 +187,10 @@ jobs:
       app-private-key: ${{ secrets.GH_JIRA_SYNC_APP_KEY }}
 ```
 
-While `cccteam/gh-jira-sync` is private, other repositories can call its workflow
-only if its **Settings → Actions → General → Access** allows repositories in the
-organization. The App mints the read-only token that checks out its code.
+For a stronger pin, use the release's commit with the tag as a comment
+(`@<commit> # vX.Y.Z`); Dependabot's `github-actions` updates keep either form
+current. Before running anything, the workflow checks the downloaded binary against
+the release's checksums and its build provenance attestation.
 
 ### One repository serving several
 
@@ -208,9 +206,8 @@ jobs:
       fail-fast: false
       matrix:
         deployment: [web, api]
-    uses: cccteam/gh-jira-sync/.github/workflows/sync-reusable.yml@<commit-or-tag>
+    uses: cccteam/gh-jira-sync/.github/workflows/sync-reusable.yml@v0.1.0 # x-release-please-version
     with:
-      tool-ref: <commit-or-tag>
       config: sync/${{ matrix.deployment }}.json
       state-branch: sync-state-${{ matrix.deployment }}
       app-client-id: Iv23liExampleClientId
@@ -232,8 +229,31 @@ since each checkpoint replaces the branch's whole tree.
 The workflow loads authoritative state from `origin`, pushes every creation intent
 **before** the corresponding API request, and checkpoints each success. Use exactly
 one deployment per GitHub repository and Jira project pair: two deployments writing
-the same objects keep separate journals and can duplicate issues and comments. The
-test workflow can run on pull requests without sync credentials.
+the same objects keep separate journals and can duplicate issues and comments.
+
+## Releases and versions
+
+Releases follow [semantic versioning](https://semver.org) and are cut by
+[release-please](https://github.com/googleapis/release-please) from
+[Conventional Commit](https://www.conventionalcommits.org) pull request titles:
+`fix:` makes a patch release and `feat:` a minor one (`feat!:` or a
+`BREAKING CHANGE:` footer will make a major one from 1.0 on; before 1.0 it makes a
+minor one). Merging the release pull request tags `vX.Y.Z`, publishes the release
+with its [changelog](CHANGELOG.md), and attaches:
+
+* `gh-jira-sync_X.Y.Z_<os>_<arch>.tar.gz` for Linux and macOS on amd64 and arm64;
+* `checksums.txt`, the SHA-256 of each archive;
+* a build provenance attestation per archive, checkable with
+  `gh attestation verify <archive> --repo cccteam/gh-jira-sync`.
+
+Each release's `sync-reusable.yml` names that release as its default `version`, so a
+caller pins one ref and gets the matching workflow and binary. `go install
+github.com/cccteam/gh-jira-sync@vX.Y.Z` builds the same release from source.
+
+Pull requests run the shared Go CI from
+[`cccteam/github-workflows`](https://github.com/cccteam/github-workflows): tests,
+golangci-lint (configured in `.golangci.yml`), govulncheck, Semgrep, and a check that
+the title is a Conventional Commit. None of it needs sync credentials.
 
 ## Configuration
 

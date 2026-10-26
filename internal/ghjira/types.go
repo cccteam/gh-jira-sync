@@ -8,9 +8,23 @@ import (
 	"strconv"
 )
 
+const (
+	// GitHub issue states, also the values of issue_state.
+	stateOpen   = "open"
+	stateClosed = "closed"
+	// ownerUser is the project owner type for a user-owned project.
+	ownerUser = "user"
+	// identityKey names the Jira issue and comment property holding a copy's identity.
+	identityKey = "gh-jira-sync"
+	// HTTP headers set on every request.
+	headerAuthorization = "Authorization"
+	headerAccept        = "Accept"
+)
+
 // Side names one of the two services.
 type Side string
 
+// The two sides a pair links.
 const (
 	SideGitHub Side = "github"
 	SideJira   Side = "jira"
@@ -27,6 +41,7 @@ func (s Side) Other() Side {
 	if s == SideGitHub {
 		return SideJira
 	}
+
 	return SideGitHub
 }
 
@@ -36,14 +51,17 @@ func (s Side) valid() bool { return s == SideGitHub || s == SideJira }
 func (s *Side) UnmarshalText(b []byte) error {
 	if v := Side(b); v.valid() {
 		*s = v
+
 		return nil
 	}
+
 	return fmt.Errorf("invalid side %q", b)
 }
 
 // Kind is the decision planned for one report entry.
 type Kind string
 
+// The kinds of report entry; see the report documentation for each.
 const (
 	KindCreateIssue    Kind = "create_issue"
 	KindLinkIssue      Kind = "link_issue"
@@ -61,14 +79,17 @@ const (
 	KindReconciled     Kind = "reconciled"
 	KindSyncStatus     Kind = "sync_status"   // close or reopen one side to match the other
 	KindStatusAgreed   Kind = "status_agreed" // both sides agree; record that as the baseline
-	// Project status mode: a GitHub Project's single-select field mirrors Jira status.
+	// KindAddToProject and the next two are project status mode: a GitHub Project's
+	// single-select field mirrors Jira status.
 	KindAddToProject        Kind = "add_to_project"
 	KindSyncProjectStatus   Kind = "sync_project_status"
 	KindProjectStatusAgreed Kind = "project_status_agreed"
-	// Parent sync: GitHub sub-issues mirror Jira parent links (for example Epic → Story).
+	// KindSyncParent and KindParentAgreed are parent sync: GitHub sub-issues mirror Jira
+	// parent links (for example Epic → Story).
 	KindSyncParent   Kind = "sync_parent"
 	KindParentAgreed Kind = "parent_agreed"
-	// Jira → GitHub creation (jira_selection_label).
+	// KindCreateGitHubIssue and KindLinkGitHubIssue are Jira → GitHub creation
+	// (jira_selection_label).
 	KindCreateGitHubIssue Kind = "create_github_issue"
 	KindLinkGitHubIssue   Kind = "link_github_issue"
 )
@@ -79,8 +100,9 @@ func (k Kind) writes() bool {
 	case KindCreateIssue, KindCreateComment, KindEditComment, KindSyncStatus, KindAddToProject, KindSyncProjectStatus,
 		KindSyncParent, KindCreateGitHubIssue:
 		return true
+	default:
+		return false
 	}
-	return false
 }
 
 // needsReview reports kinds that make the run exit 2 until resolved or acknowledged.
@@ -91,13 +113,15 @@ func (k Kind) passive() bool {
 	switch k {
 	case KindBlocked, KindNoop, KindExcluded, KindUnavailable, KindDeferred, KindAcknowledged, KindUnchanged:
 		return true
+	default:
+		return false
 	}
-	return false
 }
 
 // Status is where a journaled operation stands.
 type Status string
 
+// The states of a journaled operation.
 const (
 	StatusPending  Status = "pending"  // intent saved; outcome unknown until confirmed
 	StatusDone     Status = "done"     // destination confirmed
@@ -106,11 +130,14 @@ const (
 
 func (s Status) valid() bool { return s == StatusPending || s == StatusDone || s == StatusRejected }
 
+// UnmarshalText accepts only the known operation states.
 func (s *Status) UnmarshalText(b []byte) error {
 	if v := Status(b); v.valid() {
 		*s = v
+
 		return nil
 	}
+
 	return fmt.Errorf("invalid status %q", b)
 }
 
@@ -118,6 +145,7 @@ func (s *Status) UnmarshalText(b []byte) error {
 // so its values must never change.
 type OpKind string
 
+// The journaled operation kinds.
 const (
 	OpIssue         OpKind = "issue"
 	OpGitHubComment OpKind = "comment_github"
@@ -141,24 +169,30 @@ func commentOp(side Side) OpKind {
 	if side == SideGitHub {
 		return OpGitHubComment
 	}
+
 	return OpJiraComment
 }
 
+// UnmarshalText accepts only the journaled operation kinds; the report-only kinds
+// (status, project status, parent) never appear in state.
 func (k *OpKind) UnmarshalText(b []byte) error {
 	switch v := OpKind(b); v {
 	case OpIssue, OpGitHubComment, OpJiraComment, OpJiraIssue:
 		*k = v
+
 		return nil
+	default:
+		return fmt.Errorf("invalid operation kind %q", b)
 	}
-	return fmt.Errorf("invalid operation kind %q", b)
 }
 
 // Outcome records what apply did that the plan could not predict.
 type Outcome string
 
+// The outcomes apply can record on an entry.
 const (
 	OutcomeRejected Outcome = "rejected"
-	// OutcomeAlreadyDone: the planned status change was already in place when apply
+	// OutcomeAlreadyDone means the planned status change was already in place when apply
 	// re-checked, so nothing was written and the agreement was recorded.
 	OutcomeAlreadyDone Outcome = "already_done"
 )
@@ -186,13 +220,14 @@ type GitHubIssue struct {
 
 func (i *GitHubIssue) idString() string { return strconv.FormatInt(i.ID, 10) }
 
-func (i *GitHubIssue) closed() bool { return i.State == "closed" }
+func (i *GitHubIssue) closed() bool { return i.State == stateClosed }
 
 // sameContent compares what drives sync decisions; activity timestamps are ignored.
 func (i *GitHubIssue) sameContent(o *GitHubIssue) bool {
 	if i == nil || o == nil {
 		return i == o
 	}
+
 	return i.ID == o.ID && i.Number == o.Number && i.Title == o.Title && i.Body == o.Body &&
 		i.HTMLURL == o.HTMLURL && i.State == o.State && i.typeName() == o.typeName()
 }
@@ -214,6 +249,7 @@ func (g apiGitHubComment) comment() Comment {
 	if g.User != nil {
 		c.Author = g.User.Login
 	}
+
 	return c
 }
 
@@ -310,6 +346,7 @@ func (j apiJiraComment) restricted() bool {
 			return true
 		}
 	}
+
 	return false
 }
 
@@ -322,10 +359,11 @@ func (j apiJiraComment) comment() Comment {
 		var identity struct {
 			Operation string `json:"operation"`
 		}
-		if p.Key == "gh-jira-sync" && json.Unmarshal(p.Value, &identity) == nil {
+		if p.Key == identityKey && json.Unmarshal(p.Value, &identity) == nil {
 			c.Identity = identity.Operation
 		}
 	}
+
 	return c
 }
 
@@ -349,8 +387,10 @@ type Comment struct {
 func (c Comment) Text() (string, error) {
 	if c.Side == SideGitHub {
 		body, _ := c.Body.(string)
+
 		return normalized(body), nil
 	}
+
 	return adfText(c.Body)
 }
 
@@ -380,6 +420,7 @@ func (p *ProjectSnapshot) optionName(id string) string {
 			return name
 		}
 	}
+
 	return ""
 }
 
@@ -422,9 +463,10 @@ func (i apiProjectItem) item(fieldID int64) ProjectItem {
 		if json.Unmarshal(f.Value, &option) == nil {
 			item.OptionID = option.ID
 		} else {
-			json.Unmarshal(f.Value, &item.OptionID)
+			_ = json.Unmarshal(f.Value, &item.OptionID) // any other shape leaves the option unset
 		}
 	}
+
 	return item
 }
 
@@ -432,5 +474,6 @@ func (i *GitHubIssue) typeName() string {
 	if i.Type == nil {
 		return ""
 	}
+
 	return i.Type.Name
 }

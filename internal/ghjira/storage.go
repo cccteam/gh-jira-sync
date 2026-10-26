@@ -79,6 +79,7 @@ func (l Link) id(side Side) string {
 	if side == SideGitHub {
 		return l.GitHubID
 	}
+
 	return l.JiraID
 }
 
@@ -101,10 +102,12 @@ type Stamp struct {
 func ParseState(data []byte) (*State, error) {
 	var keys map[string]json.RawMessage
 	if err := json.Unmarshal(data, &keys); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("decode state: %w", err)
 	}
-	allowed := map[string]bool{"version": true, "binding": true, "pairs": true, "operations": true,
-		"comments": true, "acknowledged": true, "reconciled": true}
+	allowed := map[string]bool{
+		"version": true, "binding": true, "pairs": true, "operations": true,
+		"comments": true, "acknowledged": true, "reconciled": true,
+	}
 	for k := range keys {
 		if !allowed[k] {
 			return nil, syncErr("Invalid state version or endpoint/project binding; restore correct state")
@@ -126,6 +129,7 @@ func ParseState(data []byte) (*State, error) {
 		return nil, syncErr("Invalid state structure")
 	}
 	s.ensureMaps()
+
 	return s, nil
 }
 
@@ -149,29 +153,32 @@ func (s *State) ensureMaps() {
 
 // clone deep-copies state; every map holds plain values.
 func (s *State) clone() *State {
-	return &State{Version: s.Version, Binding: s.Binding, Pairs: cloneMap(s.Pairs),
+	return &State{
+		Version: s.Version, Binding: s.Binding, Pairs: cloneMap(s.Pairs),
 		Operations: cloneMap(s.Operations), Comments: cloneMap(s.Comments),
-		Acknowledged: cloneMap(s.Acknowledged), Reconciled: cloneMap(s.Reconciled)}
+		Acknowledged: cloneMap(s.Acknowledged), Reconciled: cloneMap(s.Reconciled),
+	}
 }
 
 func cloneMap[V any](m map[string]V) map[string]V {
 	out := make(map[string]V, len(m))
 	maps.Copy(out, m)
+
 	return out
 }
 
 // atomicJSON writes sorted, indented JSON durably: temp file, fsync, rename, fsync dir.
 func atomicJSON(path string, v any) error {
 	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		return fmt.Errorf("create directory for %s: %w", path, err)
 	}
 	f, err := os.CreateTemp(dir, ".sync-")
 	if err != nil {
-		return err
+		return fmt.Errorf("create temporary file for %s: %w", path, err)
 	}
 	temp := f.Name()
-	defer os.Remove(temp) // no-op after a successful rename
+	defer func() { _ = os.Remove(temp) }() // no-op after a successful rename
 	_, err = f.Write(append(canonical(v, true), '\n'))
 	if err == nil {
 		err = f.Sync()
@@ -183,14 +190,18 @@ func atomicJSON(path string, v any) error {
 		err = os.Rename(temp, path)
 	}
 	if err != nil {
-		return err
+		return fmt.Errorf("write %s: %w", path, err)
 	}
 	d, err := os.Open(dir)
 	if err != nil {
-		return err
+		return fmt.Errorf("open directory of %s: %w", path, err)
 	}
-	defer d.Close()
-	return d.Sync()
+	defer func() { _ = d.Close() }()
+	if err := d.Sync(); err != nil {
+		return fmt.Errorf("sync directory of %s: %w", path, err)
+	}
+
+	return nil
 }
 
 // GitStore checkpoints state to a dedicated branch on origin. It never checks out,
@@ -207,14 +218,16 @@ type GitStore struct {
 // existing "sync-state" branch in Git's ref namespace, so names use a dash.
 var stateBranchPattern = regexp.MustCompile(`^sync-state(-[A-Za-z0-9][A-Za-z0-9_-]*)?$`)
 
+// NewGitStore returns a store for a state branch, after checking its name.
 func NewGitStore(branch string) (*GitStore, error) {
 	if !stateBranchPattern.MatchString(branch) {
 		return nil, syncErr("State branch must be sync-state or sync-state-<name>")
 	}
+
 	return &GitStore{Branch: branch}, nil
 }
 
-func (g *GitStore) git(data string, allowed []int, args ...string) (int, string, error) {
+func (g *GitStore) git(data string, allowed []int, args ...string) (code int, out string, err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", args...)
@@ -225,9 +238,7 @@ func (g *GitStore) git(data string, allowed []int, args ...string) (int, string,
 	cmd.Stdin = strings.NewReader(data)
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
-	err := cmd.Run()
-	code := 0
-	if err != nil {
+	if err = cmd.Run(); err != nil {
 		var exit *exec.ExitError
 		if !errors.As(err, &exit) || ctx.Err() != nil {
 			return 0, "", syncErr("Git checkpoint failed or outcome unknown; stop and reload state")
@@ -237,6 +248,7 @@ func (g *GitStore) git(data string, allowed []int, args ...string) (int, string,
 	if slices.Contains(allowed, code) {
 		return code, strings.TrimSpace(stdout.String()), nil
 	}
+
 	return code, "", syncErr("Git checkpoint failed; check remote, permissions, or concurrent writer")
 }
 
@@ -260,6 +272,7 @@ func (g *GitStore) Load() (*State, error) {
 		if err == nil {
 			err = syncErr("Branch %s holds more than state.json; refusing to use it as sync state", g.Branch)
 		}
+
 		return nil, err
 	}
 	_, raw, err := g.git("", []int{0}, "show", parent+":state.json")
@@ -271,6 +284,7 @@ func (g *GitStore) Load() (*State, error) {
 		return nil, err
 	}
 	g.parent, g.previous = parent, canonical(s, false)
+
 	return s, nil
 }
 
@@ -302,6 +316,7 @@ func (g *GitStore) Save(s *State) error {
 		return err
 	}
 	g.parent, g.previous = commit, current
+
 	return nil
 }
 
@@ -313,5 +328,6 @@ func uuid4() string {
 	}
 	b[6] = b[6]&0x0f | 0x40
 	b[8] = b[8]&0x3f | 0x80
+
 	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:])
 }

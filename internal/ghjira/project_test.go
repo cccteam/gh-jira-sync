@@ -2,7 +2,6 @@ package ghjira
 
 import (
 	"net/http"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -12,14 +11,18 @@ import (
 // Blocked option) and a Jira workflow where any status can move to any other.
 func projectSyncer(t *testing.T) *syncer {
 	x := newSyncer(t)
-	x.c.ProjectStatus = &ProjectStatus{Owner: "acme", OwnerType: "org", ProjectNumber: 1, Field: "Status", AddToProject: true,
+	x.c.ProjectStatus = &ProjectStatus{
+		Owner: "acme", OwnerType: "org", ProjectNumber: 1, Field: "Status", AddToProject: true,
 		Map: []ProjectStatusMapping{
 			{Project: "Todo", Jira: []string{"To Do"}},
 			{Project: "In Progress", Jira: []string{"In Progress", "In Review"}},
 			{Project: "Done", Jira: []string{"Done"}},
-		}}
-	x.api.project = &ProjectSnapshot{FieldID: 9, Items: map[int64]ProjectItem{},
-		Options: map[string]string{"Todo": "o-todo", "In Progress": "o-prog", "Done": "o-done", "Blocked": "o-blocked"}}
+		},
+	}
+	x.api.project = &ProjectSnapshot{
+		FieldID: 9, Items: map[int64]ProjectItem{},
+		Options: map[string]string{"Todo": "o-todo", "In Progress": "o-prog", "Done": "o-done", "Blocked": "o-blocked"},
+	}
 	x.api.transitions = []JiraTransition{
 		{ID: "1", Name: "Start", To: jiraStatus("In Progress", "indeterminate")},
 		{ID: "2", Name: "Review", To: jiraStatus("In Review", "indeterminate")},
@@ -74,12 +77,14 @@ func projectInSync(t *testing.T, x *syncer) *State {
 }
 
 func TestProjectAddedAndFilledFromJira(t *testing.T) {
+	t.Parallel()
 	x := projectSyncer(t)
 	s := projectInSync(t, x)
 	eq(t, agreed(t, s), "open") // creation also records open/closed in project mode
 }
 
 func TestProjectStatusMovesJira(t *testing.T) {
+	t.Parallel()
 	x := projectSyncer(t)
 	s := projectInSync(t, x)
 	x.setOption("In Progress")
@@ -99,6 +104,7 @@ func TestProjectStatusMovesJira(t *testing.T) {
 }
 
 func TestJiraMovesProjectThroughManyToOneMapping(t *testing.T) {
+	t.Parallel()
 	x := projectSyncer(t)
 	s := projectInSync(t, x)
 	x.api.jira.Fields.Status = jiraStatus("In Review", "indeterminate")
@@ -108,6 +114,7 @@ func TestJiraMovesProjectThroughManyToOneMapping(t *testing.T) {
 }
 
 func TestJiraDoneSetsProjectAndClosesGitHub(t *testing.T) {
+	t.Parallel()
 	x := projectSyncer(t)
 	s := projectInSync(t, x)
 	x.api.jira.Fields.Status = jiraStatus("Done", "done")
@@ -118,6 +125,7 @@ func TestJiraDoneSetsProjectAndClosesGitHub(t *testing.T) {
 }
 
 func TestGitHubCloseWaitsForProjectAutomation(t *testing.T) {
+	t.Parallel()
 	x := projectSyncer(t)
 	s := projectInSync(t, x)
 	writes := len(x.api.writes)
@@ -134,6 +142,7 @@ func TestGitHubCloseWaitsForProjectAutomation(t *testing.T) {
 }
 
 func TestProjectStatusBlocksForReview(t *testing.T) {
+	t.Parallel()
 	for name, change := range map[string]func(x *syncer){
 		"is not mapped in project_status": func(x *syncer) { x.api.jira.Fields.Status = jiraStatus("Waiting", "indeterminate") },
 		`"Blocked" is not mapped`:         func(x *syncer) { x.setOption("Blocked") },
@@ -147,6 +156,7 @@ func TestProjectStatusBlocksForReview(t *testing.T) {
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 			x := projectSyncer(t)
 			s := projectInSync(t, x)
 			change(x)
@@ -165,6 +175,7 @@ func TestProjectStatusBlocksForReview(t *testing.T) {
 }
 
 func TestNamedTransitionOverridesDestinationMatch(t *testing.T) {
+	t.Parallel()
 	x := projectSyncer(t)
 	x.c.ProjectStatus.Map[1].Transition = "Review"
 	s := projectInSync(t, x)
@@ -175,6 +186,7 @@ func TestNamedTransitionOverridesDestinationMatch(t *testing.T) {
 }
 
 func TestItemsOutsideProjectAreExcluded(t *testing.T) {
+	t.Parallel()
 	x := projectSyncer(t)
 	x.c.ProjectStatus.AddToProject = false
 	s := x.linked()
@@ -188,6 +200,7 @@ func TestItemsOutsideProjectAreExcluded(t *testing.T) {
 }
 
 func TestMappedOptionMissingFromProjectFailsRun(t *testing.T) {
+	t.Parallel()
 	x := projectSyncer(t)
 	s := x.linked()
 	delete(x.api.project.Options, "Done")
@@ -197,6 +210,7 @@ func TestMappedOptionMissingFromProjectFailsRun(t *testing.T) {
 }
 
 func TestProjectStatusChangedAfterPlanAborts(t *testing.T) {
+	t.Parallel()
 	x := projectSyncer(t)
 	s := projectInSync(t, x)
 	x.setOption("In Progress")
@@ -213,9 +227,11 @@ func TestProjectStatusChangedAfterPlanAborts(t *testing.T) {
 }
 
 func TestProjectStatusConfig(t *testing.T) {
+	t.Parallel()
 	ps := Object{"owner": "cccteam", "project_number": 7, "map": []any{
 		Object{"project": "Todo", "jira": "To Do"},
-		Object{"project": "In Progress", "jira": []any{"In Progress", "In Review"}, "transition": "Start"}}}
+		Object{"project": "In Progress", "jira": []any{"In Progress", "In Review"}, "transition": "Start"},
+	}}
 	c := testConfig(t, Object{"project_status": ps})
 	eq(t, []any{c.ProjectStatus.OwnerType, c.ProjectStatus.Field, c.ProjectStatus.AddToProject}, []any{"org", "Status", true})
 	eq(t, c.ProjectStatus.Map[1], ProjectStatusMapping{Project: "In Progress", Jira: []string{"In Progress", "In Review"}, Transition: "Start"})
@@ -236,11 +252,11 @@ func TestProjectStatusConfig(t *testing.T) {
 		"no owner":         func(r Object) { delete(asObject(r["project_status"]), "owner") },
 		"bad owner type":   func(r Object) { asObject(r["project_status"])["owner_type"] = "team" },
 		"zero number":      func(r Object) { asObject(r["project_status"])["project_number"] = 0 },
-		"unknown key":      func(r Object) { asObject(r["project_status"])["colour"] = "red" },
+		"unknown key":      func(r Object) { asObject(r["project_status"])["color"] = "red" },
 		"empty map":        func(r Object) { asObject(r["project_status"])["map"] = []any{} },
-		"duplicate jira":   func(r Object) { list(asObject(r["project_status"])["map"])[1].(Object)["jira"] = "To Do" },
-		"duplicate option": func(r Object) { list(asObject(r["project_status"])["map"])[1].(Object)["project"] = "Todo" },
-		"no jira":          func(r Object) { delete(list(asObject(r["project_status"])["map"])[0].(Object), "jira") },
+		"duplicate jira":   func(r Object) { asObject(list(asObject(r["project_status"])["map"])[1])["jira"] = "To Do" },
+		"duplicate option": func(r Object) { asObject(list(asObject(r["project_status"])["map"])[1])["project"] = "Todo" },
+		"no jira":          func(r Object) { delete(asObject(list(asObject(r["project_status"])["map"])[0]), "jira") },
 	} {
 		if _, err := ParseConfig(canonical(withPS(change), false)); err == nil {
 			t.Errorf("%s: accepted", name)
@@ -249,6 +265,7 @@ func TestProjectStatusConfig(t *testing.T) {
 }
 
 func TestProjectAPIRequests(t *testing.T) {
+	t.Parallel()
 	var graphql []map[string]any
 	var srv *server
 	srv = newServer(t, func(r *http.Request) (int, http.Header, any) {
@@ -257,10 +274,13 @@ func TestProjectAPIRequests(t *testing.T) {
 		}
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/fields"):
-			return 200, nil, []any{Object{"id": 5, "name": "Title", "data_type": "title"},
+			return 200, nil, []any{
+				Object{"id": 5, "name": "Title", "data_type": "title"},
 				Object{"id": 9, "name": "Status", "data_type": "single_select", "options": []any{
 					Object{"id": "o-todo", "name": Object{"raw": "Todo", "html": "Todo"}},
-					Object{"id": "o-done", "name": Object{"raw": "Done", "html": "Done"}}}}}
+					Object{"id": "o-done", "name": Object{"raw": "Done", "html": "Done"}},
+				}},
+			}
 		case r.URL.Path == "/graphql":
 			// Shapes as GitHub returned them live to the App token, across two pages.
 			req := srv.bodies[len(srv.bodies)-1] // the server already read the body
@@ -273,15 +293,22 @@ func TestProjectAPIRequests(t *testing.T) {
 				return 200, nil, Object{"data": Object{"owner": Object{"projectV2": Object{"items": Object{
 					"pageInfo": Object{"hasNextPage": true, "endCursor": "c1"},
 					"nodes": []any{
-						Object{"fullDatabaseId": "900", "isArchived": false, "content": Object{"__typename": "Issue", "fullDatabaseId": "42"},
-							"fieldValueByName": Object{"optionId": "o-done"}},
+						Object{
+							"fullDatabaseId": "900", "isArchived": false, "content": Object{"__typename": "Issue", "fullDatabaseId": "42"},
+							"fieldValueByName": Object{"optionId": "o-done"},
+						},
 						Object{"fullDatabaseId": "901", "isArchived": false, "content": Object{"__typename": "DraftIssue"}},
-						Object{"fullDatabaseId": "903", "isArchived": false, "content": nil}}}}}}}
+						Object{"fullDatabaseId": "903", "isArchived": false, "content": nil},
+					},
+				}}}}}
 			}
 			return 200, nil, Object{"data": Object{"owner": Object{"projectV2": Object{"items": Object{
 				"pageInfo": Object{"hasNextPage": false, "endCursor": "c2"},
-				"nodes": []any{Object{"fullDatabaseId": "902", "isArchived": true, "content": Object{"__typename": "Issue", "fullDatabaseId": "6027956256"},
-					"fieldValueByName": nil}}}}}}}
+				"nodes": []any{Object{
+					"fullDatabaseId": "902", "isArchived": true, "content": Object{"__typename": "Issue", "fullDatabaseId": "6027956256"},
+					"fieldValueByName": nil,
+				}},
+			}}}}}
 		case strings.HasSuffix(r.URL.Path, "/items/900"):
 			return 200, nil, Object{"id": 900, "content_type": "Issue", "fields": []any{Object{"id": 9, "value": nil}}}
 		}
@@ -322,6 +349,7 @@ func TestProjectAPIRequests(t *testing.T) {
 }
 
 func TestPaginationRefusesForeignHosts(t *testing.T) {
+	t.Parallel()
 	srv := newServer(t, func(*http.Request) (int, http.Header, any) {
 		return 200, http.Header{"Link": {`<https://evil.example/next>; rel="next"`}}, []any{}
 	})
@@ -340,7 +368,7 @@ func TestProjectTokenRequired(t *testing.T) {
 	if _, err := NewClient(c); err == nil || !strings.Contains(err.Error(), "GH_PROJECT_TOKEN") {
 		t.Fatalf("expected missing token error, got %v", err)
 	}
-	os.Setenv("GH_PROJECT_TOKEN", "p")
+	t.Setenv("GH_PROJECT_TOKEN", "p")
 	client, err := NewClient(c)
 	if err != nil || client.projects.headers["X-GitHub-Api-Version"] != "2026-03-10" {
 		t.Fatalf("projects client: %v", err)
@@ -354,6 +382,7 @@ func TestProjectTokenRequired(t *testing.T) {
 // so the tool closed the GitHub issue, and the project's "Item closed" workflow set
 // the card to Done before the tool's own card update ran.
 func TestProjectAutomationRaceRecordsAgreement(t *testing.T) {
+	t.Parallel()
 	x := projectSyncer(t)
 	s := projectInSync(t, x)
 	x.api.itemClosed = true
@@ -375,6 +404,7 @@ func TestProjectAutomationRaceRecordsAgreement(t *testing.T) {
 }
 
 func TestRefusedProjectAddExplainsMissingRepositoryAccess(t *testing.T) {
+	t.Parallel()
 	x := projectSyncer(t)
 	s := x.linked()
 	x.api.refuse = []int{422}
@@ -392,6 +422,7 @@ func TestRefusedProjectAddExplainsMissingRepositoryAccess(t *testing.T) {
 }
 
 func TestProjectGraphQLErrorsFailTheRun(t *testing.T) {
+	t.Parallel()
 	srv := newServer(t, func(r *http.Request) (int, http.Header, any) {
 		if strings.HasSuffix(r.URL.Path, "/fields") {
 			return 200, nil, []any{Object{"id": 9, "name": "Status", "data_type": "single_select", "options": []any{}}}

@@ -38,6 +38,7 @@ func backlogInSync(t *testing.T, x *syncer) *State {
 }
 
 func TestJiraBoardMoveSetsReady(t *testing.T) {
+	t.Parallel()
 	x := backlogSyncer(t)
 	s := backlogInSync(t, x)
 	x.api.backlog = false
@@ -56,6 +57,7 @@ func TestJiraBoardMoveSetsReady(t *testing.T) {
 }
 
 func TestProjectReadyMovesJiraOntoBoard(t *testing.T) {
+	t.Parallel()
 	x := backlogSyncer(t)
 	s := backlogInSync(t, x)
 	x.setOption("Ready")
@@ -73,6 +75,7 @@ func TestProjectReadyMovesJiraOntoBoard(t *testing.T) {
 }
 
 func TestProjectInProgressMovesJiraOntoBoardThenTransitions(t *testing.T) {
+	t.Parallel()
 	x := backlogSyncer(t)
 	s := backlogInSync(t, x)
 	x.setOption("In Progress")
@@ -84,6 +87,7 @@ func TestProjectInProgressMovesJiraOntoBoardThenTransitions(t *testing.T) {
 
 // The board move can change the status; the transition is found again from there.
 func TestBoardMoveStatusChangeRedoesTransition(t *testing.T) {
+	t.Parallel()
 	x := backlogSyncer(t)
 	s := backlogInSync(t, x)
 	x.api.jira.Fields.Status = jiraStatus("In Review", "indeterminate") // in the backlog, so still Backlog
@@ -97,6 +101,7 @@ func TestBoardMoveStatusChangeRedoesTransition(t *testing.T) {
 }
 
 func TestDoneIssueCannotMoveToBacklog(t *testing.T) {
+	t.Parallel()
 	x := backlogSyncer(t)
 	s := backlogInSync(t, x)
 	x.api.backlog = false
@@ -115,6 +120,7 @@ func TestDoneIssueCannotMoveToBacklog(t *testing.T) {
 }
 
 func TestBacklogChangedAfterPlanAborts(t *testing.T) {
+	t.Parallel()
 	x := backlogSyncer(t)
 	s := backlogInSync(t, x)
 	x.setOption("Ready")
@@ -132,6 +138,7 @@ func TestBacklogChangedAfterPlanAborts(t *testing.T) {
 }
 
 func TestBacklogMoveAlreadyDone(t *testing.T) {
+	t.Parallel()
 	x := backlogSyncer(t)
 	s := backlogInSync(t, x)
 	x.setOption("Ready")
@@ -150,10 +157,12 @@ func TestBacklogMoveAlreadyDone(t *testing.T) {
 }
 
 func TestBacklogConfig(t *testing.T) {
+	t.Parallel()
 	ps := func() Object {
 		return Object{"owner": "cccteam", "project_number": 7, "jira_board": 150, "map": []any{
 			Object{"project": "Backlog", "jira_backlog": true},
-			Object{"project": "Ready", "jira": "To Do"}}}
+			Object{"project": "Ready", "jira": "To Do"},
+		}}
 	}
 	c := testConfig(t, Object{"project_status": ps()})
 	eq(t, []any{c.ProjectStatus.JiraBoard, c.ProjectStatus.backlogOption()}, []any{150, "Backlog"})
@@ -166,21 +175,24 @@ func TestBacklogConfig(t *testing.T) {
 		"no board":           func(p Object) { delete(p, "jira_board") },
 		"board, no backlog":  func(p Object) { list(p["map"])[0] = Object{"project": "Backlog", "jira": "Backlog"} },
 		"zero board":         func(p Object) { p["jira_board"] = 0 },
-		"backlog with jira":  func(p Object) { list(p["map"])[0].(Object)["jira"] = "To Do" },
-		"backlog transition": func(p Object) { list(p["map"])[0].(Object)["transition"] = "Start" },
+		"backlog with jira":  func(p Object) { asObject(list(p["map"])[0])["jira"] = "To Do" },
+		"backlog transition": func(p Object) { asObject(list(p["map"])[0])["transition"] = "Start" },
 		"two backlogs":       func(p Object) { list(p["map"])[1] = Object{"project": "Ready", "jira_backlog": true} },
-		"not a bool":         func(p Object) { list(p["map"])[0].(Object)["jira_backlog"] = "yes" },
+		"not a bool":         func(p Object) { asObject(list(p["map"])[0])["jira_backlog"] = "yes" },
 	} {
 		raw := ps()
 		change(raw)
-		if _, err := ParseConfig(canonical(Object{"repository": "acme/test", "jira_url": "https://acme.atlassian.net",
-			"jira_project": "ENG", "jira_issue_type": "10001", "project_status": raw}, false)); err == nil {
+		if _, err := ParseConfig(canonical(Object{
+			"repository": "acme/test", "jira_url": "https://acme.atlassian.net",
+			"jira_project": "ENG", "jira_issue_type": "10001", "project_status": raw,
+		}, false)); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
 	}
 }
 
 func TestBacklogAPIRequests(t *testing.T) {
+	t.Parallel()
 	inBacklog := map[string]int{"10010": 1, "ENG-1": 0} // what membership reads return
 	lag := 0                                            // reads still showing the old membership
 	srv := newServer(t, func(r *http.Request) (int, http.Header, any) {

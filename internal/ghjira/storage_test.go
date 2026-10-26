@@ -9,10 +9,11 @@ import (
 )
 
 func TestRealGitPersistenceReloadAndCompetingWriter(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	remote, local := filepath.Join(root, "remote.git"), filepath.Join(root, "local")
 	for _, args := range [][]string{{"init", "--bare", remote}, {"clone", remote, local}} {
-		if out, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+		if out, err := exec.CommandContext(t.Context(), "git", args...).CombinedOutput(); err != nil {
 			t.Fatalf("git %v: %v\n%s", args, err, out)
 		}
 	}
@@ -51,12 +52,14 @@ func TestRealGitPersistenceReloadAndCompetingWriter(t *testing.T) {
 }
 
 func TestOnlySyncStateBranchSupported(t *testing.T) {
+	t.Parallel()
 	if _, err := NewGitStore("main"); err == nil {
 		t.Fatal("other branches must be rejected")
 	}
 }
 
 func TestStateRejectsUnknownEnumValues(t *testing.T) {
+	t.Parallel()
 	valid := NewState(testConfig(t, nil))
 	op := token(testConfig(t, nil), OpIssue, "42")
 	valid.Operations[op] = Operation{Kind: OpIssue, SourceID: "42", GitHub: 1, Status: StatusPending}
@@ -85,7 +88,7 @@ func gitClone(t *testing.T) string {
 	root := t.TempDir()
 	remote, local := filepath.Join(root, "remote.git"), filepath.Join(root, "local")
 	for _, args := range [][]string{{"init", "--bare", remote}, {"clone", remote, local}} {
-		if out, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+		if out, err := exec.CommandContext(t.Context(), "git", args...).CombinedOutput(); err != nil {
 			t.Fatalf("git %v: %v\n%s", args, err, out)
 		}
 	}
@@ -93,6 +96,7 @@ func gitClone(t *testing.T) string {
 }
 
 func TestStateBranchNames(t *testing.T) {
+	t.Parallel()
 	for name, valid := range map[string]bool{
 		"sync-state": true, "sync-state-team-a": true, "sync-state-A_1": true,
 		"main": false, "sync-state/team-a": false, "sync-state-": false, "sync-state-.lock": false,
@@ -105,6 +109,7 @@ func TestStateBranchNames(t *testing.T) {
 }
 
 func TestSeveralDeploymentsShareOneRemote(t *testing.T) {
+	t.Parallel()
 	local := gitClone(t)
 	states := map[string]*State{}
 	for _, d := range []struct{ branch, project string }{{"sync-state", "ENG"}, {"sync-state-ops", "OPS"}} {
@@ -127,16 +132,20 @@ func TestSeveralDeploymentsShareOneRemote(t *testing.T) {
 }
 
 func TestRefusesBranchHoldingMoreThanState(t *testing.T) {
+	t.Parallel()
 	local := gitClone(t)
 	for _, name := range []string{"state.json", "README.md"} {
-		if err := os.WriteFile(filepath.Join(local, name), []byte("{}\n"), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(local, name), []byte("{}\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
-	for _, args := range [][]string{{"checkout", "-q", "-b", "sync-state-docs"}, {"add", "."},
+	for _, args := range [][]string{
+		{"checkout", "-q", "-b", "sync-state-docs"},
+		{"add", "."},
 		{"-c", "user.name=t", "-c", "user.email=t@example.test", "commit", "-q", "-m", "docs"},
-		{"push", "-q", "origin", "sync-state-docs"}} {
-		cmd := exec.Command("git", args...)
+		{"push", "-q", "origin", "sync-state-docs"},
+	} {
+		cmd := exec.CommandContext(t.Context(), "git", args...)
 		cmd.Dir = local
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("git %v: %v\n%s", args, err, out)

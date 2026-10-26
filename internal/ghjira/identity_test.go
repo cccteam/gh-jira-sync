@@ -7,6 +7,7 @@ import (
 )
 
 func TestCopiesShowNoTechnicalMarkers(t *testing.T) {
+	t.Parallel()
 	x := newSyncer(t)
 	s := x.linked()
 	x.api.rows[SideGitHub] = []Comment{ghComment(11, "GitHub original")}
@@ -18,7 +19,7 @@ func TestCopiesShowNoTechnicalMarkers(t *testing.T) {
 	eq(t, text, "alice wrote on GitHub (https://github.com/acme/test/issues/1#issuecomment-11):\n\nGitHub original")
 	eq(t, jiraCopy.Identity, token(x.c, OpGitHubComment, "11"))
 
-	githubCopy := x.api.rows[SideGitHub][1].Body.(string)
+	githubCopy, _ := x.api.rows[SideGitHub][1].Body.(string)
 	op := token(x.c, OpJiraComment, "22")
 	eq(t, githubCopy, "**Bob** wrote in [Jira](https://acme.atlassian.net/browse/ENG-1?focusedCommentId=22):\n\n"+
 		"Jira original\n\n<!-- gh-jira-sync:"+op+" -->")
@@ -34,6 +35,7 @@ func TestCopiesShowNoTechnicalMarkers(t *testing.T) {
 }
 
 func TestHiddenMarkerOnlyCountsAsItsOwnLastLine(t *testing.T) {
+	t.Parallel()
 	op := strings.Repeat("e", 64)
 	m := hiddenMarker(op)
 	eq(t, hasMarker(Comment{Side: SideGitHub, Body: "copy\n\n" + m + "\n"}, op), true)
@@ -45,6 +47,7 @@ func TestHiddenMarkerOnlyCountsAsItsOwnLastLine(t *testing.T) {
 }
 
 func TestMarkdownInAuthorNamesIsEscaped(t *testing.T) {
+	t.Parallel()
 	prefix, _ := envelope(fakeConfig, Comment{Side: SideJira, ID: "5", Author: "*bold* [x]"}, Pair{JiraKey: "ENG-1"}, "op")
 	if !strings.HasPrefix(prefix, `**\*bold\* \[x\]** wrote in`) {
 		t.Fatalf("prefix: %q", prefix)
@@ -52,6 +55,7 @@ func TestMarkdownInAuthorNamesIsEscaped(t *testing.T) {
 }
 
 func TestIssueRecoverySearchesOnlyPendingIntentsByStartTime(t *testing.T) {
+	t.Parallel()
 	x := newSyncer(t)
 	x.api.loseResponse = true
 	x.fails(nil)
@@ -71,6 +75,7 @@ func TestIssueRecoverySearchesOnlyPendingIntentsByStartTime(t *testing.T) {
 }
 
 func TestLinkRequiresMatchingIdentityProperty(t *testing.T) {
+	t.Parallel()
 	x := newSyncer(t)
 	x.api.loseResponse = true
 	x.fails(nil)
