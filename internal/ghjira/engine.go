@@ -57,6 +57,8 @@ type Entry struct {
 	parent      int          // parent to apply or record (GitHub number, 0 for none)
 	ghParent    int          // GitHub parent as planned
 	jiraParent  int          // Jira parent as planned, as a GitHub number
+	parentKey   string       // Jira issue a new sub-task is created under
+	checkParent bool         // re-check ghParent before creating, in sub-task mode
 	title       string       // GitHub issue title to create
 	labels      []string     // GitHub labels for a created issue
 	issueType   string       // GitHub issue type for a created issue
@@ -276,7 +278,7 @@ func Plan(c *Config, s *State, api API, now time.Time) ([]*Entry, error) {
 			continue
 		}
 		if !tracked {
-			e, err := planIssue(c, s, api, source)
+			e, err := planIssue(c, s, api, source, issues)
 			if err != nil {
 				return nil, err
 			}
@@ -372,7 +374,7 @@ func Plan(c *Config, s *State, api API, now time.Time) ([]*Entry, error) {
 	return entries, nil
 }
 
-func planIssue(c *Config, s *State, api API, source *GitHubIssue) (*Entry, error) {
+func planIssue(c *Config, s *State, api API, source *GitHubIssue, issues map[string]*GitHubIssue) (*Entry, error) {
 	op := token(c, OpIssue, source.idString())
 	e := &Entry{GitHub: source.Number, Operation: op, issue: source}
 	old, journaled := s.Operations[op]
@@ -396,11 +398,49 @@ func planIssue(c *Config, s *State, api API, source *GitHubIssue) (*Entry, error
 	default:
 		e.Kind = KindCreateIssue
 		e.IssueType = c.issueTypeFor(source)
-		if journaled {
+		if c.JiraSubtaskType != "" {
+			if err := planSubtask(c, s, api, e, issues); err != nil {
+				return nil, err
+			}
+		}
+		if journaled && e.Kind == KindCreateIssue {
 			retryNote(e, &old)
 		}
 	}
 	return e, nil
+}
+
+// planSubtask makes a new issue a Jira sub-task when its GitHub parent's Jira issue
+// is a standard issue: Jira allows only an Epic above a standard issue, and a
+// sub-task's parent can only be set when it is created. A parent that is selected
+// but not in Jira yet is created first; until then the child waits, since creating it
+// as a standard issue could not be undone.
+func planSubtask(c *Config, s *State, api API, e *Entry, issues map[string]*GitHubIssue) error {
+	parent, err := api.GitHubParent(e.GitHub)
+	if err != nil {
+		return err
+	}
+	e.ghParent, e.checkParent = parent, true
+	if parent == 0 {
+		return nil
+	}
+	pair, linked := s.Pairs[strconv.Itoa(parent)]
+	if !linked {
+		if issues[strconv.Itoa(parent)] != nil {
+			e.Kind, e.IssueType = KindDeferred, ""
+			e.Reason = "Waiting for parent " + parentName(parent) + " to be created in Jira, so this issue can be created under it"
+		}
+		return nil
+	}
+	jira, err := api.JiraIssue(pair.JiraID)
+	if err != nil {
+		return err
+	}
+	if jira != nil && jira.ID == pair.JiraID && jira.Fields.IssueType.HierarchyLevel == 0 {
+		e.IssueType, e.parent, e.parentKey = c.JiraSubtaskType, parent, jira.Key
+		e.Parent = parentName(parent)
+	}
+	return nil
 }
 
 func statusName(closed bool) string {
@@ -847,9 +887,10 @@ func Apply(c *Config, state *State, api API, entries []*Entry, save func(*State)
 			if err == nil && e.Kind == KindCreateIssue && e.Outcome == "" && (c.StatusSync != nil || c.ProjectStatus != nil) {
 				setAgreedStatus(s, e.GitHub, false)
 			}
-			// Likewise a new Jira issue has no parent; a GitHub parent is applied next run.
+			// Likewise a new Jira issue has no parent, unless it is a sub-task created under
+			// one; a GitHub parent is applied next run.
 			if err == nil && e.Kind == KindCreateIssue && e.Outcome == "" && c.SyncParents {
-				setAgreedParent(s, e.GitHub, 0)
+				setAgreedParent(s, e.GitHub, e.parent)
 			}
 		case KindCreateComment, KindRecoverComment:
 			err = applyNewComment(s, api, e, save)
@@ -1071,11 +1112,21 @@ func applyIssue(s *State, api API, e *Entry, save func(*State) error) error {
 			return syncErr("Jira identity changed after plan")
 		}
 	} else {
+		if e.checkParent {
+			// The parent decides the Jira issue type, which cannot change after creation.
+			parent, err := api.GitHubParent(e.GitHub)
+			if err != nil {
+				return err
+			}
+			if parent != e.ghParent {
+				return syncErr("GitHub parent changed after plan; rerun")
+			}
+		}
 		s.Operations[e.Operation] = record
 		if err := save(s); err != nil { // Never dispatch creation without a durable intent.
 			return err
 		}
-		existing, err = api.CreateIssue(source)
+		existing, err = api.CreateIssue(source, e.parentKey)
 		if status, refused := refusedStatus(err); refused {
 			return reject(s, e, record, status, err, save)
 		}

@@ -267,6 +267,19 @@ Writes use GitHub's sub-issue endpoints (`replace_parent` to move, the sub-issue
 rather than its number) and Jira's issue edit (`fields.parent` to set,
 `update.parent.set.none` to remove). Hierarchy refusals are item-level rejections.
 
+`jira_subtask_type` handles the one case parent sync cannot fix afterwards: an issue
+nested under a standard Jira issue must be a sub-task, and Jira fixes both a
+sub-task's type and its parent at creation. Creation therefore reads the GitHub
+parent (one request per issue to create, only in this mode). When the parent's Jira
+issue reports `hierarchyLevel` 0, the issue is created with the sub-task type and
+`fields.parent`, and the pair's agreed parent is that parent rather than none. The
+decision uses the parent's actual Jira type, not the configured mapping, because the
+mapping can change after the parent was created. A selected parent not yet linked
+defers the child instead of letting it be created as a standard issue, which would
+be irreversible; an unselected parent never will be linked, so it does not. The
+parent is re-read before the create request, since it decides an issue type that
+cannot change afterwards. CheckProject verifies the ID is a sub-task type.
+
 ## Jira → GitHub creation
 
 `jira_selection_label` mirrors GitHub → Jira creation in the other direction. Each run

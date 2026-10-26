@@ -134,7 +134,7 @@ func (f *fakeAPI) JiraIssue(id string) (*JiraIssue, error) {
 	return f.jiraCopy(), nil
 }
 
-func (f *fakeAPI) CreateIssue(source *GitHubIssue) (*JiraIssue, error) {
+func (f *fakeAPI) CreateIssue(source *GitHubIssue, _ string) (*JiraIssue, error) {
 	if err := f.maybeRefuse(); err != nil {
 		return nil, err
 	}

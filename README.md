@@ -247,6 +247,7 @@ See [sync.example.json](sync.example.json). Unknown keys fail validation.
 | `jira_issue_type` | Required **issue type ID string**, e.g. `10001` |
 | `jira_issue_types` | `{}`; maps GitHub issue types to Jira issue type IDs for new issues, e.g. `{"Bug": "10004", "Feature": "10005"}`; see [Issue types](#issue-types) |
 | `sync_parents` | `false`; mirror GitHub sub-issue parents and Jira parent links (for example Epic → Story) between linked issues; see [Epics and parent links](#epics-and-parent-links) |
+| `jira_subtask_type` | `null` (off); Jira sub-task issue type ID; a new issue whose GitHub parent is a standard Jira issue (such as a Task under a Task) is created as a sub-task under it; needs `sync_parents`; see [Sub-tasks](#sub-tasks) |
 | `jira_selection_label` | `null` (off); Jira issues in the project with this label are created in GitHub; see [Jira → GitHub creation](#jira--github-creation) |
 | `github_url` | `https://api.github.com`; compatible custom API bases allowed |
 | `selection_label` | `sync-jira`; `null` explicitly opts into all issues |
@@ -365,8 +366,36 @@ created in. New Jira issues are created without a parent and get it on the next 
 
 Jira enforces its hierarchy: a Story, Task, or Bug can have an Epic as parent, but not
 another Story. A change Jira refuses is reported as `rejected` and retried next run.
-One level is synced; sub-issues of stories are not turned into Jira subtasks. Each run
-lists the sub-issues of linked issues that have any, one request per parent.
+Each run lists the sub-issues of linked issues that have any, one request per parent.
+
+### Sub-tasks
+
+Without further setup, a GitHub Task nested under another Task becomes a standard Jira
+Task, and Jira then refuses its parent on every run. Set `jira_subtask_type` to the
+project's sub-task issue type ID (the type with `"subtask": true` in
+`GET /rest/api/3/project/<KEY>`) to create such issues as Jira sub-tasks instead:
+
+```json
+"sync_parents": true,
+"jira_subtask_type": "10217"
+```
+
+* **Which issues.** A new issue becomes a sub-task when its GitHub parent is linked and
+  that parent's Jira issue is a standard issue (Task, Story, Bug: anything below an
+  Epic and above a sub-task). Children of Epics, and issues without a parent, keep
+  their mapped type.
+* **Created under the parent.** Jira sets a sub-task's parent only at creation, so the
+  sub-task is created with it and the pair records that parent as agreed.
+* **Parent first.** If the parent is selected for sync but not in Jira yet, the child
+  waits (reported as `deferred`, not blocking) and is created on the run after its
+  parent, since a standard issue cannot be turned into a sub-task later. A parent that
+  is not selected never reaches Jira, so its children are created normally.
+* **Checked before creating.** The GitHub parent is read again just before creation;
+  if it changed since the plan, the run stops and the next run plans again.
+* **Moving a sub-task later.** Parent sync still mirrors later moves, but Jira decides
+  whether a sub-task may change parent; a move it refuses (such as under an Epic) is
+  reported as `rejected` like any hierarchy change.
+* **Existing issues are not converted.** Issues already in Jira keep their type.
 
 ## Issue status
 

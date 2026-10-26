@@ -67,6 +67,9 @@ type Config struct {
 	// SyncParents mirrors GitHub sub-issue parents and Jira parent links between
 	// linked issues, such as an Epic and its stories.
 	SyncParents bool
+	// JiraSubtaskType is the Jira sub-task issue type ID for new issues whose GitHub
+	// parent is a standard Jira issue (such as a Task under a Task); "" turns this off.
+	JiraSubtaskType string
 	// JiraSelectionLabel selects Jira issues in the project to create in GitHub; nil
 	// disables Jira → GitHub creation.
 	JiraSelectionLabel *string
@@ -265,7 +268,7 @@ var configKeys = map[string]bool{
 	"jira_issue_type": true, "selection_label": true, "issue_state": true, "max_operations": true,
 	"max_pages": true, "comments": true, "comments_since": true, "jira_create_fields": true,
 	"full_rescan_hours": true, "status_sync": true, "project_status": true, "jira_issue_types": true,
-	"sync_parents": true, "jira_selection_label": true,
+	"sync_parents": true, "jira_selection_label": true, "jira_subtask_type": true,
 }
 
 // ParseConfig validates sync.json. Unknown keys and wrong types fail closed.
@@ -370,6 +373,20 @@ func ParseConfig(data []byte) (*Config, error) {
 	}
 	if c.SyncParents, ok = value("sync_parents", false).(bool); !ok {
 		return nil, syncErr("sync_parents must be boolean")
+	}
+	switch id := value("jira_subtask_type", nil).(type) {
+	case nil:
+	case string:
+		if !isDigits(id) {
+			return nil, syncErr("jira_subtask_type must be a sub-task issue type ID string or null")
+		}
+		// A sub-task's parent is fixed at creation and then kept by parent sync.
+		if !c.SyncParents {
+			return nil, syncErr("jira_subtask_type needs sync_parents")
+		}
+		c.JiraSubtaskType = id
+	default:
+		return nil, syncErr("jira_subtask_type must be a sub-task issue type ID string or null")
 	}
 	switch label := value("jira_selection_label", nil).(type) {
 	case nil:

@@ -213,7 +213,7 @@ func TestJiraCreationHasAtomicIdentity(t *testing.T) {
 	srv := newServer(t, ok(Object{"id": "200", "key": "ENG-1"}))
 	api := srv.client(t)
 	source := newFake().source
-	if _, err := api.CreateIssue(&source); err != nil {
+	if _, err := api.CreateIssue(&source, ""); err != nil {
 		t.Fatal(err)
 	}
 	payload := srv.bodies[0]

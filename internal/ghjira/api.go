@@ -28,7 +28,7 @@ type API interface {
 	FindIssue(source *GitHubIssue, started string) (*JiraIssue, error)
 	// JiraIssue returns nil when the issue was deleted, hidden, or moved out of the project.
 	JiraIssue(id string) (*JiraIssue, error)
-	CreateIssue(source *GitHubIssue) (*JiraIssue, error)
+	CreateIssue(source *GitHubIssue, parentKey string) (*JiraIssue, error)
 	Comments(side Side, pair Pair) ([]Comment, error)
 	Comment(side Side, pair Pair, id string) (Comment, error)
 	CreateComment(side Side, pair Pair, text, op string) (Comment, error)
@@ -233,6 +233,11 @@ func (a *Client) CheckProject() error {
 			return syncErr("Jira issue type %s is not a standard issue type in project %s", id, a.c.JiraProject)
 		}
 	}
+	if id := a.c.JiraSubtaskType; id != "" {
+		if standard, found := usable[id]; !found || standard {
+			return syncErr("jira_subtask_type %s is not a sub-task issue type in project %s", id, a.c.JiraProject)
+		}
+	}
 	return nil
 }
 
@@ -385,13 +390,19 @@ func (a *Client) FindIssue(source *GitHubIssue, started string) (*JiraIssue, err
 	return issue, nil
 }
 
-func (a *Client) CreateIssue(source *GitHubIssue) (*JiraIssue, error) {
+// CreateIssue creates the Jira issue for a GitHub issue; with a parent key it is a
+// sub-task under that issue, since Jira only takes a sub-task's parent at creation.
+func (a *Client) CreateIssue(source *GitHubIssue, parentKey string) (*JiraIssue, error) {
 	op := token(a.c, OpIssue, source.idString())
 	// Extra fields are tenant-specific Jira fields, so they stay generic JSON.
 	fields := Object{}
 	maps.Copy(fields, a.c.JiraCreateFields)
 	fields["project"] = Object{"key": a.c.JiraProject}
 	fields["issuetype"] = Object{"id": a.c.issueTypeFor(source)}
+	if parentKey != "" {
+		fields["issuetype"] = Object{"id": a.c.JiraSubtaskType}
+		fields["parent"] = Object{"key": parentKey}
+	}
 	fields["summary"] = source.Title
 	fields["description"] = toADF(issueDescription(source))
 	// Identity lives only in this issue property, written atomically with the issue.

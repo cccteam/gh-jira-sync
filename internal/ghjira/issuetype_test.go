@@ -64,7 +64,7 @@ func TestCreateIssueUsesMappedType(t *testing.T) {
 	for _, tc := range []struct{ github, jira string }{{"Feature", "10300"}, {"Bug", "10001"}, {"", "10001"}} {
 		source := newFake().source
 		source.Type = typed(tc.github).Type
-		if _, err := api.CreateIssue(&source); err != nil {
+		if _, err := api.CreateIssue(&source, ""); err != nil {
 			t.Fatal(err)
 		}
 		fields := asObject(srv.bodies[len(srv.bodies)-1]["fields"])
