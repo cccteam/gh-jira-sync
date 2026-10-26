@@ -176,7 +176,7 @@ permissions:
   issues: write
 jobs:
   sync:
-    uses: cccteam/gh-jira-sync/.github/workflows/sync-reusable.yml@v0.1.0 # x-release-please-version
+    uses: cccteam/gh-jira-sync/.github/workflows/sync-reusable.yml@v0.1.1 # x-release-please-version
     with:
       app-client-id: Iv23liExampleClientId
       apply: ${{ inputs.apply || (github.event_name == 'schedule' && vars.SYNC_APPLY == 'true') }}
@@ -206,7 +206,7 @@ jobs:
       fail-fast: false
       matrix:
         deployment: [web, api]
-    uses: cccteam/gh-jira-sync/.github/workflows/sync-reusable.yml@v0.1.0 # x-release-please-version
+    uses: cccteam/gh-jira-sync/.github/workflows/sync-reusable.yml@v0.1.1 # x-release-please-version
     with:
       config: sync/${{ matrix.deployment }}.json
       state-branch: sync-state-${{ matrix.deployment }}
