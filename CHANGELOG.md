@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.1](https://github.com/cccteam/gh-jira-sync/compare/v0.1.0...v0.1.1) (2026-10-26)
+
+
+### Bug Fixes
+
+* attach release binaries before publishing immutable releases ([#5](https://github.com/cccteam/gh-jira-sync/issues/5)) ([e58d6b1](https://github.com/cccteam/gh-jira-sync/commit/e58d6b194d61955f288648775287f4ed996f9c79))
+
 ## 0.1.0 (2026-10-26)
 
 
