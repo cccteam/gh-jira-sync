@@ -72,9 +72,9 @@ func count(entries []*Entry, match func(*Entry) bool) *int {
 
 // options are the parsed command-line flags.
 type options struct {
-	configPath, statePath, reportPath, gitBranch string
-	apply, initState                             bool
-	acknowledge                                  stringList
+	configPath, statePath, reportPath, gitBranch, gitRef string
+	apply, initState                                     bool
+	acknowledge                                          stringList
 }
 
 // parseFlags returns the options, or an exit code when the run should stop here.
@@ -89,6 +89,7 @@ func parseFlags(args []string, stdout io.Writer) (*options, int, bool) {
 	flags.StringVar(&o.statePath, "state", ".sync-state/state.json", "local state file (a checkpoint copy in Git mode)")
 	flags.StringVar(&o.reportPath, "report", "sync-report.json", "report file")
 	flags.StringVar(&o.gitBranch, "git-state-branch", "", "persist every intent to this `branch` on origin (sync-state or sync-state-<name>) before API writes; required for ephemeral runners")
+	flags.StringVar(&o.gitRef, "git-state-ref", "", "like -git-state-branch, but keep state on the hidden ref refs/gh-jira-sync/`name` (sync-state or sync-state-<name>), which the branch list and clones do not show")
 	flags.BoolVar(&o.apply, "apply", false, "perform remote writes (otherwise dry-run)")
 	flags.BoolVar(&o.initState, "init-state", false, "permit a new journal; never use to replace lost production state")
 	flags.Var(&o.acknowledge, "acknowledge", "silence a reviewed blocked/unavailable `OPERATION` until its reason changes (saved with -apply; repeatable)")
@@ -105,10 +106,17 @@ func parseFlags(args []string, stdout io.Writer) (*options, int, bool) {
 
 		return nil, 0, false
 	}
-	if o.gitBranch != "" && !stateBranchPattern.MatchString(o.gitBranch) {
-		_, _ = fmt.Fprintln(flags.Output(), "-git-state-branch must be sync-state or sync-state-<name>")
+	if o.gitBranch != "" && o.gitRef != "" {
+		_, _ = fmt.Fprintln(flags.Output(), "use -git-state-branch or -git-state-ref, not both")
 
 		return nil, 2, false
+	}
+	for flagName, v := range map[string]string{"-git-state-branch": o.gitBranch, "-git-state-ref": o.gitRef} {
+		if v != "" && !stateBranchPattern.MatchString(v) {
+			_, _ = fmt.Fprintln(flags.Output(), flagName, "must be sync-state or sync-state-<name>")
+
+			return nil, 2, false
+		}
 	}
 
 	return o, 0, true
@@ -224,14 +232,19 @@ func run(o *options, rep *report, newAPI apiFactory) (int, error) {
 	return 0, nil
 }
 
-// loadState reads state from the Git branch or the local file; a missing journal is
+// loadState reads state from the Git branch or hidden ref, or the local file; a missing journal is
 // created only when -init-state allows it.
 func loadState(o *options, c *Config) (*GitStore, *State, error) {
 	var store *GitStore
 	var state *State
 	var err error
-	if o.gitBranch != "" {
-		if store, err = NewGitStore(o.gitBranch); err != nil {
+	if o.gitBranch != "" || o.gitRef != "" {
+		if o.gitRef != "" {
+			store, err = NewHiddenGitStore(o.gitRef)
+		} else {
+			store, err = NewGitStore(o.gitBranch)
+		}
+		if err != nil {
 			return nil, nil, err
 		}
 		state, err = store.Load()

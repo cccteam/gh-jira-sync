@@ -94,7 +94,10 @@ Before every POST, persist a `pending` operation. In Actions this means successf
 pushing a unique commit to the deployment's state branch on `origin`
 (`sync-state` or `sync-state-<name>`), not just writing runner-local disk. The
 store refuses a branch whose tree holds anything but `state.json`, because each
-checkpoint replaces the whole tree.
+checkpoint replaces the whole tree. With `--git-state-ref`, the same commits go to
+the hidden ref `refs/gh-jira-sync/<name>` instead: Git applies the same
+fast-forward check there, so a stale writer is still rejected (verified on GitHub
+with a workflow token), and the ref appears in neither the branch list nor clones.
 After confirmed success, persist the destination mapping and mark it `done`.
 
 If the response or completion checkpoint is lost, a later run checks destination

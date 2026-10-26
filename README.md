@@ -44,6 +44,7 @@ Run again after creating issues to copy their comments. Linux and macOS only.
 | `--apply` | off | Perform remote writes |
 | `--init-state` | off | Allow creating a new journal (first run only) |
 | `--git-state-branch` | none | Keep state on this branch of `origin` (`sync-state` or `sync-state-<name>`); required on ephemeral runners, and then the branch is authoritative |
+| `--git-state-ref` | none | Like `--git-state-branch`, but on the hidden ref `refs/gh-jira-sync/<name>` |
 | `--state` | `.sync-state/state.json` | Local state file |
 | `--report` | `sync-report.json` | Report file |
 | `--acknowledge OPERATION` | none | Silence a reviewed `blocked` or `unavailable` entry (repeatable; saved only with `--apply`) |
@@ -88,6 +89,7 @@ pin current. Releases v0.1.1 and later carry binaries; v0.1.0 does not.
 | --- | --- | --- |
 | `config` | `sync.json` | Config path in the calling repository |
 | `state-branch` | `sync-state` | State branch: `sync-state` or `sync-state-<name>` |
+| `hidden-state` | `false` | Keep state on the hidden ref `refs/gh-jira-sync/<state-branch>` instead of a branch |
 | `apply` | `false` | Perform writes |
 | `initialize` | `false` | Allow creating new state (first run only) |
 | `version` | the pinned release | Release to run; leave unset |
@@ -139,6 +141,29 @@ one Jira project. A hub repository can run several with a matrix:
 Each state branch is bound to its config's repository and Jira project, and must
 contain only `state.json`. Never point two deployments at the same repository and
 project pair: they would keep separate journals and could duplicate issues.
+
+### Hidden state
+
+Set `hidden-state: true` to keep state on `refs/gh-jira-sync/<state-branch>`
+instead of a branch. It works the same way, but doesn't show in the branch list,
+pull request targets, or clones. To move an existing deployment, with no sync
+running, copy the branch to the hidden ref, switch the workflow, and delete the
+branch once a run succeeds:
+
+```sh
+git fetch origin sync-state
+```
+
+```sh
+git push origin refs/remotes/origin/sync-state:refs/gh-jira-sync/sync-state
+```
+
+```sh
+git push origin --delete sync-state
+```
+
+Never start a hidden-state deployment with `initialize` while its old branch
+still holds state: that would open a second journal and could duplicate issues.
 
 ## Configuration
 
