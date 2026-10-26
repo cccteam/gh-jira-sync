@@ -86,5 +86,7 @@
       ]
     }
   },
-  "bootstrap-sha": "612aca4dc211d4453d92e53ba0c759b32e9e14f6"
+  "bootstrap-sha": "612aca4dc211d4453d92e53ba0c759b32e9e14f6",
+  "draft": true,
+  "force-tag-creation": true
 }

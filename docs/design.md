@@ -224,6 +224,14 @@ build provenance attestation, which binds it to this repository's
 testing unreleased commits. Release builds are static (`CGO_ENABLED=0`) and
 Unix-only, because the state lock uses `flock`.
 
+Releases are immutable once published (GitHub's release immutability), so assets
+cannot be attached afterwards; v0.1.0 was published that way and has none.
+release-please creates each release as a draft and pushes its tag at once
+(`force-tag-creation`, so later runs still find the previous release). The tag push
+starts `release-assets.yml`, which waits for the draft, builds and attests the
+archives, uploads them, and only then publishes the release. A published release is
+never modified; one missing assets is superseded by a new version.
+
 ## API references
 
 * https://docs.github.com/en/rest/issues/issues
