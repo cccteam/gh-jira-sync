@@ -238,8 +238,10 @@ Releases follow [semantic versioning](https://semver.org) and are cut by
 [Conventional Commit](https://www.conventionalcommits.org) pull request titles:
 `fix:` makes a patch release and `feat:` a minor one (`feat!:` or a
 `BREAKING CHANGE:` footer will make a major one from 1.0 on; before 1.0 it makes a
-minor one). Merging the release pull request tags `vX.Y.Z`, publishes the release
-with its [changelog](CHANGELOG.md), and attaches:
+minor one). Merging the release pull request tags `vX.Y.Z` and drafts the release
+with its [changelog](CHANGELOG.md); the Release Assets workflow then attaches the
+files below and publishes it. Releases are immutable once published, which is why
+the files go on first:
 
 * `gh-jira-sync_X.Y.Z_<os>_<arch>.tar.gz` for Linux and macOS on amd64 and arm64;
 * `checksums.txt`, the SHA-256 of each archive;

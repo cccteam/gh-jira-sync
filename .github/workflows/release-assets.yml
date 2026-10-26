@@ -1,35 +1,62 @@
 name: Release Assets
 
-# Attaches binaries to each release that release-please publishes, with a checksums file
-# and build provenance attestations, so a sync workflow in any organization can download
+# Attaches binaries to each release, with a checksums file and build provenance
+# attestations, then publishes it, so a sync workflow in any organization can download
 # and verify the exact binary of the release it calls.
+#
+# Releases here are immutable once published: nothing can be attached afterwards.
+# release-please therefore creates each release as a draft and pushes its tag
+# (force-tag-creation); this workflow runs on that tag, fills the draft, and publishes.
 on:
-  release:
-    types: [published]
+  push:
+    tags: ['v*.*.*']
   workflow_dispatch:
     inputs:
       tag:
-        description: Release tag to build and attach assets to (for a release missing them)
+        description: Tag of a draft release to build, attach assets to, and publish
         type: string
         required: true
 
 permissions: {}
 
+concurrency:
+  group: release-assets-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
 jobs:
   assets:
     runs-on: ubuntu-latest
     permissions:
-      contents: write # upload release assets
+      contents: write # upload release assets and publish the draft
       id-token: write # sign the provenance attestations
       attestations: write
     env:
-      TAG: ${{ inputs.tag || github.event.release.tag_name }}
+      TAG: ${{ inputs.tag || github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
     steps:
+      # release-please pushes the tag and creates the draft in separate calls, so the
+      # draft may appear a moment after the tag. A published release cannot take assets.
+      - name: Find the draft release
+        run: |
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::$TAG is not a release tag"
+            exit 1
+          fi
+          for attempt in $(seq 1 30); do
+            if draft=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft 2>/dev/null); then
+              if [ "$draft" != true ]; then
+                echo "::error::Release $TAG is already published; immutable releases cannot take assets. Release a new version."
+                exit 1
+              fi
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "::error::No release found for $TAG"
+          exit 1
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: refs/tags/${{ env.TAG }}
-          # Full history so the Go toolchain stamps the tag as the module version.
-          fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
@@ -37,10 +64,6 @@ jobs:
           cache: false
       - name: Build
         run: |
-          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error::$TAG is not a release tag"
-            exit 1
-          fi
           mkdir dist
           # Unix only: the state lock uses flock.
           for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
@@ -58,7 +81,7 @@ jobs:
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: dist/*.tar.gz
-      - name: Upload
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh release upload "$TAG" dist/* --clobber --repo "$GITHUB_REPOSITORY"
+      - name: Upload and publish
+        run: |
+          gh release upload "$TAG" dist/* --clobber --repo "$GITHUB_REPOSITORY"
+          gh release edit "$TAG" --draft=false --latest --repo "$GITHUB_REPOSITORY"
