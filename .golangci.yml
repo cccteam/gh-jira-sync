@@ -143,6 +143,11 @@ linters:
           - nlreturn
           - scopelint
         path: _test\.go
+      # Parent test helpers take the child number so each test names its scenario,
+      # even where every current caller passes the same child.
+      - linters:
+          - unparam
+        path: parent_test\.go
     paths:
       - third_party$
       - builtin$

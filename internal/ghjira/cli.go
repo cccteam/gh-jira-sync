@@ -13,11 +13,8 @@ import (
 	"time"
 )
 
-// newAPI is replaced in tests with a fake.
-var newAPI = func(c *Config) (API, error) { return NewClient(c) }
-
-// now is replaced in tests that need a fixed clock.
-var now = time.Now
+// apiFactory builds the API client for a validated config; tests pass a fake.
+type apiFactory func(*Config) (API, error)
 
 type stringList []string
 
@@ -81,11 +78,11 @@ type options struct {
 }
 
 // parseFlags returns the options, or an exit code when the run should stop here.
-func parseFlags(args []string) (*options, int, bool) {
+func parseFlags(args []string, stdout io.Writer) (*options, int, bool) {
 	o := &options{}
 	flags := flag.NewFlagSet("gh-jira-sync", flag.ContinueOnError)
 	flags.Usage = func() {
-		_, _ = fmt.Fprintln(flags.Output(), "GitHub → Jira creation; two-way original comment creation/edits")
+		_, _ = fmt.Fprintln(flags.Output(), "Syncs GitHub and Jira issues: creation, comments, status, and parents")
 		flags.PrintDefaults()
 	}
 	flags.StringVar(&o.configPath, "config", "sync.json", "configuration file")
@@ -104,7 +101,7 @@ func parseFlags(args []string) (*options, int, bool) {
 		return nil, 2, false
 	}
 	if *version {
-		_, _ = fmt.Fprintln(flags.Output(), "gh-jira-sync", Version())
+		_, _ = fmt.Fprintln(stdout, "gh-jira-sync", Version())
 
 		return nil, 0, false
 	}
@@ -119,7 +116,11 @@ func parseFlags(args []string) (*options, int, bool) {
 
 // Main runs the CLI and returns the exit code: 0 success, 2 needs review, 1 error.
 func Main(args []string, stdout io.Writer) int {
-	o, code, ok := parseFlags(args)
+	return mainWith(args, stdout, func(c *Config) (API, error) { return NewClient(c) })
+}
+
+func mainWith(args []string, stdout io.Writer, newAPI apiFactory) int {
+	o, code, ok := parseFlags(args, stdout)
 	if !ok {
 		return code
 	}
@@ -148,7 +149,7 @@ func Main(args []string, stdout io.Writer) int {
 			return 1, syncErr("Config, state, report, and lock paths must differ")
 		}
 
-		return run(o, rep)
+		return run(o, rep, newAPI)
 	}()
 	if err != nil {
 		code, rep.Error = 1, reportError(err)
@@ -167,7 +168,7 @@ func Main(args []string, stdout io.Writer) int {
 
 // run loads config and state, plans, and applies when asked, filling rep. It returns
 // 0 when nothing needs review and 2 when something does.
-func run(o *options, rep *report) (int, error) {
+func run(o *options, rep *report, newAPI apiFactory) (int, error) {
 	data, err := os.ReadFile(o.configPath)
 	if err != nil {
 		return 1, fmt.Errorf("read config: %w", err)
@@ -189,7 +190,7 @@ func run(o *options, rep *report) (int, error) {
 	if err != nil {
 		return 1, err
 	}
-	entries, err := Plan(c, state, api, now())
+	entries, err := Plan(c, state, api, time.Now())
 	if err != nil {
 		return 1, err
 	}

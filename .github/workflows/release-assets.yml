@@ -13,6 +13,8 @@ on:
   workflow_dispatch:
     inputs:
       tag:
+        # Run it on the tag itself (gh workflow run --ref vX.Y.Z): sync-reusable.yml
+        # accepts only attestations whose source ref is the release tag.
         description: Tag of a draft release to build, attach assets to, and publish
         type: string
         required: true

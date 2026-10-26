@@ -1,166 +1,59 @@
-# GitHub ↔ Jira issue sync: creation, comments, status, and parents
+# GitHub ↔ Jira issue sync
 
 Creates Jira Cloud issues from GitHub issues labeled **`sync-jira`**, then copies
-original comments and their edits in both directions. A single Go binary (Go 1.27+,
-standard library only) with a ready-to-use GitHub Actions workflow.
+original comments and their edits in both directions. Optionally it also mirrors
+open/closed status, a GitHub Project's Status field, parent links (Epics and
+sub-issues), and creates GitHub issues from labeled Jira issues. It is a single Go
+binary with a reusable GitHub Actions workflow.
 
-* Issue title and description are copied at creation only.
-* Optionally, closing or reopening an issue on either side does the same on the
-  other (see [Issue status](#issue-status)).
-* Or, with a GitHub Project, its Status field and Jira workflow statuses stay in step
-  (see [Project status](#project-status)).
-* Original comment edits update the existing copy. Edits to copies are reported
-  and preserved for review; original comments are never modified by the utility.
-* Optionally, Jira issues with a chosen label are created in GitHub too (see
-  [Jira → GitHub creation](#jira--github-creation)).
-* No issue/comment deletions or attachment copying.
-* Dry-run by default; explicit `--apply` required for remote writes.
+* Title and description are copied once, at creation.
+* Nothing is ever deleted, and attachments are not copied.
+* Edits to copies are reported for review; originals are never modified.
+* Dry-run by default; `--apply` is required for remote writes.
 
-See [the design](docs/design.md) for identity, failure recovery, and tradeoffs.
+See [the design](docs/design.md) for identity, recovery, and tradeoffs.
 
 ## Quick start
 
-Copy `sync.example.json` to `sync.json`, and set your repository, Jira Cloud site,
-project key, and issue type ID. Keep the `sync-jira` label filter for a small pilot.
-
-Set credentials through your secret manager or shell environment:
+Copy [`sync.example.json`](sync.example.json) to `sync.json` and set the repository,
+Jira site, project key, and issue type ID. Then set credentials:
 
 | Environment variable | Purpose |
 | --- | --- |
-| `GH_TOKEN` | GitHub token with issues read/write access |
-| `JIRA_EMAIL` | Jira Cloud service account email |
-| `JIRA_API_TOKEN` | API token for that account |
+| `GH_TOKEN` | GitHub token with Issues read/write on the repository |
+| `GH_PROJECT_TOKEN` | Projects read/write; only with `project_status` |
+| `JIRA_EMAIL`, `JIRA_API_TOKEN` | Jira Cloud service account |
 
 The Jira account needs Browse Projects, Create Issues, Add Comments, Edit Own
-Comments, and access to issue properties, plus Transition Issues when status sync
-is on and Edit Issues when `sync_parents` is on. Jira Software and business projects are
-supported; Jira Service Management projects are rejected to avoid mishandling
-internal comments. HTTPS is mandatory and credentials never follow redirects.
+Comments, and access to issue properties. Add Transition Issues for `status_sync` or
+`project_status`, Edit Issues for `sync_parents`, and board browse and rank
+permissions for backlog mode. Jira Service Management projects are not supported.
 
 ```sh
-# Install a release (or download its binary from the GitHub release).
 go install github.com/cccteam/gh-jira-sync@latest
-
-# Or build this checkout.
-go build -o gh-jira-sync .
-
-# Local durable-disk usage: inspect without changing either service.
-./gh-jira-sync --config sync.json --init-state
-
-# First apply: creates Jira issues and the local operation journal.
-./gh-jira-sync --config sync.json --init-state --apply
-
-# Next pass copies comments for the newly established issue mappings.
-./gh-jira-sync --config sync.json --apply
-
-# Subsequent dry-run, using the existing journal.
-./gh-jira-sync --config sync.json
-
-# Offline tests, including real Git state persistence and Python-parity vectors.
-go test -race ./...
+gh-jira-sync --config sync.json --init-state            # dry run: see the plan
+gh-jira-sync --config sync.json --init-state --apply    # first write run
+gh-jira-sync --config sync.json --apply                 # later runs
 ```
 
-`gh-jira-sync -version` prints the release a binary was built from.
+Run again after creating issues to copy their comments. Linux and macOS only.
 
-Flags accept one or two dashes (`-apply` or `--apply`).
-Supported platforms are Linux/macOS (the local lock uses `flock`). No live
-credentials are needed to run tests.
-
-State and identity formats stay compatible with the earlier Python release:
-operation tokens and content fingerprints are byte-identical (checked against vectors
-in `internal/ghjira/testdata/golden.json`), so existing `sync-state` branches, Jira
-issues, and copies keep working. Issues and copies created now carry no visible
-markers; older labels and marker lines are still recognized.
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--config` | `sync.json` | Configuration file |
+| `--apply` | off | Perform remote writes |
+| `--init-state` | off | Allow creating a new journal (first run only) |
+| `--git-state-branch` | none | Keep state on this branch of `origin` (`sync-state` or `sync-state-<name>`); required on ephemeral runners, and then the branch is authoritative |
+| `--state` | `.sync-state/state.json` | Local state file |
+| `--report` | `sync-report.json` | Report file |
+| `--acknowledge OPERATION` | none | Silence a reviewed `blocked` or `unavailable` entry (repeatable; saved only with `--apply`) |
+| `--version` | | Print the release and exit |
 
 ## GitHub Actions
 
-All runs go through the reusable workflow
-[`.github/workflows/sync-reusable.yml`](.github/workflows/sync-reusable.yml). A
-**deployment** is one config file plus one state branch, syncing one GitHub
-repository with one Jira project.
-
-| Input | Default | Meaning |
-| --- | --- | --- |
-| `config` | `sync.json` | Config path in the calling repository |
-| `state-branch` | `sync-state` | State branch in the calling repository: `sync-state` or `sync-state-<name>` |
-| `apply` | `false` | Perform writes; otherwise dry-run |
-| `initialize` | `false` | Allow creating new state (first run only) |
-| `version` | this file's release | Release to run; leave unset so `uses: …@vX.Y.Z` runs vX.Y.Z |
-| `tool-ref` | empty | Build from this ref of this repository instead of a release, to test unreleased commits |
-| `app-client-id` | empty | GitHub App that supplies every GitHub token; see [GitHub App](#github-app-recommended) |
-
-| Secret | Required | Purpose |
-| --- | --- | --- |
-| `jira-email`, `jira-api-token` | yes | Jira Cloud service account |
-| `app-private-key` | with `app-client-id` | The GitHub App's private key |
-| `github-token` | no | Instead of the App: issue read/write on the configured repository. Without either, the caller's `GITHUB_TOKEN` is used |
-| `tool-token` | no | Deprecated and ignored: this repository is public |
-| `project-token` | no | Instead of the App: Projects read/write, for example for a user-owned project |
-
-An explicitly passed `github-token` or `project-token` takes precedence over the
-matching App token.
-
-The calling workflow must grant `contents: write` (for the state branch) and
-`issues: write`, and branch rules must allow pushes to the state branch. The
-reusable job runs only on the default branch, so secret-bearing code never runs
-from pull requests or other branches. It serializes runs per repository and state
-branch and never cancels an active run.
-
-### GitHub App (recommended)
-
-One GitHub App can supply every GitHub token, so no personal access tokens are
-needed. Each run mints a separate installation token per purpose, each limited to
-one repository or owner and only the permission that purpose needs. They expire
-within an hour, are revoked when the job ends, and act as the App rather than a
-person (copied comments show the App as their author).
-
-| Token | Minted when | Scope |
-| --- | --- | --- |
-| Issues and comments | always | Issues: read and write, on the config's `repository` only |
-| Projects | the config has `project_status` | Organization Projects: read and write, for `project_status.owner`, plus Issues: read on the synced repository, because project items hide which issue they hold from tokens that cannot read it |
-
-The workflow reads `repository` and `project_status.owner` from the config, so the
-same App works for any repository it is installed on. The calling repository's own
-`GITHUB_TOKEN` still pushes the state branch, so App tokens never need write access
-to code.
-
-Set it up once per organization:
-
-1. **Settings → Developer settings → GitHub Apps → New GitHub App**, owned by the
-   organization. Turn off the webhook. Repository permissions: **Issues: Read and
-   write** (Metadata: Read is added automatically). Organization permissions:
-   **Projects: Read and write** if you use `project_status`.
-2. Install it on the organization for **only** the repositories being synced.
-3. Note its **Client ID** and generate a private key. Store the key as an
-   organization secret visible only to the repositories that run the sync, or as an
-   environment secret whose deployment branch policy allows only the default branch.
-4. Pass both to the workflow:
-
-```yaml
-    with:
-      app-client-id: Iv23liExampleClientId
-    secrets:
-      app-private-key: ${{ secrets.GH_JIRA_SYNC_APP_KEY }}
-```
-
-### This repository's deployment
-
-[`sync.yml`](.github/workflows/sync.yml) calls the reusable workflow with
-`sync.json`, the `sync-state` branch, and the tool built from the same commit.
-
-1. Add Actions secrets `JIRA_EMAIL` and `JIRA_API_TOKEN`, and commit `sync.json`.
-2. Dispatch **Sync GitHub and Jira** with **initialize** checked and **apply**
-   unchecked. Inspect the job summary.
-3. Dispatch with initialize and apply checked for the first write run. Later runs
-   need only apply. Run again to copy comments for newly created Jira issues.
-4. Hourly runs remain dry-run until repository variable **`SYNC_APPLY=true`** is set.
-
-### Another repository syncing itself
-
-Commit a `sync.json` whose `repository` is that repository, add the Jira secrets
-and the App's private key, then add a workflow like this. It works the same from any
-organization: this repository is public, and the App is your own, installed in your
-organization. Call a release; the workflow runs that release's binary:
+Call the reusable workflow from the repository being synced. Pin a release; that
+release's binary is downloaded and checked against its checksum and build
+provenance attestation before it runs.
 
 ```yaml
 name: Sync GitHub and Jira
@@ -173,7 +66,6 @@ on:
     - cron: '17 * * * *'
 permissions:
   contents: write
-  issues: write
 jobs:
   sync:
     uses: cccteam/gh-jira-sync/.github/workflows/sync-reusable.yml@v0.1.1 # x-release-please-version
@@ -187,21 +79,53 @@ jobs:
       app-private-key: ${{ secrets.GH_JIRA_SYNC_APP_KEY }}
 ```
 
-For a stronger pin, use the release's commit with the tag as a comment
-(`@<commit> # vX.Y.Z`); Dependabot's `github-actions` updates keep either form
-current. Before running anything, the workflow checks the downloaded binary against
-the release's checksums and its build provenance attestation.
+First dispatch with **initialize** only and read the job summary, then with
+**initialize** and **apply**. Scheduled runs stay dry-run until the repository
+variable `SYNC_APPLY=true` is set. Dependabot's `github-actions` updates keep the
+pin current. Releases v0.1.1 and later carry binaries; v0.1.0 does not.
 
-### One repository serving several
+| Input | Default | Meaning |
+| --- | --- | --- |
+| `config` | `sync.json` | Config path in the calling repository |
+| `state-branch` | `sync-state` | State branch: `sync-state` or `sync-state-<name>` |
+| `apply` | `false` | Perform writes |
+| `initialize` | `false` | Allow creating new state (first run only) |
+| `version` | the pinned release | Release to run; leave unset |
+| `tool-ref` | empty | Build from this ref instead, to test unreleased commits |
+| `app-client-id` | empty | GitHub App that supplies the GitHub tokens |
 
-A single hub repository can run several deployments. Give each its own config file
-and state branch. With the App installed on every target repository, each
-deployment gets an issues token for its own config's repository; the hub's
-`GITHUB_TOKEN` would only cover the hub itself:
+| Secret | Purpose |
+| --- | --- |
+| `jira-email`, `jira-api-token` | Required. Jira Cloud service account |
+| `app-private-key` | The GitHub App's private key, with `app-client-id` |
+| `github-token` | Instead of the App: Issues read/write on the configured repository |
+| `project-token` | Instead of the App: Projects read/write, for example for a user-owned project |
+
+The caller needs `contents: write` to push the state branch, plus `issues: write`
+when it uses neither the App nor `github-token`. The job runs only from the default
+branch and never cancels an active run.
+
+### GitHub App (recommended)
+
+One GitHub App supplies every GitHub token, so no personal access tokens are needed.
+Each run mints short-lived tokens limited to what they are for: Issues read/write on
+the configured repository, and, with `project_status`, organization Projects
+read/write plus Issues read for the project's owner. Copied comments show the App as
+their author.
+
+1. Create a GitHub App owned by the organization, with the webhook off, **Issues:
+   Read and write**, and **Projects: Read and write** (organization) if you use
+   `project_status`.
+2. Install it on only the repositories being synced.
+3. Store its private key as an organization or environment secret limited to those
+   repositories, and pass its Client ID as `app-client-id`.
+
+### Several deployments
+
+A deployment is one config file plus one state branch, syncing one repository with
+one Jira project. A hub repository can run several with a matrix:
 
 ```yaml
-jobs:
-  sync:
     strategy:
       fail-fast: false
       matrix:
@@ -210,250 +134,61 @@ jobs:
     with:
       config: sync/${{ matrix.deployment }}.json
       state-branch: sync-state-${{ matrix.deployment }}
-      app-client-id: Iv23liExampleClientId
-      apply: ${{ inputs.apply || (github.event_name == 'schedule' && vars.SYNC_APPLY == 'true') }}
-      initialize: ${{ inputs.initialize || false }}
-    secrets:
-      jira-email: ${{ secrets.JIRA_EMAIL }}
-      jira-api-token: ${{ secrets.JIRA_API_TOKEN }}
-      app-private-key: ${{ secrets.GH_JIRA_SYNC_APP_KEY }}
 ```
 
-Deployments are independent: one failing or blocked does not stop the others, and
-each state branch is bound to its config's repository, Jira site, and project, so a
-config pointed at the wrong branch fails closed. State branches use a dash
-(`sync-state-web`), because Git cannot hold both `sync-state` and `sync-state/web`.
-A state branch must contain only `state.json`; the tool refuses any other branch,
-since each checkpoint replaces the branch's whole tree.
-
-The workflow loads authoritative state from `origin`, pushes every creation intent
-**before** the corresponding API request, and checkpoints each success. Use exactly
-one deployment per GitHub repository and Jira project pair: two deployments writing
-the same objects keep separate journals and can duplicate issues and comments.
-
-## Releases and versions
-
-Releases follow [semantic versioning](https://semver.org) and are cut by
-[release-please](https://github.com/googleapis/release-please) from
-[Conventional Commit](https://www.conventionalcommits.org) pull request titles:
-`fix:` makes a patch release and `feat:` a minor one (`feat!:` or a
-`BREAKING CHANGE:` footer will make a major one from 1.0 on; before 1.0 it makes a
-minor one). Merging the release pull request tags `vX.Y.Z` and drafts the release
-with its [changelog](CHANGELOG.md); the Release Assets workflow then attaches the
-files below and publishes it. Releases are immutable once published, which is why
-the files go on first:
-
-* `gh-jira-sync_X.Y.Z_<os>_<arch>.tar.gz` for Linux and macOS on amd64 and arm64;
-* `checksums.txt`, the SHA-256 of each archive;
-* a build provenance attestation per archive, checkable with
-  `gh attestation verify <archive> --repo cccteam/gh-jira-sync`.
-
-Each release's `sync-reusable.yml` names that release as its default `version`, so a
-caller pins one ref and gets the matching workflow and binary. `go install
-github.com/cccteam/gh-jira-sync@vX.Y.Z` builds the same release from source.
-
-Pull requests run the shared Go CI from
-[`cccteam/github-workflows`](https://github.com/cccteam/github-workflows): tests,
-golangci-lint (configured in `.golangci.yml`), govulncheck, Semgrep, and a check that
-the title is a Conventional Commit. None of it needs sync credentials.
+Each state branch is bound to its config's repository and Jira project, and must
+contain only `state.json`. Never point two deployments at the same repository and
+project pair: they would keep separate journals and could duplicate issues.
 
 ## Configuration
 
-See [sync.example.json](sync.example.json). Unknown keys fail validation.
+Unknown keys fail validation.
 
 | Option | Default / meaning |
 | --- | --- |
 | `repository` | Required `owner/name` |
 | `jira_url` | Required Jira Cloud HTTPS site URL |
 | `jira_project` | Required project key, e.g. `ENG` |
-| `jira_issue_type` | Required **issue type ID string**, e.g. `10001` |
-| `jira_issue_types` | `{}`; maps GitHub issue types to Jira issue type IDs for new issues, e.g. `{"Bug": "10004", "Feature": "10005"}`; see [Issue types](#issue-types) |
-| `sync_parents` | `false`; mirror GitHub sub-issue parents and Jira parent links (for example Epic → Story) between linked issues; see [Epics and parent links](#epics-and-parent-links) |
-| `jira_subtask_type` | `null` (off); Jira sub-task issue type ID; a new issue whose GitHub parent is a standard Jira issue (such as a Task under a Task) is created as a sub-task under it; needs `sync_parents`; see [Sub-tasks](#sub-tasks) |
-| `jira_selection_label` | `null` (off); Jira issues in the project with this label are created in GitHub; see [Jira → GitHub creation](#jira--github-creation) |
-| `github_url` | `https://api.github.com`; compatible custom API bases allowed |
-| `selection_label` | `sync-jira`; `null` explicitly opts into all issues |
-| `issue_state` | `open`; `closed` or `all` also supported for creation selection |
-| `comments` | `true`; copy new comments and original edits |
-| `comments_since` | `null` backfills existing comments; ISO timestamp with timezone limits initial enrollment |
-| `max_operations` | `20` remote writes per run; extra writes are reported as `deferred` and planned again next run |
-| `max_pages` | `100` pages per collection; incomplete scans fail closed |
-| `full_rescan_hours` | `24`; maximum time an unchanged pair goes without a full comment scan |
-| `jira_create_fields` | Extra Jira create fields, such as required custom fields or priority |
-| `status_sync` | `null` (off); `{"close_transition": "Done", "reopen_transition": "Reopen"}` mirrors closing and reopening |
-| `project_status` | `null` (off); mirrors a GitHub Project's Status field and Jira statuses instead of `status_sync`; see [Project status](#project-status) |
+| `jira_issue_type` | Required issue type **ID**, e.g. `"10001"` |
+| `jira_issue_types` | `{}`; GitHub issue type name → Jira issue type ID, e.g. `{"Bug": "10004"}` |
+| `selection_label` | `sync-jira`; `null` selects all issues |
+| `issue_state` | `open`; or `closed` or `all` |
+| `comments` | `true`; copy new comments and edits to originals |
+| `comments_since` | `null` backfills; an ISO timestamp limits which existing comments are copied |
+| `status_sync` | `null`; `{"close_transition": "Done", "reopen_transition": "Reopen"}` mirrors open/closed |
+| `project_status` | `null`; mirrors a GitHub Project field instead of `status_sync` |
+| `sync_parents` | `false`; mirror GitHub sub-issue parents and Jira parents |
+| `jira_subtask_type` | `null`; sub-task type ID for issues nested under a standard Jira issue |
+| `jira_selection_label` | `null`; Jira issues with this label are created in GitHub |
+| `jira_create_fields` | Extra Jira create fields, such as required custom fields or `labels` |
+| `max_operations` | `20` writes per run; the rest are `deferred` to the next run |
+| `max_pages` | `100` pages per listing; an incomplete scan fails the run |
+| `full_rescan_hours` | `24`; longest an unchanged pair goes without a full comment scan |
+| `github_url` | `https://api.github.com`; other API bases work for CLI runs only |
 
-`jira_create_fields` cannot replace project, issue type, title, or description. It
-may set `labels`; the tool adds none of its own. Required tenant-specific fields must be supplied explicitly;
-the tool does not guess them or truncate long titles. `comments_since` applies to
-newly enrolled comments, not edits to already tracked comments.
+The label and state filters choose which issues are **created**. Once a pair is
+linked, it keeps syncing even if the issue closes or loses its label.
 
-The label/state filter selects **new issue creation**. Once a pair is tracked,
-comment sync continues even if its GitHub issue closes or loses the label. Set
-`comments=false` to pause comment synchronization globally. If either issue of a
-tracked pair is deleted, transferred, moved to another Jira project, or no longer
-visible, that pair is reported as `unavailable` and its comment sync pauses; other
-pairs continue.
-
-To keep API usage flat as pairs accumulate, a pair whose full comment scan found
-nothing to do is recorded as `reconciled` with its GitHub `updated_at` and Jira
-`updated` timestamps. Later runs report it as `unchanged` and skip both comment
-lists until either timestamp changes, an operation for it is not `done`, or
-`full_rescan_hours` passes. New comments bump both timestamps, so they sync on the
-next run. If a service does not bump the issue timestamp for a comment edit, that
-edit waits for the periodic rescan. Pairs with anything blocked, unavailable, or
-acknowledged are always fully scanned. Existing Jira issues
-are not matched by title. Only issues with this utility's verified source identity
-can be adopted during recovery.
-
-CLI options: `--state` (default `.sync-state/state.json`), `--report` (default
-`sync-report.json`), `--git-state-branch sync-state` (or `sync-state-<name>`), `--init-state`, `--apply`, and
-`--acknowledge OPERATION` (repeatable). The Git option is required for ephemeral runners.
-
-`--acknowledge` takes an `operation` from a `blocked` or `unavailable` report entry
-after someone has reviewed it. The entry is then reported as `acknowledged` and no
-longer causes exit code 2. It is saved only with `--apply`, and it lapses
-automatically if that entry's reason changes or the entry resolves, so a new
-problem with the same object alerts again. Acknowledging never permits a retry. In that mode the branch is
-authoritative, and the local file is only a checkpoint copy. Dry-run creates a
-report/lock file but does not modify state or either service. Apply computes a
-fresh plan; a previous report is not executable authorization.
-
-## Jira → GitHub creation
-
-Set `jira_selection_label` (for example `"sync-github"`) and each Jira issue in the
-project carrying that label gets a GitHub issue. `issue_state` applies as for GitHub:
-by default, only issues outside Jira's Done category are created. Once created, the
-pair is like any other: comments, status, project status, and parents sync both ways
-where configured.
-
-The new GitHub issue gets:
-
-* the Jira summary as its title;
-* a body starting with `From Jira: <link>`, then the Jira description as readable
-  text, ending with a hidden `<!-- gh-jira-sync:… -->` marker;
-* the GitHub `selection_label`, if set, so it shows up with the other synced issues;
-* the GitHub issue type mapped back from `jira_issue_types` when exactly one GitHub
-  type maps to its Jira type. If GitHub refuses that type, it is created without one.
-
-Creation follows the same rules as GitHub → Jira: the intent is journaled before the
-request, a lost response is recovered by finding the hidden marker in issues updated
-since, an uncertain creation is never retried, and a refused one is retried next run.
-Issues the tool created in one direction are never created again in the other: GitHub
-issues ending with its marker and Jira issues carrying its identity property are left
-to their own recovery, or blocked if their journal is missing. Jira descriptions with
-content that cannot be copied as text, such as media or tables, block that issue.
-Title and description are copied once; later edits are not synced.
-
-## Issue types
-
-By default every Jira issue is created with `jira_issue_type`. To follow GitHub's
-organization issue types instead, map them:
-
-```json
-"jira_issue_type": "10001",
-"jira_issue_types": {"Bug": "10004", "Feature": "10005", "Task": "10001"}
-```
-
-Names match GitHub's issue type names, ignoring case. An issue with no type, or a
-type missing from the map, uses `jira_issue_type`. Every configured ID must be a
-standard (non-subtask) issue type in the Jira project; otherwise the run fails
-before doing anything. The type is chosen when the Jira issue is created and is not
-synced afterwards. Dry runs show the chosen type as `issue_type` on `create_issue`
-entries. List a project's issue type IDs with:
+List a project's issue type IDs with:
 
 ```sh
 curl -s -u "$JIRA_EMAIL:$JIRA_API_TOKEN" "$JIRA_SITE/rest/api/3/project/<KEY>" | jq '.issueTypes[] | {id, name, subtask}'
 ```
 
-## Epics and parent links
+## Features
 
-Jira groups work under parents, such as an Epic above its stories. GitHub does the
-same with **sub-issues**. To match them:
+**Issue types.** `jira_issue_types` picks the Jira type from the GitHub issue type
+(names ignore case); anything unmapped uses `jira_issue_type`. The type is set at
+creation only.
 
-1. Have an organization admin add an **Epic** issue type in GitHub (organization
-   **Settings → Planning → Issue types**) and map it in `jira_issue_types`, for example
-   `"Epic": "10216"`, so GitHub Epics create Jira Epics.
-2. Set `"sync_parents": true`.
-3. Make issues sub-issues of an Epic on GitHub, or set their parent in Jira.
+**Issue status.** With `status_sync`, closing or reopening on GitHub applies the named
+Jira transition, and moving a Jira issue into or out of the Done category closes or
+reopens the GitHub issue. Whichever side changed wins. A pair whose sides disagree
+with no recorded agreement (for example, pairs that existed before status sync was
+turned on) is blocked until you align it by hand.
 
-With `sync_parents`, each linked pair's parent link is mirrored in both directions
-between **linked** issues. Like status, each pair records the parent both sides last
-agreed on; the side that differs changed, and the other side is updated to match,
-checked before and after. Both sides changing to different parents, disagreement with
-nothing recorded, or a Jira parent that is not linked to a GitHub issue blocks that
-issue for review. A GitHub parent that is not linked yet counts as no parent until it
-is, so a new Epic and its stories converge over a few runs whatever order they are
-created in. New Jira issues are created without a parent and get it on the next run.
-
-Jira enforces its hierarchy: a Story, Task, or Bug can have an Epic as parent, but not
-another Story. A change Jira refuses is reported as `rejected` and retried next run.
-Each run lists the sub-issues of linked issues that have any, one request per parent.
-
-### Sub-tasks
-
-Without further setup, a GitHub Task nested under another Task becomes a standard Jira
-Task, and Jira then refuses its parent on every run. Set `jira_subtask_type` to the
-project's sub-task issue type ID (the type with `"subtask": true` in
-`GET /rest/api/3/project/<KEY>`) to create such issues as Jira sub-tasks instead:
-
-```json
-"sync_parents": true,
-"jira_subtask_type": "10217"
-```
-
-* **Which issues.** A new issue becomes a sub-task when its GitHub parent is linked and
-  that parent's Jira issue is a standard issue (Task, Story, Bug: anything below an
-  Epic and above a sub-task). Children of Epics, and issues without a parent, keep
-  their mapped type.
-* **Created under the parent.** Jira sets a sub-task's parent only at creation, so the
-  sub-task is created with it and the pair records that parent as agreed.
-* **Parent first.** If the parent is selected for sync but not in Jira yet, the child
-  waits (reported as `deferred`, not blocking) and is created on the run after its
-  parent, since a standard issue cannot be turned into a sub-task later. A parent that
-  is not selected never reaches Jira, so its children are created normally.
-* **Checked before creating.** The GitHub parent is read again just before creation;
-  if it changed since the plan, the run stops and the next run plans again.
-* **Moving a sub-task later.** Parent sync still mirrors later moves, but Jira decides
-  whether a sub-task may change parent; a move it refuses (such as under an Epic) is
-  reported as `rejected` like any hierarchy change.
-* **Existing issues are not converted.** Issues already in Jira keep their type.
-
-## Issue status
-
-With `status_sync` set, each tracked pair's open/closed status is mirrored in both
-directions. A Jira status counts as closed when it is in Jira's **Done** category
-(for example Done or Won't Do), so the mapping works with any workflow.
-
-* **GitHub → Jira:** closing a GitHub issue applies the Jira transition named
-  `close_transition`; reopening applies `reopen_transition`. Names must match the
-  workflow's transition names exactly. If that transition is not available from
-  the issue's current status, or leads to the wrong kind of status, the issue is
-  blocked for review and nothing changes.
-* **Jira → GitHub:** moving into a Done-category status closes the GitHub issue as
-  completed; moving out of it reopens the issue.
-
-Each pair records the status both sides last agreed on. The side that now differs
-from it is the side that changed, and the other side is updated to match. If both
-sides changed, they agree again and nothing is written. The one ambiguous case is a
-pair whose sides disagree and that has no agreed status yet, for example pairs
-created before status sync was turned on. It is blocked for review: align the two
-sides by hand (or acknowledge it), and the agreement is recorded on the next run.
-Issues created while status sync is on start with "open" recorded, so a GitHub issue
-that was already closed closes its new Jira issue on the following run.
-
-Status changes count toward `max_operations`, are re-checked immediately before
-and after each write, and are not journaled: they are idempotent, so a lost response
-simply shows up as agreement on the next run. A refused transition (for example one
-whose screen requires fields) is reported as `rejected` and retried next run. Status
-is checked every run, even when comment sync is off or a pair's comments are
-skipped as unchanged.
-
-## Project status
-
-`project_status` keeps a GitHub Project's single-select field (normally **Status**)
-and the Jira issue's workflow status in step, in both directions. It replaces
-`status_sync`; a config cannot use both.
+**Project status.** `project_status` keeps a GitHub Project's single-select field and
+the Jira status in step, in both directions:
 
 ```json
 "project_status": {
@@ -461,133 +196,38 @@ and the Jira issue's workflow status in step, in both directions. It replaces
   "project_number": 7,
   "map": [
     {"project": "Todo",        "jira": ["To Do", "Backlog"]},
-    {"project": "In Progress", "jira": ["In Progress", "In Review"]},
+    {"project": "In Progress", "jira": "In Progress"},
     {"project": "Done",        "jira": ["Done", "Won't Do"]}
   ]
 }
 ```
 
-| Key | Default | Meaning |
-| --- | --- | --- |
-| `owner` | required | Organization or user that owns the project |
-| `owner_type` | `org` | `org` or `user` |
-| `project_number` | required | The number in the project's URL |
-| `field` | `Status` | Name of the single-select field to sync |
-| `add_to_project` | `true` | Add linked issues that are not in the project yet; otherwise report them as `excluded` |
-| `map` | required | Each project option and the Jira statuses it covers (a name or a list) |
-| `map[].transition` | none | Jira transition to use when several lead to the target status |
-| `map[].jira_backlog` | `false` | This option means "in the Jira board's backlog" instead of covering statuses; see [Backlog and board](#backlog-and-board) |
-| `jira_board` | none | Board ID whose backlog `jira_backlog` mirrors (the number in the board's URL); required with `jira_backlog` |
+Other keys: `owner_type` (`org` or `user`), `field` (default `Status`),
+`add_to_project` (default `true`), `map[].transition` to pick among several
+transitions, and `jira_board` with one `map[].jira_backlog` option to mirror a board's
+backlog instead of a status. A status or option missing from `map` blocks that issue.
+Turn on the project's **Item closed** and **Item reopened** workflows so GitHub
+close/reopen reaches Jira through the project.
 
-How it behaves:
+**Epics and parents.** With `sync_parents`, GitHub sub-issue parents and Jira parents
+are mirrored between linked issues. Add an Epic issue type in GitHub and map it in
+`jira_issue_types` so Epics create Epics. Jira's hierarchy refusals are reported as
+`rejected`. Set `jira_subtask_type` so an issue nested under a Task is created as a
+Jira sub-task; it waits until its parent is in Jira.
 
-* **Mapping.** Each Jira status belongs to at most one option. When several Jira
-  statuses share an option, the first listed is where Jira moves when the project
-  changes; Jira moving between them leaves the project alone.
-* **Project → Jira.** Jira takes the transition whose destination is the target
-  status (or the named `transition`). If none is available from the current status,
-  the issue is blocked; multi-step paths are not taken.
-* **Jira → project.** The item's field is set to the option covering Jira's status.
-* **Which side changed.** Each pair records the option both sides last agreed on;
-  the side that differs from it changed. If both changed to different values, or
-  they disagree with nothing recorded yet, the issue is blocked for review. An item
-  with an empty status is filled from Jira.
-* **Not mapped.** A Jira status or project option missing from `map` blocks that
-  issue. A mapped option that the project does not have fails the whole run, since
-  it is a configuration error.
-* **Open/closed.** Jira's Done category still closes and reopens the GitHub issue.
-  Closing or reopening on GitHub does not move Jira directly: turn on the project's
-  built-in workflows **Item closed** (set Done) and **Item reopened**, and the status
-  change reaches Jira through project sync.
-* **Safety.** Like other writes, adding items and status changes count toward
-  `max_operations`, are re-checked before and after, and are retried next run if
-  refused. If the re-check finds both sides already at the target (for example
-  because the project's "Item closed" workflow moved the card after the tool closed
-  the issue), the entry is reported as `already_done` and the agreement is recorded.
+**Jira → GitHub creation.** With `jira_selection_label`, each labeled Jira issue gets
+a GitHub issue with its summary and description. The pair then syncs like any other.
+Descriptions with media or tables block that issue.
 
-### Backlog and board
+**Comments.** Copies start with a header naming the original author and linking to
+the original, and carry a hidden identity marker. Don't remove either when editing a
+copy, or the comment is blocked for review. GitHub Markdown is copied literally to
+Jira; Jira comments become plain text on GitHub. Restricted Jira comments are skipped.
 
-Teams that treat "on the board" as "ready" can mirror the board's backlog instead
-of a status. Mark one option `jira_backlog` and name the board:
+## The report
 
-```json
-"project_status": {
-  "owner": "cccteam",
-  "project_number": 7,
-  "jira_board": 150,
-  "map": [
-    {"project": "Backlog",     "jira_backlog": true},
-    {"project": "Ready",       "jira": "To Do"},
-    {"project": "In Progress", "jira": "In Progress"},
-    {"project": "Done",        "jira": "Done"}
-  ]
-}
-```
-
-* **Jira → project.** An issue in the board's backlog shows the backlog option,
-  whatever its status; once on the board, it shows the option covering its status.
-  Dragging a To Do issue from the backlog onto the board therefore moves the card to
-  Ready.
-* **Project → Jira.** Moving the card to the backlog option moves the Jira issue into
-  the backlog (its status is unchanged). Moving it to any other option takes the
-  issue out of the backlog onto the board, then transitions it if its status still
-  does not map to that option. On a Kanban board, Jira puts issues it moves onto the
-  board in the first column, so the transition is looked up again after the move.
-* **Done issues.** Jira lists only incomplete issues in a backlog, so moving a Done
-  issue's card to the backlog option is blocked; reopen it in Jira first.
-* **Setup.** Turn on the board's backlog (board settings → Features → Backlog for a
-  team-managed board, or a Kanban backlog column for a company-managed one). If it is
-  off, the run fails with a message saying so. The Jira account needs to be able to
-  browse the board and rank issues.
-
-### Credentials for projects
-
-Workflow tokens cannot reach organization projects, so project calls use a separate
-token in `GH_PROJECT_TOKEN`; issues and comments use `GH_TOKEN`. In Actions, the
-[GitHub App](#github-app-recommended) mints it with organization Projects permission;
-for a user-owned project, pass a fine-grained token as `project-token` instead.
-
-For local runs, prefer a fine-grained personal access token with an expiry, limited
-to the synced repository (Issues: read and write) and organization Projects (read and
-write), over a broad `gh auth token`. Export it as both `GH_TOKEN` and
-`GH_PROJECT_TOKEN`.
-
-## Comments and formatting
-
-Copies start with a plain header naming the original author and linking to the
-original, for example "alice wrote on GitHub (link):" in Jira, or "**Bob** wrote
-in [Jira](link):" on GitHub. The actual API author is the service account.
-
-Each copy also carries an invisible identity that prevents echo loops and lets a
-lost response be recovered: a comment property on Jira, and an HTML comment
-(`<!-- gh-jira-sync:… -->`) on GitHub, which GitHub does not display. Two identical
-originals still produce two distinct copies. Quote-replies of a copy sync as new
-originals, because a quote never carries the identity. Do not remove the header
-from a copy, or the HTML comment when editing a GitHub copy's Markdown; either
-blocks that comment for review. Copies made by older releases end with a visible
-`[gh-jira-sync:…]` line and keep working.
-
-A new Jira issue's description is the GitHub issue body rendered as Jira rich text:
-headings, paragraphs (single line breaks kept, as GitHub shows them), bullet,
-numbered and task lists, quotes, code blocks, rules, tables, and bold, italic,
-strikethrough, inline code and links. Markdown it does not recognize stays as literal
-text, and hidden HTML comments are dropped. Descriptions are written once, at
-creation; later edits on either side are not synced.
-
-In comment copies, GitHub Markdown is preserved literally in Jira, with CRLF line
-endings from the GitHub web editor normalized to LF. Jira comments are rendered as
-readable plain text with links and list text; rich visual formatting is not kept.
-Unsupported media/tables block that comment for review. No attachments are uploaded.
-Restricted Jira comments are excluded. A comment's later deletion or loss of access
-is reported without deleting or recreating its counterpart. If visibility becomes
-restricted after export, the existing copy remains under the no-delete policy and
-requires manual review.
-
-## Reading the report
-
-Every run writes the report to `--report` (default `sync-report.json`) and prints it;
-in Actions it appears in the job summary. It holds identifiers and decisions, never
-comment or issue text.
+Every run prints a report, writes it to `--report`, and in Actions adds it to the job
+summary. It holds IDs and decisions, never issue or comment text.
 
 ```json
 {
@@ -598,147 +238,60 @@ comment or issue text.
   "entries": [
     {"github": 12, "operation": "3f9c…", "kind": "create_comment",
      "source": "github", "comment_id": "2210", "destination": "jira"},
-    {"github": 12, "operation": "a71e…", "kind": "sync_status",
-     "destination": "jira", "status": "closed", "outcome": "rejected",
-     "reason": "Status change rejected with HTTP 400; retried next run"},
     {"github": 15, "operation": "c04d…", "kind": "unavailable",
      "reason": "Linked issue deleted, transferred, moved, or inaccessible; comment sync paused"}
   ]
 }
 ```
 
-### Report fields
+Each entry has a `kind`. Writes are `create_issue`, `create_github_issue`,
+`create_comment`, `edit_comment`, `sync_status`, `add_to_project`,
+`sync_project_status`, and `sync_parent`; an `outcome` of `rejected` means the service
+refused it and it is retried next run. The kinds that need a person are:
 
-| Field | Meaning |
+| Kind | Meaning |
 | --- | --- |
-| `mode` | `dry-run` or `apply` |
-| `entries` | One decision per issue, comment pair, or comment, in processing order; empty if the run failed before planning |
-| `planned_writes` | Writes planned for this run, after deferral; absent if planning failed |
-| `deferred_writes` | Writes pushed to a later run by `max_operations`; absent if planning failed |
-| `error` | Present only when the run failed (exit code 1); never includes response bodies |
-| `exit_code` | `0`, `1`, or `2`; see [exit codes](#safety-recovery-and-limits) |
+| `blocked` | Needs review; `reason` says why |
+| `unavailable` | An issue or comment was deleted, moved, or became inaccessible; nothing is deleted or recreated |
+| `acknowledged` | A reviewed `blocked` or `unavailable` entry; quiet until its reason changes |
 
-### Entry fields
-
-Every entry has `github`, `operation`, and `kind`; the rest appear only when they apply.
-
-| Field | Meaning |
-| --- | --- |
-| `github` | GitHub issue number the entry belongs to |
-| `operation` | Stable 64-character ID of the decision; pass it to `--acknowledge` |
-| `kind` | The decision; see the table below |
-| `reason` | Why an entry is blocked, unavailable, excluded, deferred, unchanged, or rejected (kept on `acknowledged`) |
-| `source` | Side of the original comment: `github` or `jira` |
-| `comment_id` | ID of that original comment on its own side |
-| `destination` | Side that receives the write: `github` or `jira` for comment copies and status changes, or `project` for the GitHub Project item |
-| `status` | Target: `open` or `closed` for `sync_status` and `status_agreed`; the project option for `sync_project_status` and `project_status_agreed` |
-| `previous_rejection` | HTTP status of an earlier refused attempt that this entry retries |
-| `issue_type` | Jira issue type ID a `create_issue` entry will use |
-| `jira_key` | Jira issue for `create_github_issue` and `link_github_issue` (their `github` is 0 until created) |
-| `parent` | Target parent for `sync_parent` and `parent_agreed`: `#<GitHub number>` or `none` |
-| `outcome` | Set during apply: `rejected` when the service refused the write (nothing changed; retried next run), or `already_done` when a status change was already in place, for example made by a project workflow, so nothing was written and the agreement was recorded |
-
-Entries are planned before any write. In apply mode, only `outcome` and `reason` can
-change afterwards. If a run fails part way (exit code 1), entries before the failure
-may already be done; rerun a dry-run to see what remains.
-
-### Entry kinds
-
-Kinds marked **write** change GitHub or Jira and count toward `max_operations`. The
-others write nothing to either service; some only update the state journal.
-
-| Kind | Type | Meaning |
-| --- | --- | --- |
-| `create_issue` | write | Create a Jira issue for a newly selected GitHub issue |
-| `create_github_issue` | write | Create a GitHub issue for a selected Jira issue (`jira_key`) |
-| `link_github_issue` | state | A GitHub issue from an interrupted earlier run exists; record it instead of creating another |
-| `link_issue` | state | A Jira issue with this GitHub issue's identity already exists (for example after a lost response); record the pair instead of creating another |
-| `create_comment` | write | Copy an original comment to the other side |
-| `recover_comment` | state | A copy from an interrupted earlier run exists; record it instead of copying again |
-| `edit_comment` | write | The original comment was edited; update its copy (`destination`) |
-| `confirm_comment` | state | Both sides already show the new text (for example an edit whose response was lost); re-read and record it |
-| `sync_status` | write | Close or reopen the `destination` side to match the other (`status`) |
-| `status_agreed` | state | Both sides already have the same status; record it as the agreed status |
-| `add_to_project` | write | Add the GitHub issue to the project; its status is synced on the next run |
-| `sync_project_status` | write | Set the project item's option, or transition Jira, to match the other side (`destination`, `status`) |
-| `project_status_agreed` | state | The project option and Jira status already match; record it as the agreed option |
-| `sync_parent` | write | Set or remove a parent link on the `destination` side to match the other (`parent`) |
-| `parent_agreed` | state | Both sides already have the same parent; record it as the agreed parent |
-| `noop` | none | A tracked comment pair is in sync |
-| `reconciled` | state | Every comment on this pair is in sync; record the issues' timestamps so later runs can skip reading its comments |
-| `unchanged` | none | Neither issue has changed since the last full scan; its comments were not read this run |
-| `excluded` | none | A comment is intentionally not copied: a restricted Jira comment, or older than `comments_since` |
-| `deferred` | none | A write over the `max_operations` budget; planned again next run |
-| `blocked` | review | Needs a person; `reason` says why. Causes exit code 2 |
-| `unavailable` | review | An issue or comment was deleted, moved, or became inaccessible; nothing is deleted or recreated. Causes exit code 2 |
-| `acknowledged` | none | A `blocked` or `unavailable` entry someone acknowledged; it stays quiet while its reason is unchanged |
-
-To handle a `blocked` or `unavailable` entry, read its `reason`, fix the cause if
-there is one, and either let the next run resolve it or acknowledge it:
+Other kinds (`noop`, `unchanged`, `deferred`, `excluded`, and the `*_agreed`,
+`link_*`, `recover_comment`, `confirm_comment`, and `reconciled` state updates) need
+no action. To acknowledge an entry after reviewing it:
 
 ```sh
-./gh-jira-sync --config sync.json --apply --acknowledge <operation>
+gh-jira-sync --config sync.json --apply --acknowledge <operation>
 ```
 
-Acknowledgements are saved only with `--apply`, so that run also performs any other
-planned writes; run a dry-run first if that matters. The workflow has no acknowledge
-input yet. For an Actions deployment, run the command from a clone of the repository
-that holds the state branch, adding `--git-state-branch <branch>` and the same
-credentials the workflow uses.
+That run also performs any other planned writes. For an Actions deployment, run it
+from a clone of the calling repository with `--git-state-branch <branch>` and the same
+credentials.
 
-## Safety, recovery, and limits
+Exit codes: `0` success (including deferred writes), `2` something needs review,
+`1` configuration, API, or persistence error.
 
-This aims for repeatable, duplicate-resistant synchronization, not a promise of
-zero risk. APIs do not provide a cross-service transaction. Final read/write races,
-notifications, Jira automation, and incompatible project audiences remain possible.
-Pilot in a sandbox and review the first plans.
+## Safety and recovery
 
-A creation journal records `pending` before dispatch and `done` after confirmation.
-Writes are never retried within a run. If a response is lost, the next run looks for
-the destination by its hidden identity (for issues: issues this account created
-since the intent was journaled, matched by issue property) and adopts a match. If no result is visible,
-it **blocks instead of creating another**. Jira search can lag behind writes.
+Pilot in a sandbox and review the first plans. Every creation is journaled before the
+request, and a lost response is recovered by finding the destination's hidden
+identity on the next run. If it cannot be found, the operation is **blocked instead
+of created twice**. Writes the service refuses (4xx) are retried next run without
+editing state.
 
-A 4xx answer (other than 408) proves the service refused the write, so the journal
-records `rejected` instead of `pending`, and the next run plans it again with
-`previous_rejection` in the report. Item-specific refusals (400, 404, 409, 413, 422),
-such as a missing required Jira field, are reported with `outcome: rejected` and
-exit code 2 while the rest of the run continues. Refusals that affect every write
-(401, 403, 429) stop the run. Fix the cause; no state editing is needed.
+For a blocked pending operation, rerun a dry run after Jira indexing catches up. Only
+if you have verified nothing was created, remove **that one pending operation** from
+`state.json` (on the state branch in Actions). Never initialize over lost production
+state or restore an old checkpoint: that can erase pending intents and allow
+duplicates.
 
-For a pending operation (timeout, network failure, 5xx, or lost response):
+State holds IDs, URLs, and fingerprints, but no comment text or tokens. Protect the
+state branch, workflow, and config from untrusted edits.
 
-1. Restore/retain the newest state; rerun dry-run after allowing indexing to catch up.
-2. If the destination exists with intact markers, apply can recover its mapping.
-3. If the request definitely never created anything, have an operator remove
-   **only that pending operation** from `state.json` after verifying the destination
-   and coordinating all writers. In Actions, make the reviewed change on the deployment's state branch.
-   Do not delete completed mappings or reset the entire journal.
-4. If the outcome cannot be proven, leave it blocked and investigate manually.
+## Development
 
-Do not initialize over lost production state or restore an old checkpoint casually:
-that may erase pending intents and invalidate duplicate protection. State binds the
-repository, service endpoints, and Jira project. Changing those needs a separate,
-reviewed deployment. The old experimental field-sync state format is not compatible.
+```sh
+go test -race ./...
+```
 
-State contains object IDs, attribution metadata, source URLs, envelopes, and content
-fingerprints, but no source comment bodies or tokens. Treat it as private operational
-metadata. Protect its branch and the workflow/config from untrusted edits. Reports
-contain IDs and decisions, not comment bodies. Markers prevent accidental loops;
-they are not a security boundary against users deliberately forging sync metadata.
-
-Exit codes:
-
-* `0`: successful plan/apply, including runs with `deferred` writes.
-* `2`: unacknowledged blocked operations, deleted/inaccessible comments or issues, or
-  item-specific write rejections requiring review.
-* `1`: configuration, API, pagination, concurrency, or persistence error.
-
-Independent operations may complete before a failure or alongside blocked comments.
-`planned_writes` counts intended writes, not confirmed completions; after apply, each
-entry's `outcome` shows a refusal. Read the error and rerun dry-run to inspect
-remaining work. Remote state failures stop execution; no force push occurs.
-
-Tests use fake APIs plus local Git integration. Live authentication, required Jira
-fields, branch protection, and actual workflow execution remain to be validated
-with your sandbox credentials.
+Tests use fake APIs and need no credentials. Releases are cut by release-please from
+Conventional Commit pull request titles; see [the design](docs/design.md#releases-and-distribution).

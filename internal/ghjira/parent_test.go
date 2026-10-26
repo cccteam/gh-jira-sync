@@ -119,7 +119,6 @@ func (w *parentWorld) SetJiraParent(id, key string) error {
 	return nil
 }
 
-//nolint:unparam // names the child, so each test reads as its scenario
 func (w *parentWorld) setJiraParent(child int, key string) {
 	j := w.jira[strconv.Itoa(300+child)]
 	if key == "" {
@@ -131,7 +130,6 @@ func (w *parentWorld) setJiraParent(child int, key string) {
 	}{key}
 }
 
-//nolint:unparam // names the child, so each test reads as its scenario
 func parentEntry(entries []*Entry, child int) *Entry {
 	for _, e := range entries {
 		if e.GitHub == child && (e.Kind == KindSyncParent || e.Kind == KindParentAgreed || strings.Contains(e.Reason, "parent")) {
