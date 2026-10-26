@@ -68,7 +68,7 @@ permissions:
   contents: write
 jobs:
   sync:
-    uses: cccteam/gh-jira-sync/.github/workflows/sync-reusable.yml@v0.1.1 # x-release-please-version
+    uses: cccteam/gh-jira-sync/.github/workflows/sync-reusable.yml@v0.1.2 # x-release-please-version
     with:
       app-client-id: Iv23liExampleClientId
       apply: ${{ inputs.apply || (github.event_name == 'schedule' && vars.SYNC_APPLY == 'true') }}
@@ -130,7 +130,7 @@ one Jira project. A hub repository can run several with a matrix:
       fail-fast: false
       matrix:
         deployment: [web, api]
-    uses: cccteam/gh-jira-sync/.github/workflows/sync-reusable.yml@v0.1.1 # x-release-please-version
+    uses: cccteam/gh-jira-sync/.github/workflows/sync-reusable.yml@v0.1.2 # x-release-please-version
     with:
       config: sync/${{ matrix.deployment }}.json
       state-branch: sync-state-${{ matrix.deployment }}
