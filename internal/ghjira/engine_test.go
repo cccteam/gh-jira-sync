@@ -25,6 +25,7 @@ func sorted[T cmp.Ordered](s []T) []T {
 }
 
 func TestCreationThenRepeatNoop(t *testing.T) {
+	t.Parallel()
 	x := newSyncer(t)
 	s := x.linked()
 	eq(t, s.Pairs["1"].JiraKey, "ENG-1")
@@ -42,6 +43,7 @@ func TestCreationThenRepeatNoop(t *testing.T) {
 }
 
 func TestNeverSyncLaterIssueFieldEdits(t *testing.T) {
+	t.Parallel()
 	x := newSyncer(t)
 	s := x.linked()
 	x.api.source.Title = "New title"
@@ -50,6 +52,7 @@ func TestNeverSyncLaterIssueFieldEdits(t *testing.T) {
 }
 
 func TestCreationLostResponseRecoveredByIdentity(t *testing.T) {
+	t.Parallel()
 	x := newSyncer(t)
 	x.api.loseResponse = true
 	x.fails(nil)
@@ -64,6 +67,7 @@ func TestCreationLostResponseRecoveredByIdentity(t *testing.T) {
 }
 
 func TestUnknownCreationNeverRetriedWhenSearchLags(t *testing.T) {
+	t.Parallel()
 	x := newSyncer(t)
 	x.api.loseResponse = true
 	x.fails(nil)
@@ -74,6 +78,7 @@ func TestUnknownCreationNeverRetriedWhenSearchLags(t *testing.T) {
 }
 
 func TestJournalFailurePreventsDispatch(t *testing.T) {
+	t.Parallel()
 	x := newSyncer(t)
 	entries, err := Plan(x.c, NewState(x.c), x.api, time.Now())
 	if err != nil {
@@ -94,6 +99,7 @@ func TestJournalFailurePreventsDispatch(t *testing.T) {
 }
 
 func TestTwoWayCommentsAndNoEcho(t *testing.T) {
+	t.Parallel()
 	x := newSyncer(t)
 	s := x.linked()
 	x.api.rows["github"] = []Comment{ghComment(11, "GitHub original")}
@@ -106,6 +112,7 @@ func TestTwoWayCommentsAndNoEcho(t *testing.T) {
 }
 
 func TestEditOriginalsBothDirections(t *testing.T) {
+	t.Parallel()
 	x := newSyncer(t)
 	s := x.linked()
 	x.api.rows["github"] = []Comment{ghComment(11, "GitHub original")}
@@ -129,6 +136,7 @@ func jiraText(t *testing.T, row Comment) string {
 }
 
 func TestEditCopyIsReportedNeverOverwritten(t *testing.T) {
+	t.Parallel()
 	x := newSyncer(t)
 	s := x.linked()
 	x.api.rows["github"] = []Comment{ghComment(11, "Original")}
@@ -141,6 +149,7 @@ func TestEditCopyIsReportedNeverOverwritten(t *testing.T) {
 }
 
 func TestFormattingOnlyEditToCopyIsPreserved(t *testing.T) {
+	t.Parallel()
 	x := newSyncer(t)
 	s := x.linked()
 	x.api.rows["github"] = []Comment{ghComment(11, "Original")}
@@ -156,6 +165,7 @@ func TestFormattingOnlyEditToCopyIsPreserved(t *testing.T) {
 }
 
 func TestDeletedOriginalDoesNotTurnCopyIntoSource(t *testing.T) {
+	t.Parallel()
 	x := newSyncer(t)
 	s := x.linked()
 	x.api.rows["github"] = []Comment{ghComment(11, "Original")}
@@ -167,6 +177,7 @@ func TestDeletedOriginalDoesNotTurnCopyIntoSource(t *testing.T) {
 }
 
 func TestSourceEditedBeforePendingCopyRecovered(t *testing.T) {
+	t.Parallel()
 	x := newSyncer(t)
 	s := x.linked()
 	x.api.rows["github"] = []Comment{ghComment(11, "Original")}
@@ -182,6 +193,7 @@ func TestSourceEditedBeforePendingCopyRecovered(t *testing.T) {
 }
 
 func TestDeletionsNeverPropagateOrRecreate(t *testing.T) {
+	t.Parallel()
 	x := newSyncer(t)
 	s := x.linked()
 	x.api.rows["github"] = []Comment{ghComment(11, "Original")}
@@ -193,6 +205,7 @@ func TestDeletionsNeverPropagateOrRecreate(t *testing.T) {
 }
 
 func TestCommentLostResponseRecoversWithoutDuplicate(t *testing.T) {
+	t.Parallel()
 	x := newSyncer(t)
 	s := x.linked()
 	x.api.rows["github"] = []Comment{ghComment(11, "Original")}
@@ -208,6 +221,7 @@ func TestCommentLostResponseRecoversWithoutDuplicate(t *testing.T) {
 }
 
 func TestEditLostResponseConvergesWithoutSecondWrite(t *testing.T) {
+	t.Parallel()
 	x := newSyncer(t)
 	s := x.linked()
 	x.api.rows["github"] = []Comment{ghComment(11, "Original")}
@@ -221,6 +235,7 @@ func TestEditLostResponseConvergesWithoutSecondWrite(t *testing.T) {
 }
 
 func TestPendingCommentWithoutVisibleCopyBlocks(t *testing.T) {
+	t.Parallel()
 	x := newSyncer(t)
 	s := x.linked()
 	x.api.rows["github"] = []Comment{ghComment(11, "Original")}
@@ -233,6 +248,7 @@ func TestPendingCommentWithoutVisibleCopyBlocks(t *testing.T) {
 }
 
 func TestRestrictedJiraCommentsNeverExport(t *testing.T) {
+	t.Parallel()
 	x := newSyncer(t)
 	s := x.linked()
 	raw := jiraComment(22, "private")
@@ -244,6 +260,7 @@ func TestRestrictedJiraCommentsNeverExport(t *testing.T) {
 }
 
 func TestUnsupportedJiraContentBlocksWithoutLoss(t *testing.T) {
+	t.Parallel()
 	x := newSyncer(t)
 	s := x.linked()
 	raw := jiraComment(22, "")
@@ -254,6 +271,7 @@ func TestUnsupportedJiraContentBlocksWithoutLoss(t *testing.T) {
 }
 
 func TestBudgetDefersExcessWritesToLaterRuns(t *testing.T) {
+	t.Parallel()
 	x := newSyncer(t)
 	s := x.linked()
 	x.c.MaxOperations = 1
@@ -268,6 +286,7 @@ func TestBudgetDefersExcessWritesToLaterRuns(t *testing.T) {
 }
 
 func TestUnchangedCommentsAreNoopsWithoutRereads(t *testing.T) {
+	t.Parallel()
 	x := newSyncer(t)
 	s := x.linked()
 	x.api.rows["github"] = []Comment{ghComment(11, "GitHub original")}
@@ -280,6 +299,7 @@ func TestUnchangedCommentsAreNoopsWithoutRereads(t *testing.T) {
 }
 
 func TestDeletedGitHubIssueReportedWithoutStallingOtherPairs(t *testing.T) {
+	t.Parallel()
 	x := newSyncer(t)
 	s := x.linked()
 	s.Pairs["2"] = Pair{GitHub: 2, GitHubID: "43", JiraID: "201", JiraKey: "ENG-2"}
@@ -293,6 +313,7 @@ func TestDeletedGitHubIssueReportedWithoutStallingOtherPairs(t *testing.T) {
 }
 
 func TestTransferredOrDeletedTrackedIssueIsUnavailable(t *testing.T) {
+	t.Parallel()
 	x := newSyncer(t)
 	s := x.linked()
 	x.api.githubGone = true
@@ -301,6 +322,7 @@ func TestTransferredOrDeletedTrackedIssueIsUnavailable(t *testing.T) {
 }
 
 func TestReplacedGitHubIssueIsUnavailable(t *testing.T) {
+	t.Parallel()
 	x := newSyncer(t)
 	s := x.linked()
 	x.api.source.ID = 99
@@ -310,6 +332,7 @@ func TestReplacedGitHubIssueIsUnavailable(t *testing.T) {
 }
 
 func TestDeletedOrMovedJiraIssueIsUnavailable(t *testing.T) {
+	t.Parallel()
 	x := newSyncer(t)
 	s := x.linked()
 	x.api.rows["github"] = []Comment{ghComment(11, "Original")}
@@ -320,11 +343,13 @@ func TestDeletedOrMovedJiraIssueIsUnavailable(t *testing.T) {
 }
 
 func TestGitHubQuoteReplyOfCopyStillSyncs(t *testing.T) {
+	t.Parallel()
 	x := newSyncer(t)
 	s := x.linked()
 	x.api.rows["jira"] = []Comment{jiraComment(22, "Jira original")}
 	s, _ = x.ok(s)
-	lines := strings.Split(x.api.rows["github"][0].Body.(string), "\n")
+	body, _ := x.api.rows["github"][0].Body.(string)
+	lines := strings.Split(body, "\n")
 	for i, line := range lines {
 		lines[i] = "> " + line
 	}
@@ -337,6 +362,7 @@ func TestGitHubQuoteReplyOfCopyStillSyncs(t *testing.T) {
 }
 
 func TestJiraQuoteReplyOfCopyStillSyncs(t *testing.T) {
+	t.Parallel()
 	x := newSyncer(t)
 	s := x.linked()
 	x.api.rows["github"] = []Comment{ghComment(11, "GitHub original")}
@@ -352,6 +378,7 @@ func TestJiraQuoteReplyOfCopyStillSyncs(t *testing.T) {
 }
 
 func TestRejectedIssueCreationIsRetriedOnNextRun(t *testing.T) {
+	t.Parallel()
 	x := newSyncer(t)
 	x.api.refuse = []int{400}
 	s, entries := x.ok(nil)
@@ -365,6 +392,7 @@ func TestRejectedIssueCreationIsRetriedOnNextRun(t *testing.T) {
 }
 
 func TestRejectedCommentDoesNotStopLaterWrites(t *testing.T) {
+	t.Parallel()
 	x := newSyncer(t)
 	s := x.linked()
 	x.api.rows["github"] = []Comment{ghComment(11, "one"), ghComment(12, "two")}
@@ -378,6 +406,7 @@ func TestRejectedCommentDoesNotStopLaterWrites(t *testing.T) {
 }
 
 func TestAuthRejectionStopsRunButLeavesIntentRetryable(t *testing.T) {
+	t.Parallel()
 	x := newSyncer(t)
 	x.api.refuse = []int{401}
 	x.fails(nil)
@@ -391,6 +420,7 @@ func TestAuthRejectionStopsRunButLeavesIntentRetryable(t *testing.T) {
 }
 
 func TestRejectedEditIsPlannedAgain(t *testing.T) {
+	t.Parallel()
 	x := newSyncer(t)
 	s := x.linked()
 	x.api.rows["github"] = []Comment{ghComment(11, "Original")}
@@ -405,6 +435,7 @@ func TestRejectedEditIsPlannedAgain(t *testing.T) {
 }
 
 func TestCRLFBodiesCopyCleanlyAndStayStable(t *testing.T) {
+	t.Parallel()
 	x := newSyncer(t)
 	s := x.linked()
 	x.api.rows["github"] = []Comment{ghComment(11, "line one\r\nline two")}
@@ -419,6 +450,7 @@ func TestCRLFBodiesCopyCleanlyAndStayStable(t *testing.T) {
 }
 
 func TestMismatchedRecoveryBlocksOnlyThatComment(t *testing.T) {
+	t.Parallel()
 	x := newSyncer(t)
 	s := x.linked()
 	x.api.rows["github"] = []Comment{ghComment(11, "Original")}
@@ -434,6 +466,7 @@ func TestMismatchedRecoveryBlocksOnlyThatComment(t *testing.T) {
 }
 
 func TestAcknowledgedEntriesStayQuietUntilReasonChanges(t *testing.T) {
+	t.Parallel()
 	x := newSyncer(t)
 	s := x.linked()
 	x.api.rows["github"] = []Comment{ghComment(11, "Original")}
@@ -483,6 +516,7 @@ func quietPair(t *testing.T, x *syncer) *State {
 }
 
 func TestUnchangedPairSkipsCommentReads(t *testing.T) {
+	t.Parallel()
 	x := newSyncer(t)
 	s := quietPair(t, x)
 	_, entries := x.ok(s)
@@ -491,8 +525,10 @@ func TestUnchangedPairSkipsCommentReads(t *testing.T) {
 }
 
 func TestIssueActivityTriggersFullScan(t *testing.T) {
+	t.Parallel()
 	for _, side := range sides {
 		t.Run(string(side), func(t *testing.T) {
+			t.Parallel()
 			x := newSyncer(t)
 			s := quietPair(t, x)
 			if side == "github" {
@@ -511,6 +547,7 @@ func TestIssueActivityTriggersFullScan(t *testing.T) {
 }
 
 func TestPeriodicRescanCatchesEditsWithoutIssueActivity(t *testing.T) {
+	t.Parallel()
 	x := newSyncer(t)
 	s := quietPair(t, x)
 	x.api.rows["github"][0].Body = "Edited without bumping issue timestamps"
@@ -525,6 +562,7 @@ func TestPeriodicRescanCatchesEditsWithoutIssueActivity(t *testing.T) {
 }
 
 func TestPairsNeedingAttentionAreNeverMarkedQuiet(t *testing.T) {
+	t.Parallel()
 	x := newSyncer(t)
 	s := quietPair(t, x)
 	x.api.source.UpdatedAt = "2026-01-03T00:00:00Z"
@@ -537,6 +575,7 @@ func TestPairsNeedingAttentionAreNeverMarkedQuiet(t *testing.T) {
 }
 
 func TestPendingOperationForcesFullScan(t *testing.T) {
+	t.Parallel()
 	x := newSyncer(t)
 	s := quietPair(t, x)
 	s.Operations[token(x.c, OpGitHubComment, "99")] = Operation{Kind: "comment_github", SourceID: "99", GitHub: 1, Status: "pending"}
@@ -547,6 +586,7 @@ func TestPendingOperationForcesFullScan(t *testing.T) {
 }
 
 func TestTrailingMarkerIdentifiesOnlyRealCopies(t *testing.T) {
+	t.Parallel()
 	op := strings.Repeat("a", 64)
 	m := marker(op)
 	eq(t, hasMarker(Comment{Side: SideGitHub, Body: "Synced\n\n" + m + "\n"}, op), true)
@@ -560,6 +600,7 @@ func TestTrailingMarkerIdentifiesOnlyRealCopies(t *testing.T) {
 }
 
 func TestPrewriteSourceChangeAborts(t *testing.T) {
+	t.Parallel()
 	x := newSyncer(t)
 	s := x.linked()
 	x.api.rows["github"] = []Comment{ghComment(11, "original")}
@@ -572,6 +613,7 @@ func TestPrewriteSourceChangeAborts(t *testing.T) {
 }
 
 func TestPrewriteCopyChangeAbortsEdit(t *testing.T) {
+	t.Parallel()
 	x := newSyncer(t)
 	s := x.linked()
 	x.api.rows["github"] = []Comment{ghComment(11, "original")}
@@ -586,15 +628,23 @@ func TestPrewriteCopyChangeAbortsEdit(t *testing.T) {
 }
 
 func TestBindingAndBadConfigFailClosed(t *testing.T) {
+	t.Parallel()
 	c := testConfig(t, nil)
 	other := testConfig(t, Object{"jira_project": "OTHER"})
 	if validateState(NewState(c), other) == nil {
 		t.Fatal("state bound to another project must be rejected")
 	}
 	base := Object{"repository": "acme/test", "jira_url": "https://acme.atlassian.net", "jira_project": "ENG", "jira_issue_type": "10001"}
-	for _, bad := range []Object{{"unknown": true}, {"jira_url": "http://unsafe"}, {"selection_label": ""},
-		{"jira_create_fields": Object{"project": Object{}}}, {"max_operations": true}, {"full_rescan_hours": 0},
-		{"max_pages": 1.5}, {"comments_since": "2026-02-01T00:00:00"}} {
+	for _, bad := range []Object{
+		{"unknown": true},
+		{"jira_url": "http://unsafe"},
+		{"selection_label": ""},
+		{"jira_create_fields": Object{"project": Object{}}},
+		{"max_operations": true},
+		{"full_rescan_hours": 0},
+		{"max_pages": 1.5},
+		{"comments_since": "2026-02-01T00:00:00"},
+	} {
 		raw := Object{}
 		maps.Copy(raw, base)
 		maps.Copy(raw, bad)
@@ -608,6 +658,7 @@ func TestBindingAndBadConfigFailClosed(t *testing.T) {
 }
 
 func TestReportOmitsCommentBodies(t *testing.T) {
+	t.Parallel()
 	x := newSyncer(t)
 	s := x.linked()
 	x.api.rows["github"] = []Comment{ghComment(11, "secret comment")}
@@ -619,6 +670,7 @@ func TestReportOmitsCommentBodies(t *testing.T) {
 }
 
 func TestCommentCutoff(t *testing.T) {
+	t.Parallel()
 	x := newSyncer(t)
 	s := x.linked()
 	cutoff, _ := parseTimestamp("2026-02-01T00:00:00Z")
@@ -629,6 +681,7 @@ func TestCommentCutoff(t *testing.T) {
 }
 
 func TestStateRoundTripsAndRejectsUnknownKeys(t *testing.T) {
+	t.Parallel()
 	x := newSyncer(t)
 	s := x.linked()
 	parsed, err := ParseState(canonical(s, true))

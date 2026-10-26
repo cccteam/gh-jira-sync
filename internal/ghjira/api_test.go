@@ -38,9 +38,9 @@ func newServer(t *testing.T, respond func(r *http.Request) (int, http.Header, an
 		maps.Copy(w.Header(), headers)
 		w.WriteHeader(status)
 		if raw, isRaw := payload.([]byte); isRaw {
-			w.Write(raw)
+			_, _ = w.Write(raw)
 		} else if payload != nil {
-			json.NewEncoder(w).Encode(payload)
+			_ = json.NewEncoder(w).Encode(payload)
 		}
 	}))
 	t.Cleanup(srv.instance.Close)
@@ -67,6 +67,7 @@ func status(code int, headers http.Header) func(*http.Request) (int, http.Header
 }
 
 func TestWriteNotRetried(t *testing.T) {
+	t.Parallel()
 	srv := newServer(t, ok(nil))
 	h := srv.http()
 	srv.instance.Close() // every request now fails at the network level
@@ -77,6 +78,7 @@ func TestWriteNotRetried(t *testing.T) {
 }
 
 func TestReadRetries(t *testing.T) {
+	t.Parallel()
 	srv := newServer(t, ok(nil))
 	h := srv.http()
 	srv.instance.Close()
@@ -87,6 +89,7 @@ func TestReadRetries(t *testing.T) {
 }
 
 func TestIssueSelectionAndPRFilter(t *testing.T) {
+	t.Parallel()
 	srv := newServer(t, ok([]any{Object{"number": 1}, Object{"number": 2, "pull_request": Object{}}}))
 	issues, err := srv.client(t).Issues()
 	if err != nil {
@@ -107,6 +110,7 @@ func page(n, start int) []any {
 }
 
 func TestGitHubPaginationAndLimit(t *testing.T) {
+	t.Parallel()
 	srv := newServer(t, func(r *http.Request) (int, http.Header, any) {
 		if r.URL.Query().Get("page") == "1" {
 			return 200, nil, page(100, 0)
@@ -126,13 +130,15 @@ func TestGitHubPaginationAndLimit(t *testing.T) {
 }
 
 func TestJiraPaginationAndCommentProperties(t *testing.T) {
+	t.Parallel()
 	op := strings.Repeat("c", 64)
 	srv := newServer(t, func(r *http.Request) (int, http.Header, any) {
 		if r.URL.Path == "/rest/api/3/comment/list" {
 			// Properties come only from this documented bulk endpoint.
 			return 200, nil, Object{"isLast": true, "values": []any{
 				Object{"id": "10", "properties": []any{Object{"key": "gh-jira-sync", "value": Object{"operation": op}}}},
-				Object{"id": "11", "properties": []any{Object{"key": "sd.public.comment", "value": Object{"internal": true}}}}}}
+				Object{"id": "11", "properties": []any{Object{"key": "sd.public.comment", "value": Object{"internal": true}}}},
+			}}
 		}
 		start := r.URL.Query().Get("startAt")
 		return 200, nil, Object{"comments": []any{Object{"id": "1" + start}}, "total": 2}
@@ -151,6 +157,7 @@ func TestJiraPaginationAndCommentProperties(t *testing.T) {
 }
 
 func TestPartialCommentPropertiesFail(t *testing.T) {
+	t.Parallel()
 	srv := newServer(t, func(r *http.Request) (int, http.Header, any) {
 		if r.URL.Path == "/rest/api/3/comment/list" {
 			return 200, nil, Object{"isLast": true, "values": []any{Object{"id": "10"}}}
@@ -163,6 +170,7 @@ func TestPartialCommentPropertiesFail(t *testing.T) {
 }
 
 func TestJiraCopyCarriesIdentityProperty(t *testing.T) {
+	t.Parallel()
 	srv := newServer(t, ok(Object{"id": "300"}))
 	op := strings.Repeat("d", 64)
 	if _, err := srv.client(t).CreateComment(SideJira, Pair{JiraID: "200"}, "hello", op); err != nil {
@@ -175,6 +183,7 @@ func TestJiraCopyCarriesIdentityProperty(t *testing.T) {
 }
 
 func TestFindIssueSearchesByCreatorSinceIntent(t *testing.T) {
+	t.Parallel()
 	var jql []string
 	api := (*Client)(nil)
 	srv := newServer(t, func(r *http.Request) (int, http.Header, any) {
@@ -184,11 +193,14 @@ func TestFindIssueSearchesByCreatorSinceIntent(t *testing.T) {
 			return 200, nil, Object{"issues": []any{
 				Object{"id": "199", "properties": Object{"gh-jira-sync": Object{"operation": op, "github_id": "41"}}},
 				Object{"id": "200", "properties": Object{"gh-jira-sync": Object{"operation": op, "github_id": "42"}}},
-				Object{"id": "201"}}}
+				Object{"id": "201"},
+			}}
 		}
 		op := token(api.c, OpIssue, "42")
-		return 200, nil, Object{"id": "200", "key": "ENG-7", "fields": Object{"project": Object{"key": "ENG"}},
-			"properties": Object{"gh-jira-sync": Object{"operation": op, "github_id": "42"}}}
+		return 200, nil, Object{
+			"id": "200", "key": "ENG-7", "fields": Object{"project": Object{"key": "ENG"}},
+			"properties": Object{"gh-jira-sync": Object{"operation": op, "github_id": "42"}},
+		}
 	})
 	api = srv.client(t)
 	source := newFake().source
@@ -210,6 +222,7 @@ func TestFindIssueSearchesByCreatorSinceIntent(t *testing.T) {
 }
 
 func TestJiraCreationHasAtomicIdentity(t *testing.T) {
+	t.Parallel()
 	srv := newServer(t, ok(Object{"id": "200", "key": "ENG-1"}))
 	api := srv.client(t)
 	source := newFake().source
@@ -228,12 +241,16 @@ func TestJiraCreationHasAtomicIdentity(t *testing.T) {
 	// The description is rich text: the source link is a link, the body follows.
 	url := "https://github.com/acme/test/issues/1"
 	eq(t, string(canonical(fields["description"], false)), string(canonical(Object{"type": "doc", "version": 1, "content": []any{
-		Object{"type": "paragraph", "content": []any{Object{"type": "text", "text": "From GitHub: "},
-			Object{"type": "text", "text": url, "marks": []any{Object{"type": "link", "attrs": Object{"href": url}}}}}},
-		Object{"type": "paragraph", "content": []any{Object{"type": "text", "text": "description"}}}}}, false)))
+		Object{"type": "paragraph", "content": []any{
+			Object{"type": "text", "text": "From GitHub: "},
+			Object{"type": "text", "text": url, "marks": []any{Object{"type": "link", "attrs": Object{"href": url}}}},
+		}},
+		Object{"type": "paragraph", "content": []any{Object{"type": "text", "text": "description"}}},
+	}}, false)))
 }
 
 func TestServiceDeskProjectRejected(t *testing.T) {
+	t.Parallel()
 	srv := newServer(t, ok(Object{"projectTypeKey": "service_desk"}))
 	if srv.client(t).CheckProject() == nil {
 		t.Fatal("service desk project accepted")
@@ -241,6 +258,7 @@ func TestServiceDeskProjectRejected(t *testing.T) {
 }
 
 func TestPlainADFRoundTrip(t *testing.T) {
+	t.Parallel()
 	for _, text := range []string{"", "hello\nworld\n", "é 👋", "# **literal**", "\n\n"} {
 		got, err := adfText(decodeJSON(canonical(toADF(text), false)))
 		if err != nil || got != text {
@@ -250,6 +268,7 @@ func TestPlainADFRoundTrip(t *testing.T) {
 }
 
 func TestGoneGitHubIssueReturnsNil(t *testing.T) {
+	t.Parallel()
 	for _, code := range []int{301, 404, 410} {
 		srv := newServer(t, status(code, http.Header{"Location": {"https://elsewhere.test/"}}))
 		issue, err := srv.client(t).Issue(1)
@@ -265,6 +284,7 @@ func TestGoneGitHubIssueReturnsNil(t *testing.T) {
 }
 
 func TestGoneOrMovedJiraIssueReturnsNil(t *testing.T) {
+	t.Parallel()
 	if issue, err := newServer(t, status(404, nil)).client(t).JiraIssue("200"); err != nil || issue != nil {
 		t.Fatalf("404: %v %v", issue, err)
 	}
@@ -278,6 +298,7 @@ func TestGoneOrMovedJiraIssueReturnsNil(t *testing.T) {
 }
 
 func TestHTTPErrorCarriesStatus(t *testing.T) {
+	t.Parallel()
 	srv := newServer(t, status(301, http.Header{"Location": {"https://elsewhere.test/"}}))
 	err := srv.http().Do("GET", "/x", nil, nil)
 	code, isHTTP := httpStatus(err)
@@ -288,6 +309,7 @@ func TestHTTPErrorCarriesStatus(t *testing.T) {
 }
 
 func TestGitHubRateLimit403RetriedForReadsOnly(t *testing.T) {
+	t.Parallel()
 	calls := 0
 	srv := newServer(t, func(*http.Request) (int, http.Header, any) {
 		calls++
@@ -317,6 +339,7 @@ func TestGitHubRateLimit403RetriedForReadsOnly(t *testing.T) {
 }
 
 func TestRateLimitResetDelayIsCapped(t *testing.T) {
+	t.Parallel()
 	h := newHTTP("https://example.test", nil)
 	h.now = func() time.Time { return time.Unix(1000, 0) }
 	eq(t, h.retryDelay(http.Header{"X-Ratelimit-Reset": {"1005"}}, 0), 5*time.Second)
@@ -325,6 +348,7 @@ func TestRateLimitResetDelayIsCapped(t *testing.T) {
 }
 
 func TestInvalidJSONResponseIsReported(t *testing.T) {
+	t.Parallel()
 	srv := newServer(t, ok(nil))
 	for _, body := range []string{`{"a":1} trailing`, `{"a":`} {
 		srv.respond = func(*http.Request) (int, http.Header, any) { return 200, nil, []byte(body) }
@@ -336,6 +360,7 @@ func TestInvalidJSONResponseIsReported(t *testing.T) {
 }
 
 func TestWrongAPIShapesFailLoudly(t *testing.T) {
+	t.Parallel()
 	// A string where GitHub promises a number must fail, not read as issue 0.
 	issue := newServer(t, ok(Object{"id": 42, "number": "1", "title": "x"}))
 	if _, err := issue.client(t).Issue(1); err == nil {
@@ -363,6 +388,7 @@ func decodeComment[T interface{ comment() Comment }](t *testing.T, raw string) C
 }
 
 func TestCommentIgnoresFieldsThatDoNotDriveDecisions(t *testing.T) {
+	t.Parallel()
 	before := decodeComment[apiGitHubComment](t, `{"id":11,"body":"hi","created_at":"2026-01-01T00:00:00Z",
 		"updated_at":"2026-01-01T00:00:00Z","user":{"login":"alice","id":7},"reactions":{"total_count":0}}`)
 	after := decodeComment[apiGitHubComment](t, `{"id":11,"body":"hi","created_at":"2026-01-01T00:00:00Z",
@@ -379,6 +405,7 @@ func TestCommentIgnoresFieldsThatDoNotDriveDecisions(t *testing.T) {
 }
 
 func TestJiraRestrictionSignals(t *testing.T) {
+	t.Parallel()
 	adf := `"body":{"type":"doc","version":1,"content":[]}`
 	for raw, want := range map[string]bool{
 		`{"id":"1",` + adf + `}`:                                                                      false,

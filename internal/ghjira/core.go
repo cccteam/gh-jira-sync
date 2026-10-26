@@ -42,6 +42,7 @@ func refusedStatus(err error) (int, bool) {
 	if errors.As(err, &h) && h.Status >= 400 && h.Status < 500 && h.Status != 408 {
 		return h.Status, true
 	}
+
 	return 0, false
 }
 
@@ -108,6 +109,7 @@ func (p *ProjectStatus) mapping(option string) (ProjectStatusMapping, bool) {
 			return m, true
 		}
 	}
+
 	return ProjectStatusMapping{}, false
 }
 
@@ -118,6 +120,7 @@ func (p *ProjectStatus) backlogOption() string {
 			return m.Project
 		}
 	}
+
 	return ""
 }
 
@@ -127,6 +130,7 @@ func (p *ProjectStatus) optionFor(status string, inBacklog bool) (string, bool) 
 	if b := p.backlogOption(); b != "" && inBacklog {
 		return b, true
 	}
+
 	return p.forJira(status)
 }
 
@@ -137,10 +141,76 @@ func (p *ProjectStatus) forJira(status string) (string, bool) {
 			return m.Project, true
 		}
 	}
+
 	return "", false
 }
 
 var ownerPattern = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$`)
+
+// jiraStatuses reads a map entry's "jira": one status name or a list; the first listed
+// is the one Jira moves to.
+func jiraStatuses(v any) []string {
+	switch v := v.(type) {
+	case string:
+		return []string{v}
+	case []any:
+		names := make([]string, 0, len(v))
+		for _, s := range v {
+			name, _ := s.(string)
+			names = append(names, name)
+		}
+
+		return names
+	default:
+		return nil
+	}
+}
+
+// parseStatusMapping reads one project_status map entry, recording its option and
+// statuses as seen. It returns a problem description instead of the mapping when the
+// entry is invalid.
+func parseStatusMapping(entry any, seenOption, seenJira map[string]bool, backlogSeen bool) (m ProjectStatusMapping, problem string) {
+	e, ok := entry.(Object)
+	if !ok {
+		return m, "each map entry must be an object"
+	}
+	for k := range e {
+		if k != "project" && k != "jira" && k != "transition" && k != "jira_backlog" {
+			return m, "unknown map key " + strconv.Quote(k)
+		}
+	}
+	if m.Project, _ = e["project"].(string); strings.TrimSpace(m.Project) == "" || seenOption[m.Project] {
+		return m, "each map entry needs a distinct project option name"
+	}
+	seenOption[m.Project] = true
+	m.Jira = jiraStatuses(e["jira"])
+	if v, present := e["jira_backlog"]; present {
+		if m.JiraBacklog, ok = v.(bool); !ok {
+			return m, "jira_backlog must be boolean"
+		}
+	}
+	switch {
+	case m.JiraBacklog && (len(m.Jira) > 0 || e["transition"] != nil):
+		return m, "the jira_backlog entry " + strconv.Quote(m.Project) + " takes no Jira statuses or transition"
+	case m.JiraBacklog && backlogSeen:
+		return m, "only one map entry can be jira_backlog"
+	case !m.JiraBacklog && len(m.Jira) == 0:
+		return m, "map entry " + strconv.Quote(m.Project) + " needs at least one Jira status"
+	}
+	for _, name := range m.Jira {
+		if strings.TrimSpace(name) == "" || seenJira[name] {
+			return m, "Jira statuses must be non-empty and appear in only one map entry"
+		}
+		seenJira[name] = true
+	}
+	if v, present := e["transition"]; present {
+		if m.Transition, _ = v.(string); strings.TrimSpace(m.Transition) == "" {
+			return m, "transition must be a transition name"
+		}
+	}
+
+	return m, ""
+}
 
 func parseProjectStatus(raw any) (*ProjectStatus, error) {
 	bad := func(detail string) (*ProjectStatus, error) {
@@ -161,7 +231,7 @@ func parseProjectStatus(raw any) (*ProjectStatus, error) {
 		return bad("owner must be a GitHub organization or user name")
 	}
 	if v, present := obj["owner_type"]; present {
-		if p.OwnerType, _ = v.(string); p.OwnerType != "org" && p.OwnerType != "user" {
+		if p.OwnerType, _ = v.(string); p.OwnerType != "org" && p.OwnerType != ownerUser {
 			return bad("owner_type must be org or user")
 		}
 	}
@@ -185,55 +255,11 @@ func parseProjectStatus(raw any) (*ProjectStatus, error) {
 	seenOption, seenJira := map[string]bool{}, map[string]bool{}
 	backlogSeen := false
 	for _, entry := range entries {
-		e, ok := entry.(Object)
-		if !ok {
-			return bad("each map entry must be an object")
-		}
-		for k := range e {
-			if k != "project" && k != "jira" && k != "transition" && k != "jira_backlog" {
-				return bad("unknown map key " + strconv.Quote(k))
-			}
-		}
-		m := ProjectStatusMapping{}
-		if m.Project, _ = e["project"].(string); strings.TrimSpace(m.Project) == "" || seenOption[m.Project] {
-			return bad("each map entry needs a distinct project option name")
-		}
-		seenOption[m.Project] = true
-		// "jira" is one status name or a list; the first listed is the one Jira moves to.
-		switch v := e["jira"].(type) {
-		case string:
-			m.Jira = []string{v}
-		case []any:
-			for _, s := range v {
-				name, _ := s.(string)
-				m.Jira = append(m.Jira, name)
-			}
-		}
-		if v, present := e["jira_backlog"]; present {
-			if m.JiraBacklog, ok = v.(bool); !ok {
-				return bad("jira_backlog must be boolean")
-			}
-		}
-		switch {
-		case m.JiraBacklog && (len(m.Jira) > 0 || m.Transition != "" || e["transition"] != nil):
-			return bad("the jira_backlog entry " + strconv.Quote(m.Project) + " takes no Jira statuses or transition")
-		case m.JiraBacklog && backlogSeen:
-			return bad("only one map entry can be jira_backlog")
-		case !m.JiraBacklog && len(m.Jira) == 0:
-			return bad("map entry " + strconv.Quote(m.Project) + " needs at least one Jira status")
+		m, problem := parseStatusMapping(entry, seenOption, seenJira, backlogSeen)
+		if problem != "" {
+			return bad(problem)
 		}
 		backlogSeen = backlogSeen || m.JiraBacklog
-		for _, name := range m.Jira {
-			if strings.TrimSpace(name) == "" || seenJira[name] {
-				return bad("Jira statuses must be non-empty and appear in only one map entry")
-			}
-			seenJira[name] = true
-		}
-		if v, present := e["transition"]; present {
-			if m.Transition, _ = v.(string); strings.TrimSpace(m.Transition) == "" {
-				return bad("transition must be a transition name")
-			}
-		}
 		p.Map = append(p.Map, m)
 	}
 	if v, present := obj["jira_board"]; present {
@@ -244,6 +270,7 @@ func parseProjectStatus(raw any) (*ProjectStatus, error) {
 	if backlogSeen != (p.JiraBoard != 0) {
 		return bad("a jira_backlog map entry and jira_board go together")
 	}
+
 	return p, nil
 }
 
@@ -277,7 +304,7 @@ func ParseConfig(data []byte) (*Config, error) {
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.UseNumber()
 	if err := dec.Decode(&top); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("decode config: %w", err)
 	}
 	raw, ok := top.(Object)
 	if !ok {
@@ -288,29 +315,48 @@ func ParseConfig(data []byte) (*Config, error) {
 			return nil, syncErr("Unknown configuration keys or invalid configuration")
 		}
 	}
-	value := func(key string, fallback any) any {
-		if v, present := raw[key]; present {
-			return v
-		}
-		return fallback
-	}
 	c := &Config{}
+	for _, step := range []func(configInput, *Config) error{
+		parseEndpoints, parseIssueTypes, parseSelection, parseLimits, parseToggles, parseCreateFields, parseStatusModes,
+	} {
+		if err := step(configInput(raw), c); err != nil {
+			return nil, err
+		}
+	}
+
+	return c, nil
+}
+
+// configInput is the decoded sync.json object.
+type configInput Object
+
+// value returns the key's value, or fallback when the key is absent.
+func (in configInput) value(key string, fallback any) any {
+	if v, present := in[key]; present {
+		return v
+	}
+
+	return fallback
+}
+
+// parseEndpoints reads the repository, the GitHub and Jira URLs, and the Jira project.
+func parseEndpoints(in configInput, c *Config) error {
 	var str bool
-	if c.Repository, str = raw["repository"].(string); !str || !repositoryPattern.MatchString(c.Repository) {
-		return nil, syncErr("repository must be owner/name")
+	if c.Repository, str = in["repository"].(string); !str || !repositoryPattern.MatchString(c.Repository) {
+		return syncErr("repository must be owner/name")
 	}
 	for _, key := range []string{"github_url", "jira_url"} {
 		fallback := any(nil)
 		if key == "github_url" {
 			fallback = "https://api.github.com"
 		}
-		s, isString := value(key, fallback).(string)
+		s, isString := in.value(key, fallback).(string)
 		if !isString {
-			return nil, syncErr("%s is required", key)
+			return syncErr("%s is required", key)
 		}
 		u, err := url.Parse(s)
 		if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
-			return nil, syncErr("%s must be an HTTPS URL without credentials, query, or fragment", key)
+			return syncErr("%s must be an HTTPS URL without credentials, query, or fragment", key)
 		}
 		if key == "github_url" {
 			c.GitHubURL = strings.TrimRight(s, "/")
@@ -318,126 +364,171 @@ func ParseConfig(data []byte) (*Config, error) {
 			c.JiraURL = strings.TrimRight(s, "/")
 		}
 	}
-	if c.JiraProject, str = raw["jira_project"].(string); !str || !projectPattern.MatchString(c.JiraProject) {
-		return nil, syncErr("jira_project must be a project key")
+	if c.JiraProject, str = in["jira_project"].(string); !str || !projectPattern.MatchString(c.JiraProject) {
+		return syncErr("jira_project must be a project key")
 	}
-	if c.JiraIssueType, str = raw["jira_issue_type"].(string); !str || !isDigits(c.JiraIssueType) {
-		return nil, syncErr("jira_issue_type must be an issue type ID string")
+
+	return nil
+}
+
+// parseIssueTypes reads the default Jira issue type and the per-GitHub-type mapping.
+func parseIssueTypes(in configInput, c *Config) error {
+	var str bool
+	if c.JiraIssueType, str = in["jira_issue_type"].(string); !str || !isDigits(c.JiraIssueType) {
+		return syncErr("jira_issue_type must be an issue type ID string")
 	}
 	c.JiraIssueTypes = map[string]string{}
-	if raw, present := raw["jira_issue_types"]; present && raw != nil {
-		types, ok := raw.(Object)
-		if !ok {
-			return nil, syncErr("jira_issue_types must map GitHub issue type names to Jira issue type ID strings")
-		}
-		for name, id := range types {
-			idString, _ := id.(string)
-			if strings.TrimSpace(name) == "" || !isDigits(idString) {
-				return nil, syncErr("jira_issue_types must map GitHub issue type names to Jira issue type ID strings")
-			}
-			for existing := range c.JiraIssueTypes {
-				if strings.EqualFold(existing, name) {
-					return nil, syncErr("jira_issue_types lists %q twice (names ignore case)", name)
-				}
-			}
-			c.JiraIssueTypes[name] = idString
-		}
+	raw, present := in["jira_issue_types"]
+	if !present || raw == nil {
+		return nil
 	}
-	switch label := value("selection_label", "sync-jira").(type) {
+	types, ok := raw.(Object)
+	if !ok {
+		return syncErr("jira_issue_types must map GitHub issue type names to Jira issue type ID strings")
+	}
+	// Names match GitHub issue types ignoring case, so two that differ only in case
+	// would be ambiguous.
+	accepted := make([]string, 0, len(types))
+	for name, id := range types {
+		idString, _ := id.(string)
+		if strings.TrimSpace(name) == "" || !isDigits(idString) {
+			return syncErr("jira_issue_types must map GitHub issue type names to Jira issue type ID strings")
+		}
+		if slices.ContainsFunc(accepted, func(other string) bool { return strings.EqualFold(other, name) }) {
+			return syncErr("jira_issue_types lists %q twice (names ignore case)", name)
+		}
+		accepted = append(accepted, name)
+		c.JiraIssueTypes[name] = idString
+	}
+
+	return nil
+}
+
+// parseSelection reads which GitHub issues are created in Jira.
+func parseSelection(in configInput, c *Config) error {
+	switch label := in.value("selection_label", "sync-jira").(type) {
 	case nil:
 	case string:
 		if strings.TrimFunc(label, isPythonSpace) == "" || strings.Contains(label, ",") {
-			return nil, syncErr("selection_label must be one label or null (all issues)")
+			return syncErr("selection_label must be one label or null (all issues)")
 		}
 		c.SelectionLabel = &label
 	default:
-		return nil, syncErr("selection_label must be one label or null (all issues)")
+		return syncErr("selection_label must be one label or null (all issues)")
 	}
-	c.IssueState, _ = value("issue_state", "open").(string)
-	if c.IssueState != "open" && c.IssueState != "closed" && c.IssueState != "all" {
-		return nil, syncErr("issue_state must be open, closed, or all")
+	c.IssueState, _ = in.value("issue_state", stateOpen).(string)
+	if c.IssueState != stateOpen && c.IssueState != stateClosed && c.IssueState != "all" {
+		return syncErr("issue_state must be open, closed, or all")
 	}
+
+	return nil
+}
+
+// parseLimits reads the positive integer limits.
+func parseLimits(in configInput, c *Config) error {
 	for _, field := range []struct {
 		key      string
 		fallback int
 		target   *int
 	}{{"max_operations", 20, &c.MaxOperations}, {"max_pages", 100, &c.MaxPages}, {"full_rescan_hours", 24, &c.FullRescanHours}} {
-		n, ok := strictInt(value(field.key, json.Number(strconv.Itoa(field.fallback))))
+		n, ok := strictInt(in.value(field.key, json.Number(strconv.Itoa(field.fallback))))
 		if !ok || n < 1 {
-			return nil, syncErr("%s must be a positive integer", field.key)
+			return syncErr("%s must be a positive integer", field.key)
 		}
 		*field.target = n
 	}
-	if c.Comments, ok = value("comments", true).(bool); !ok {
-		return nil, syncErr("comments must be boolean")
+
+	return nil
+}
+
+// parseToggles reads comment and parent sync, sub-tasks, Jira → GitHub creation, and
+// the comment cutoff.
+func parseToggles(in configInput, c *Config) error {
+	var ok bool
+	if c.Comments, ok = in.value("comments", true).(bool); !ok {
+		return syncErr("comments must be boolean")
 	}
-	if c.SyncParents, ok = value("sync_parents", false).(bool); !ok {
-		return nil, syncErr("sync_parents must be boolean")
+	if c.SyncParents, ok = in.value("sync_parents", false).(bool); !ok {
+		return syncErr("sync_parents must be boolean")
 	}
-	switch id := value("jira_subtask_type", nil).(type) {
+	switch id := in.value("jira_subtask_type", nil).(type) {
 	case nil:
 	case string:
 		if !isDigits(id) {
-			return nil, syncErr("jira_subtask_type must be a sub-task issue type ID string or null")
+			return syncErr("jira_subtask_type must be a sub-task issue type ID string or null")
 		}
 		// A sub-task's parent is fixed at creation and then kept by parent sync.
 		if !c.SyncParents {
-			return nil, syncErr("jira_subtask_type needs sync_parents")
+			return syncErr("jira_subtask_type needs sync_parents")
 		}
 		c.JiraSubtaskType = id
 	default:
-		return nil, syncErr("jira_subtask_type must be a sub-task issue type ID string or null")
+		return syncErr("jira_subtask_type must be a sub-task issue type ID string or null")
 	}
-	switch label := value("jira_selection_label", nil).(type) {
+	switch label := in.value("jira_selection_label", nil).(type) {
 	case nil:
 	case string:
 		// Jira labels cannot contain spaces; quotes would break the JQL that selects them.
 		if label == "" || strings.ContainsAny(label, " \"\\") {
-			return nil, syncErr("jira_selection_label must be one Jira label (no spaces or quotes) or null")
+			return syncErr("jira_selection_label must be one Jira label (no spaces or quotes) or null")
 		}
 		c.JiraSelectionLabel = &label
 	default:
-		return nil, syncErr("jira_selection_label must be one Jira label (no spaces or quotes) or null")
+		return syncErr("jira_selection_label must be one Jira label (no spaces or quotes) or null")
 	}
-	if since := value("comments_since", nil); since != nil {
+	if since := in.value("comments_since", nil); since != nil {
 		s, isString := since.(string)
 		t, err := parseTimestamp(s)
 		if !isString || err != nil {
-			return nil, syncErr("comments_since must be an ISO timestamp with timezone")
+			return syncErr("comments_since must be an ISO timestamp with timezone")
 		}
 		c.CommentsSince = &t
 	}
-	extra, ok := value("jira_create_fields", Object{}).(Object)
+
+	return nil
+}
+
+// parseCreateFields reads extra fields for new Jira issues, which may not replace the
+// ones the sync sets.
+func parseCreateFields(in configInput, c *Config) error {
+	extra, ok := in.value("jira_create_fields", Object{}).(Object)
 	if !ok {
-		return nil, syncErr("jira_create_fields cannot override project, issue type, summary, or description")
+		return syncErr("jira_create_fields cannot override project, issue type, summary, or description")
 	}
 	for _, k := range []string{"summary", "description", "project", "issuetype"} {
 		if _, present := extra[k]; present {
-			return nil, syncErr("jira_create_fields cannot override project, issue type, summary, or description")
+			return syncErr("jira_create_fields cannot override project, issue type, summary, or description")
 		}
 	}
 	c.JiraCreateFields = extra
-	if raw, present := raw["status_sync"]; present && raw != nil {
+
+	return nil
+}
+
+// parseStatusModes reads status_sync or project_status, which exclude each other.
+func parseStatusModes(in configInput, c *Config) error {
+	if raw, present := in["status_sync"]; present && raw != nil {
 		statusSync, ok := raw.(Object)
 		closeName, _ := statusSync["close_transition"].(string)
 		reopenName, _ := statusSync["reopen_transition"].(string)
 		if !ok || len(statusSync) != 2 || strings.TrimSpace(closeName) == "" || strings.TrimSpace(reopenName) == "" {
-			return nil, syncErr("status_sync must be null or {\"close_transition\": name, \"reopen_transition\": name}")
+			return syncErr("status_sync must be null or {\"close_transition\": name, \"reopen_transition\": name}")
 		}
 		c.StatusSync = &StatusSync{CloseTransition: closeName, ReopenTransition: reopenName}
 	}
-	if raw, present := raw["project_status"]; present && raw != nil {
+	if raw, present := in["project_status"]; present && raw != nil {
 		if c.StatusSync != nil {
 			// Both would move Jira when a GitHub issue closes, possibly to different statuses.
-			return nil, syncErr("Use either status_sync or project_status, not both")
+			return syncErr("Use either status_sync or project_status, not both")
 		}
 		ps, err := parseProjectStatus(raw)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		c.ProjectStatus = ps
 	}
-	return c, nil
+
+	return nil
 }
 
 // strictInt accepts only JSON integers, as Python's `type(x) is int` does.
@@ -447,6 +538,7 @@ func strictInt(v any) (int, bool) {
 		return 0, false
 	}
 	i, err := strconv.Atoi(n.String())
+
 	return i, err == nil
 }
 
@@ -459,6 +551,7 @@ func isDigits(s string) bool {
 			return false
 		}
 	}
+
 	return true
 }
 
@@ -473,6 +566,7 @@ func isPythonLineBreak(r rune) bool {
 	case '\n', '\r', '\v', '\f', 0x1c, 0x1d, 0x1e, 0x85, 0x2028, 0x2029:
 		return true
 	}
+
 	return false
 }
 
@@ -495,13 +589,16 @@ func parseTimestamp(s string) (time.Time, error) {
 			}
 		}
 	}
+
 	return time.Time{}, fmt.Errorf("invalid timestamp")
 }
 
 // binding identifies the deployment; changing any of these fields needs new state.
 func binding(c *Config) string {
-	return digest(Object{"repository": c.Repository, "github_url": c.GitHubURL,
-		"jira_url": c.JiraURL, "jira_project": c.JiraProject})
+	return digest(Object{
+		"repository": c.Repository, "github_url": c.GitHubURL,
+		"jira_url": c.JiraURL, "jira_project": c.JiraProject,
+	})
 }
 
 // token is the stable operation identity for one source object.
@@ -527,14 +624,19 @@ func toADF(text string) Object {
 		}
 		content[i] = Object{"type": "paragraph", "content": children}
 	}
+
 	return Object{"type": "doc", "version": 1, "content": content}
 }
 
-var plainMarks = map[string]bool{"strong": true, "em": true, "strike": true, "underline": true,
-	"code": true, "textColor": true, "backgroundColor": true, "subsup": true}
+var plainMarks = map[string]bool{
+	"strong": true, "em": true, "strike": true, "underline": true,
+	"code": true, "textColor": true, "backgroundColor": true, "subsup": true,
+}
 
-var blockSeparators = map[string]string{"doc": "\n", "paragraph": "", "heading": "", "blockquote": "\n",
-	"codeBlock": "", "bulletList": "\n", "orderedList": "\n", "listItem": "\n"}
+var blockSeparators = map[string]string{
+	"doc": "\n", "paragraph": "", "heading": "", "blockquote": "\n",
+	"codeBlock": "", "bulletList": "\n", "orderedList": "\n", "listItem": "\n",
+}
 
 // adfText renders readable plain text and never silently discards unsupported nodes or marks.
 func adfText(doc any) (string, error) {
@@ -542,6 +644,7 @@ func adfText(doc any) (string, error) {
 	if !ok || d["type"] != "doc" || !isOne(d["version"]) {
 		return "", syncErr("Unsupported Jira comment document")
 	}
+
 	return renderADF(d)
 }
 
@@ -565,6 +668,7 @@ func renderADF(node Object) (string, error) {
 				return "", syncErr("Unsupported Jira comment mark")
 			}
 		}
+
 		return text, nil
 	case "hardBreak":
 		return "\n", nil
@@ -574,6 +678,7 @@ func renderADF(node Object) (string, error) {
 		if text, ok := asObject(node["attrs"])["text"].(string); ok {
 			return text, nil
 		}
+
 		return "[mention]", nil
 	case "emoji":
 		attrs := asObject(node["attrs"])
@@ -583,6 +688,7 @@ func renderADF(node Object) (string, error) {
 		if short, ok := attrs["shortName"].(string); ok {
 			return short, nil
 		}
+
 		return "[emoji]", nil
 	}
 	separator, block := blockSeparators[t]
@@ -605,6 +711,7 @@ func renderADF(node Object) (string, error) {
 	if t == "listItem" {
 		return "- " + text, nil
 	}
+
 	return text, nil
 }
 
@@ -646,6 +753,7 @@ func trailingMarker(comment Comment) string {
 			n, ok := node.(Object)
 			if !ok || n["type"] != "paragraph" {
 				texts = append(texts, nil)
+
 				continue
 			}
 			var b strings.Builder
@@ -671,13 +779,15 @@ func trailingMarker(comment Comment) string {
 	if m := hiddenMarkerPattern.FindStringSubmatch(last); m != nil && comment.Side == SideGitHub {
 		return m[1]
 	}
+
 	return ""
 }
 
-func firstRune(s string) (rune, int) {
+func firstRune(s string) (r rune, size int) {
 	for _, r := range s {
 		return r, len(string(r))
 	}
+
 	return 0, 0
 }
 
@@ -687,6 +797,7 @@ func hasMarker(comment Comment, op string) bool {
 	if op == "" {
 		return found != ""
 	}
+
 	return found == op
 }
 
@@ -698,6 +809,7 @@ func eligibleComment(c *Config, comment Comment) (bool, error) {
 	if err != nil {
 		return false, syncErr("Comment creation time is missing or invalid")
 	}
+
 	return !created.Before(*c.CommentsSince), nil
 }
 
@@ -706,11 +818,13 @@ func eligibleComment(c *Config, comment Comment) (bool, error) {
 
 func asObject(v any) Object {
 	o, _ := v.(Object)
+
 	return o
 }
 
 func list(v any) []any {
 	l, _ := v.([]any)
+
 	return l
 }
 
@@ -720,10 +834,12 @@ func isOne(v any) bool {
 		return x == 1
 	case json.Number:
 		f, err := x.Float64()
+
 		return err == nil && f == 1
 	case float64:
 		return x == 1
 	}
+
 	return false
 }
 
@@ -739,5 +855,6 @@ func (c *Config) issueTypeFor(source *GitHubIssue) string {
 			}
 		}
 	}
+
 	return c.JiraIssueType
 }

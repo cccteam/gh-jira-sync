@@ -1,0 +1,22 @@
+name: Release Please
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  release-please:
+    uses: cccteam/github-workflows/.github/workflows/release-please.yml@ce3b6a61c4b88c82d3c0c1760dc1a3f5a2731021 # v8.2.3
+    permissions:
+      contents: write
+      pull-requests: write
+    with:
+      config-file: release-please-config.json
+      manifest-file: .release-please-manifest.json
+    secrets:
+      RELEASE_PLEASE_APP_CLIENT_ID: ${{ secrets.RELEASE_PLEASE_APP_CLIENT_ID }}
+      RELEASE_PLEASE_APP_PEM: ${{ secrets.RELEASE_PLEASE_APP_PEM }}

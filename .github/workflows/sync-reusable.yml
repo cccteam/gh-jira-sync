@@ -1,6 +1,11 @@
 name: gh-jira-sync
-# Reusable workflow: call it from any repository to run one sync deployment.
-# Each deployment needs its own config file and its own state branch.
+# Reusable workflow: call it from any repository, in any organization, to run one sync
+# deployment. Each deployment needs its own config file and its own state branch.
+#
+# Call a release, and that release's binary runs:
+#   uses: cccteam/gh-jira-sync/.github/workflows/sync-reusable.yml@vX.Y.Z
+# The binary is downloaded from the release and checked against its checksum and its
+# build provenance attestation before any sync secret is in the environment.
 on:
   workflow_call:
     inputs:
@@ -20,16 +25,24 @@ on:
         description: Allow first-run state initialization
         type: boolean
         default: false
-      tool-ref:
-        description: Ref of cccteam/gh-jira-sync to build; pin it to the same ref as `uses:`
+      version:
+        description: >-
+          Release of gh-jira-sync to run. Defaults to the release this workflow file
+          belongs to, so `uses: ...@vX.Y.Z` runs vX.Y.Z.
         type: string
-        default: main
+        default: v0.1.0 # x-release-please-version
+      tool-ref:
+        description: >-
+          Build cccteam/gh-jira-sync from this ref instead of downloading a release, for
+          testing unreleased commits. Leave empty in normal use.
+        type: string
+        default: ''
       app-client-id:
         description: >-
-          Client ID of a GitHub App that supplies every GitHub token: Contents read on
-          cccteam/gh-jira-sync, Issues read/write on the configured repository, and
-          organization Projects read/write for project_status. Each run mints a separate
-          short-lived token per purpose, limited to that repository and permission.
+          Client ID of a GitHub App, installed in the synced repository's organization,
+          that supplies the GitHub tokens: Issues read/write on the configured repository,
+          and organization Projects read/write for project_status. Each run mints a
+          separate short-lived token per purpose, limited to that repository and permission.
         type: string
         default: ''
     secrets:
@@ -50,7 +63,7 @@ on:
           App, the caller's GITHUB_TOKEN is used, which only covers the calling repository.
         required: false
       tool-token:
-        description: Token with read access to cccteam/gh-jira-sync, for callers in other repositories without the App
+        description: Deprecated and ignored; cccteam/gh-jira-sync is public, so no token is needed to fetch it.
         required: false
       project-token:
         description: >-
@@ -74,7 +87,7 @@ jobs:
     steps:
       # The calling repository: its config, and the remote that holds the state branch.
       # The workflow's own token pushes the state branch; App tokens never need contents write.
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # Which repository and project owner to mint tokens for comes from the config.
       - name: Read config
         id: config
@@ -92,34 +105,56 @@ jobs:
             echo "repo-name=${repo#*/}"
             echo "project-owner=$project_owner"
           } >> "$GITHUB_OUTPUT"
-      # Each App token below covers one purpose, one repository or owner, and only the
-      # permissions it needs. They expire within an hour and are revoked when the job ends.
-      - name: Tool token
-        id: tool-token
-        if: inputs.app-client-id != '' && github.repository != 'cccteam/gh-jira-sync'
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        with:
-          client-id: ${{ inputs.app-client-id }}
-          private-key: ${{ secrets.app-private-key }}
-          owner: cccteam
-          repositories: gh-jira-sync
-          permission-contents: read
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      # A release binary, verified, unless tool-ref asks for a build from source.
+      - name: Download release
+        if: inputs.tool-ref == ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::version must be a release tag such as v1.2.3, not $VERSION"
+            exit 1
+          fi
+          case "$RUNNER_OS/$RUNNER_ARCH" in
+            Linux/X64) platform=linux_amd64 ;;
+            Linux/ARM64) platform=linux_arm64 ;;
+            macOS/X64) platform=darwin_amd64 ;;
+            macOS/ARM64) platform=darwin_arm64 ;;
+            *) echo "::error::No gh-jira-sync release build for $RUNNER_OS/$RUNNER_ARCH"; exit 1 ;;
+          esac
+          archive="gh-jira-sync_${VERSION#v}_${platform}.tar.gz"
+          dir="$RUNNER_TEMP/gh-jira-sync-release"
+          gh release download "$VERSION" --repo cccteam/gh-jira-sync \
+            --pattern "$archive" --pattern checksums.txt --dir "$dir"
+          (cd "$dir" && grep -F "  $archive" checksums.txt | shasum -a 256 --check --strict)
+          # Proves the archive was built by this repository's release workflow from the tag.
+          gh attestation verify "$dir/$archive" --repo cccteam/gh-jira-sync \
+            --signer-workflow cccteam/gh-jira-sync/.github/workflows/release-assets.yml
+          tar -xzf "$dir/$archive" -C "$dir"
+          mv "$dir/${archive%.tar.gz}/gh-jira-sync" "$RUNNER_TEMP/gh-jira-sync"
+          rm -rf "$dir"
+          "$RUNNER_TEMP/gh-jira-sync" -version
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: inputs.tool-ref != ''
         with:
           repository: cccteam/gh-jira-sync
           ref: ${{ inputs.tool-ref }}
           path: .gh-jira-sync-tool
-          token: ${{ secrets.tool-token || steps.tool-token.outputs.token || github.token }}
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        if: inputs.tool-ref != ''
         with:
           go-version-file: .gh-jira-sync-tool/go.mod
           cache: false
       # Built before any sync secret is in the environment.
-      - name: Build
+      - name: Build from source
+        if: inputs.tool-ref != ''
         run: |
           go build -C .gh-jira-sync-tool -o "$RUNNER_TEMP/gh-jira-sync" .
           rm -rf .gh-jira-sync-tool
+      # Each App token below covers one purpose, one repository or owner, and only the
+      # permissions it needs. They expire within an hour and are revoked when the job ends.
       - name: Issues token
         id: issues-token
         if: inputs.app-client-id != ''

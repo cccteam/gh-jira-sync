@@ -67,9 +67,11 @@ type Entry struct {
 
 func (e *Entry) block(reason string) { e.Kind, e.Reason = KindBlocked, reason }
 
+// NewState returns an empty journal bound to the config's endpoints and projects.
 func NewState(c *Config) *State {
 	s := &State{Version: 2, Binding: binding(c)}
 	s.ensureMaps()
+
 	return s
 }
 
@@ -111,6 +113,7 @@ func validateState(s *State, c *Config) error {
 			seen[side][id] = true
 		}
 	}
+
 	return nil
 }
 
@@ -127,6 +130,7 @@ func content(comment Comment, link Link) (string, error) {
 	if !strings.HasPrefix(text, link.Prefix) || !strings.HasSuffix(text, link.Suffix) || len(text) < len(link.Prefix)+len(link.Suffix) {
 		return "", syncErr("Copied comment attribution/marker changed; review manually")
 	}
+
 	return text[len(link.Prefix) : len(text)-len(link.Suffix)], nil
 }
 
@@ -134,6 +138,7 @@ func rendered(side Side, text string, link Link) string {
 	if side == link.Origin {
 		return text
 	}
+
 	return link.Prefix + text + link.Suffix
 }
 
@@ -147,18 +152,20 @@ func retryNote(e *Entry, old *Operation) {
 // who wrote the original and where; their identity is invisible: a hidden HTML
 // comment ending GitHub copies, a comment property on Jira copies. Each link stores
 // its own prefix and suffix, so copies made in older formats keep working.
-func envelope(c *Config, comment Comment, pair Pair, op string) (string, string) {
+func envelope(c *Config, comment Comment, pair Pair, op string) (prefix, suffix string) {
 	author := comment.Author
 	if comment.Side == SideJira {
 		if author == "" {
 			author = "Someone"
 		}
 		link := c.JiraURL + "/browse/" + pair.JiraKey + "?focusedCommentId=" + comment.ID
+
 		return "**" + markdownEscape(author) + "** wrote in [Jira](" + link + "):\n\n", "\n\n" + hiddenMarker(op)
 	}
 	if author == "" {
 		author = "Someone"
 	}
+
 	return author + " wrote on GitHub (" + comment.HTMLURL + "):\n\n", ""
 }
 
@@ -185,6 +192,7 @@ func quiet(c *Config, s *State, n string, stamp Stamp, now time.Time) bool {
 			return false
 		}
 	}
+
 	return true
 }
 
@@ -194,6 +202,7 @@ func sortedKeys[V any](m map[string]V) []string {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
+
 	return keys
 }
 
@@ -205,34 +214,92 @@ func Plan(c *Config, s *State, api API, now time.Time) ([]*Entry, error) {
 	if err := api.CheckProject(); err != nil {
 		return nil, err
 	}
-	var project *ProjectSnapshot
-	if c.ProjectStatus != nil {
-		var err error
-		if project, err = api.Project(); err != nil {
-			return nil, err
-		}
-		// A mapped option missing from the project is a configuration error for every pair.
-		for _, m := range c.ProjectStatus.Map {
-			if _, ok := project.Options[m.Project]; !ok {
-				return nil, syncErr("project_status maps option %q, which the project's %s field does not have",
-					m.Project, c.ProjectStatus.Field)
-			}
-		}
-		if c.ProjectStatus.backlogOption() != "" {
-			if project.Backlog, err = api.BacklogIssues(); err != nil {
-				return nil, err
-			}
-		}
-	}
-	var entries []*Entry
-	visited := map[string]bool{}
-	listed, err := api.Issues()
+	project, err := readProject(c, api)
 	if err != nil {
 		return nil, err
 	}
-	// Selected issues in API order, then tracked pairs not selected, by number.
-	var order []string
-	issues := map[string]*GitHubIssue{}
+	order, issues, err := orderIssues(s, api)
+	if err != nil {
+		return nil, err
+	}
+	var ghParents map[int]int
+	if c.SyncParents {
+		if ghParents, err = gitHubParents(s, api, issues); err != nil {
+			return nil, err
+		}
+	}
+	p := &pairPlanner{c: c, s: s, api: api, project: project, ghParents: ghParents, visited: map[string]bool{}, now: now}
+	var entries []*Entry
+	for _, n := range order {
+		source := issues[n]
+		if source != nil && source.PullRequest != nil {
+			continue
+		}
+		var planned []*Entry
+		if pair, tracked := s.Pairs[n]; tracked {
+			planned, err = p.planPair(n, pair, source)
+		} else {
+			planned, err = p.planUntracked(source, issues)
+		}
+		if err != nil {
+			return nil, err
+		}
+		entries = append(entries, planned...)
+	}
+	if c.JiraSelectionLabel != nil {
+		reverse, err := planJiraIssues(c, s, api, p.visited)
+		if err != nil {
+			return nil, err
+		}
+		entries = append(entries, reverse...)
+	}
+	for _, op := range sortedKeys(s.Operations) {
+		if r := s.Operations[op]; r.Status == StatusPending && !p.visited[op] {
+			entries = append(entries, &Entry{
+				Kind: KindBlocked, Operation: op, GitHub: r.GitHub,
+				Reason: "Pending operation source absent or excluded; review journal",
+			})
+		}
+	}
+	deferOverBudget(c, entries)
+
+	return entries, nil
+}
+
+// readProject reads the GitHub Project in project status mode, and the board's
+// backlog when an option mirrors it; nil without project status.
+func readProject(c *Config, api API) (*ProjectSnapshot, error) {
+	if c.ProjectStatus == nil {
+		return nil, nil
+	}
+	project, err := api.Project()
+	if err != nil {
+		return nil, err
+	}
+	// A mapped option missing from the project is a configuration error for every pair.
+	for _, m := range c.ProjectStatus.Map {
+		if _, ok := project.Options[m.Project]; !ok {
+			return nil, syncErr("project_status maps option %q, which the project's %s field does not have",
+				m.Project, c.ProjectStatus.Field)
+		}
+	}
+	if c.ProjectStatus.backlogOption() != "" {
+		if project.Backlog, err = api.BacklogIssues(); err != nil {
+			return nil, err
+		}
+	}
+
+	return project, nil
+}
+
+// orderIssues returns selected issues in API order, then tracked pairs not selected,
+// by number; a tracked issue that is deleted or transferred maps to nil.
+func orderIssues(s *State, api API) (order []string, issues map[string]*GitHubIssue, err error) {
+	listed, err := api.Issues()
+	if err != nil {
+		return nil, nil, err
+	}
+	issues = map[string]*GitHubIssue{}
 	for i := range listed {
 		n := strconv.Itoa(listed[i].Number)
 		if _, dup := issues[n]; !dup {
@@ -248,119 +315,18 @@ func Plan(c *Config, s *State, api API, now time.Time) ([]*Entry, error) {
 		}
 		issue, err := api.Issue(s.Pairs[n].GitHub)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		order = append(order, n)
-		issues[n] = issue // nil when deleted or transferred
+		issues[n] = issue
 	}
-	var ghParents map[int]int
-	if c.SyncParents {
-		if ghParents, err = gitHubParents(s, api, issues); err != nil {
-			return nil, err
-		}
-	}
-	for _, n := range order {
-		source := issues[n]
-		if source != nil && source.PullRequest != nil {
-			continue
-		}
-		number, _ := strconv.Atoi(n)
-		pair, tracked := s.Pairs[n]
-		// An issue this tool created from Jira ends with its hidden marker. Until it is
-		// linked (normally the same run, or recovery after a lost response), creating a
-		// Jira issue for it would duplicate its Jira origin.
-		if !tracked && trailingMarker(Comment{Side: SideGitHub, Body: source.Body}) != "" {
-			op := trailingMarker(Comment{Side: SideGitHub, Body: source.Body})
-			if record, ok := s.Operations[op]; !ok || record.Kind != OpJiraIssue {
-				entries = append(entries, &Entry{GitHub: number, Operation: op, Kind: KindBlocked,
-					Reason: "GitHub issue was created from Jira but is not linked or journaled; restore state"})
-			}
-			continue
-		}
-		if !tracked {
-			e, err := planIssue(c, s, api, source, issues)
-			if err != nil {
-				return nil, err
-			}
-			visited[e.Operation] = true
-			// Newly created/adopted pairs receive comments on the next run.
-			entries = append(entries, e)
-			continue
-		}
-		issueOp := token(c, OpIssue, pair.GitHubID)
-		// One vanished pair is reported for review; it must not stall every other pair.
-		var jira *JiraIssue
-		if source != nil && source.idString() == pair.GitHubID {
-			if jira, err = api.JiraIssue(pair.JiraID); err != nil {
-				return nil, err
-			}
-		}
-		if jira == nil || jira.ID != pair.JiraID {
-			entries = append(entries, &Entry{GitHub: number, Operation: issueOp, Kind: KindUnavailable,
-				Reason: "Linked issue deleted, transferred, moved, or inaccessible; comment sync paused"})
-			continue
-		}
-		// Status reads only the issues already fetched, so it is checked every run.
-		statusEntry, err := planStatus(c, api, pair, source, jira)
-		if err != nil {
-			return nil, err
-		}
-		if statusEntry != nil {
-			entries = append(entries, statusEntry)
-		}
-		// After open/closed, which never writes Jira, so its pre-write checks still hold.
-		if project != nil {
-			projectEntry, err := planProjectStatus(c, api, project, pair, source, jira)
-			if err != nil {
-				return nil, err
-			}
-			if projectEntry != nil {
-				entries = append(entries, projectEntry)
-			}
-		}
-		if c.SyncParents {
-			if parentEntry := planParent(c, s, pair, source, jira, ghParents); parentEntry != nil {
-				entries = append(entries, parentEntry)
-			}
-		}
-		if !c.Comments {
-			continue
-		}
-		stamp := Stamp{GitHub: source.UpdatedAt, Jira: jira.Fields.Updated}
-		if quiet(c, s, n, stamp, now) {
-			entries = append(entries, &Entry{GitHub: number, Operation: issueOp, Kind: KindUnchanged,
-				Reason: "No issue activity since full scan at " + s.Reconciled[n].Scanned})
-			continue
-		}
-		pairEntries, err := planComments(c, s, api, pair, visited)
-		if err != nil {
-			return nil, err
-		}
-		entries = append(entries, pairEntries...)
-		// A pair with nothing to do or review may skip comment reads until its issues change.
-		clean := stamp.GitHub != "" && stamp.Jira != ""
-		for _, e := range pairEntries {
-			clean = clean && (e.Kind == KindNoop || e.Kind == KindExcluded)
-		}
-		if clean {
-			stamp.Scanned = now.UTC().Format("2006-01-02T15:04:05.000000-07:00")
-			entries = append(entries, &Entry{GitHub: number, Operation: issueOp, Kind: KindReconciled, stamp: stamp})
-		}
-	}
-	if c.JiraSelectionLabel != nil {
-		reverse, err := planJiraIssues(c, s, api, visited)
-		if err != nil {
-			return nil, err
-		}
-		entries = append(entries, reverse...)
-	}
-	for _, op := range sortedKeys(s.Operations) {
-		if r := s.Operations[op]; r.Status == StatusPending && !visited[op] {
-			entries = append(entries, &Entry{Kind: KindBlocked, Operation: op, GitHub: r.GitHub,
-				Reason: "Pending operation source absent or excluded; review journal"})
-		}
-	}
-	// Writes past the budget wait for a later pass, so a large backfill still makes progress.
+
+	return order, issues, nil
+}
+
+// deferOverBudget turns writes past max_operations into deferred entries, so a large
+// backfill still makes progress over several runs.
+func deferOverBudget(c *Config, entries []*Entry) {
 	budget := c.MaxOperations
 	for _, e := range entries {
 		if e.Kind.writes() {
@@ -371,6 +337,120 @@ func Plan(c *Config, s *State, api API, now time.Time) ([]*Entry, error) {
 			}
 		}
 	}
+}
+
+// pairPlanner holds what planning every issue in one run shares.
+type pairPlanner struct {
+	c         *Config
+	s         *State
+	api       API
+	project   *ProjectSnapshot
+	ghParents map[int]int
+	visited   map[string]bool // operations planned this run
+	now       time.Time
+}
+
+// planUntracked plans creating (or recovering) the Jira issue for an issue not yet
+// linked.
+func (p *pairPlanner) planUntracked(source *GitHubIssue, issues map[string]*GitHubIssue) ([]*Entry, error) {
+	// An issue this tool created from Jira ends with its hidden marker. Until it is
+	// linked (normally the same run, or recovery after a lost response), creating a
+	// Jira issue for it would duplicate its Jira origin.
+	if op := trailingMarker(Comment{Side: SideGitHub, Body: source.Body}); op != "" {
+		if record, ok := p.s.Operations[op]; !ok || record.Kind != OpJiraIssue {
+			return []*Entry{{
+				GitHub: source.Number, Operation: op, Kind: KindBlocked,
+				Reason: "GitHub issue was created from Jira but is not linked or journaled; restore state",
+			}}, nil
+		}
+
+		return nil, nil
+	}
+	e, err := planIssue(p.c, p.s, p.api, source, issues)
+	if err != nil {
+		return nil, err
+	}
+	p.visited[e.Operation] = true
+
+	// Newly created/adopted pairs receive comments on the next run.
+	return []*Entry{e}, nil
+}
+
+// planPair plans status, project status, parent, and comments for a linked pair.
+func (p *pairPlanner) planPair(n string, pair Pair, source *GitHubIssue) ([]*Entry, error) {
+	issueOp := token(p.c, OpIssue, pair.GitHubID)
+	// One vanished pair is reported for review; it must not stall every other pair.
+	var jira *JiraIssue
+	if source != nil && source.idString() == pair.GitHubID {
+		var err error
+		if jira, err = p.api.JiraIssue(pair.JiraID); err != nil {
+			return nil, err
+		}
+	}
+	if jira == nil || jira.ID != pair.JiraID {
+		return []*Entry{{
+			GitHub: pair.GitHub, Operation: issueOp, Kind: KindUnavailable,
+			Reason: "Linked issue deleted, transferred, moved, or inaccessible; comment sync paused",
+		}}, nil
+	}
+	var entries []*Entry
+	// Status reads only the issues already fetched, so it is checked every run.
+	statusEntry, err := planStatus(p.c, p.api, pair, source, jira)
+	if err != nil {
+		return nil, err
+	}
+	if statusEntry != nil {
+		entries = append(entries, statusEntry)
+	}
+	// After open/closed, which never writes Jira, so its pre-write checks still hold.
+	if p.project != nil {
+		projectEntry, err := planProjectStatus(p.c, p.api, p.project, pair, source, jira)
+		if err != nil {
+			return nil, err
+		}
+		if projectEntry != nil {
+			entries = append(entries, projectEntry)
+		}
+	}
+	if p.c.SyncParents {
+		if parentEntry := planParent(p.c, p.s, pair, source, jira, p.ghParents); parentEntry != nil {
+			entries = append(entries, parentEntry)
+		}
+	}
+	if !p.c.Comments {
+		return entries, nil
+	}
+	commentEntries, err := p.planPairComments(n, pair, issueOp, Stamp{GitHub: source.UpdatedAt, Jira: jira.Fields.Updated})
+	if err != nil {
+		return nil, err
+	}
+
+	return append(entries, commentEntries...), nil
+}
+
+// planPairComments plans a pair's comment copies, or skips reading them while neither
+// issue changed since its last clean scan.
+func (p *pairPlanner) planPairComments(n string, pair Pair, issueOp string, stamp Stamp) ([]*Entry, error) {
+	if quiet(p.c, p.s, n, stamp, p.now) {
+		return []*Entry{{
+			GitHub: pair.GitHub, Operation: issueOp, Kind: KindUnchanged,
+			Reason: "No issue activity since full scan at " + p.s.Reconciled[n].Scanned,
+		}}, nil
+	}
+	entries, err := planComments(p.c, p.s, p.api, pair, p.visited)
+	if err != nil {
+		return nil, err
+	}
+	// A pair with nothing to do or review may skip comment reads until its issues change.
+	clean := stamp.GitHub != "" && stamp.Jira != ""
+	for _, e := range entries {
+		clean = clean && (e.Kind == KindNoop || e.Kind == KindExcluded)
+	}
+	if clean {
+		stamp.Scanned = p.now.UTC().Format("2006-01-02T15:04:05.000000-07:00")
+		entries = append(entries, &Entry{GitHub: pair.GitHub, Operation: issueOp, Kind: KindReconciled, stamp: stamp})
+	}
+
 	return entries, nil
 }
 
@@ -407,6 +487,7 @@ func planIssue(c *Config, s *State, api API, source *GitHubIssue, issues map[str
 			retryNote(e, &old)
 		}
 	}
+
 	return e, nil
 }
 
@@ -430,6 +511,7 @@ func planSubtask(c *Config, s *State, api API, e *Entry, issues map[string]*GitH
 			e.Kind, e.IssueType = KindDeferred, ""
 			e.Reason = "Waiting for parent " + parentName(parent) + " to be created in Jira, so this issue can be created under it"
 		}
+
 		return nil
 	}
 	jira, err := api.JiraIssue(pair.JiraID)
@@ -440,14 +522,16 @@ func planSubtask(c *Config, s *State, api API, e *Entry, issues map[string]*GitH
 		e.IssueType, e.parent, e.parentKey = c.JiraSubtaskType, parent, jira.Key
 		e.Parent = parentName(parent)
 	}
+
 	return nil
 }
 
 func statusName(closed bool) string {
 	if closed {
-		return "closed"
+		return stateClosed
 	}
-	return "open"
+
+	return stateOpen
 }
 
 // planStatus mirrors closing and reopening. The pair's recorded status is what both
@@ -498,6 +582,7 @@ func planStatus(c *Config, api API, pair Pair, source *GitHubIssue, jira *JiraIs
 			e.transition = transitions[i].ID
 		}
 	}
+
 	return e, nil
 }
 
@@ -509,18 +594,23 @@ func planStatus(c *Config, api API, pair Pair, source *GitHubIssue, jira *JiraIs
 // it is filled from Jira.
 func planProjectStatus(c *Config, api API, project *ProjectSnapshot, pair Pair, source *GitHubIssue, jira *JiraIssue) (*Entry, error) {
 	ps := c.ProjectStatus
-	e := &Entry{GitHub: pair.GitHub, Operation: token(c, OpProjectStatus, pair.GitHubID), pair: pair,
-		issue: source, jira: jira, fieldID: project.FieldID}
+	e := &Entry{
+		GitHub: pair.GitHub, Operation: token(c, OpProjectStatus, pair.GitHubID), pair: pair,
+		issue: source, jira: jira, fieldID: project.FieldID,
+	}
 	item, inProject := project.Items[source.ID]
 	switch {
 	case !inProject && ps.AddToProject:
 		e.Kind, e.Destination = KindAddToProject, SideProject
+
 		return e, nil
 	case !inProject:
 		e.Kind, e.Reason = KindExcluded, "Issue is not in the project"
+
 		return e, nil
 	case item.Archived:
 		e.Kind, e.Reason = KindExcluded, "Project item is archived"
+
 		return e, nil
 	}
 	e.item = item
@@ -530,10 +620,12 @@ func planProjectStatus(c *Config, api API, project *ProjectSnapshot, pair Pair, 
 	fromJira, mapped := ps.optionFor(jiraStatus, e.inBacklog)
 	if !mapped {
 		e.block("Jira status " + strconv.Quote(jiraStatus) + " is not mapped in project_status")
+
 		return e, nil
 	}
 	if _, ok := ps.mapping(current); current != "" && !ok {
 		e.block("Project status " + strconv.Quote(current) + " is not mapped in project_status")
+
 		return e, nil
 	}
 	setProject := func() {
@@ -555,44 +647,57 @@ func planProjectStatus(c *Config, api API, project *ProjectSnapshot, pair Pair, 
 	case current == *agreed: // Jira moved
 		setProject()
 	case fromJira == *agreed: // the project moved
-		m, _ := ps.mapping(current)
-		switch {
-		case m.JiraBacklog && jira.Fields.Status.done():
-			e.block("Jira lists only incomplete issues in the backlog; reopen " + jira.Key + " before moving it to " +
-				strconv.Quote(current))
-		case m.JiraBacklog:
-			e.toBacklog = true
-		default:
-			// Leaving the backlog may be all it takes, as for To Do; otherwise a transition
-			// follows, planned from today's status and checked again after the board move.
-			e.toBoard = e.inBacklog
-			if !slices.Contains(m.Jira, jiraStatus) {
-				id, blocked, err := projectTransition(api, pair.JiraID, jiraStatus, m)
-				if err != nil {
-					return nil, err
-				}
-				if blocked != "" {
-					e.block(blocked)
-					return e, nil
-				}
-				e.transition = id
-			}
-		}
-		if e.Kind != KindBlocked {
-			e.Kind, e.Destination, e.option, e.Status = KindSyncProjectStatus, SideJira, current, current
-			e.optionID = item.OptionID // the project already shows the target
+		if err := planJiraMove(api, ps, e, current); err != nil {
+			return nil, err
 		}
 	default:
 		e.block("Both sides changed since the agreed status " + strconv.Quote(*agreed) + ": project is " +
 			strconv.Quote(current) + ", Jira is " + strconv.Quote(jiraStatus) + "; align them manually")
 	}
+
 	return e, nil
+}
+
+// planJiraMove plans moving the Jira issue to the project's option: into the board's
+// backlog, out of it, and through a transition when its status does not already map.
+func planJiraMove(api API, ps *ProjectStatus, e *Entry, current string) error {
+	m, _ := ps.mapping(current)
+	jiraStatus := e.jira.Fields.Status.Name
+	switch {
+	case m.JiraBacklog && e.jira.Fields.Status.done():
+		e.block("Jira lists only incomplete issues in the backlog; reopen " + e.jira.Key + " before moving it to " +
+			strconv.Quote(current))
+
+		return nil
+	case m.JiraBacklog:
+		e.toBacklog = true
+	default:
+		// Leaving the backlog may be all it takes, as for To Do; otherwise a transition
+		// follows, planned from today's status and checked again after the board move.
+		e.toBoard = e.inBacklog
+		if !slices.Contains(m.Jira, jiraStatus) {
+			id, blocked, err := projectTransition(api, e.pair.JiraID, jiraStatus, m)
+			if err != nil {
+				return err
+			}
+			if blocked != "" {
+				e.block(blocked)
+
+				return nil
+			}
+			e.transition = id
+		}
+	}
+	e.Kind, e.Destination, e.option, e.Status = KindSyncProjectStatus, SideJira, current, current
+	e.optionID = e.item.OptionID // the project already shows the target
+
+	return nil
 }
 
 // projectTransition finds the Jira transition to a mapping's status: the named one,
 // or the first leading to its first Jira status. A missing or mismapped transition is
 // returned as a reason to block.
-func projectTransition(api API, jiraID, status string, m ProjectStatusMapping) (string, string, error) {
+func projectTransition(api API, jiraID, status string, m ProjectStatusMapping) (id, blocked string, err error) {
 	transitions, err := api.JiraTransitions(jiraID)
 	if err != nil {
 		return "", "", err
@@ -601,6 +706,7 @@ func projectTransition(api API, jiraID, status string, m ProjectStatusMapping) (
 		if m.Transition != "" {
 			return t.Name == m.Transition
 		}
+
 		return t.To.Name == m.Jira[0]
 	})
 	switch {
@@ -610,6 +716,7 @@ func projectTransition(api API, jiraID, status string, m ProjectStatusMapping) (
 		return "", "Jira transition " + strconv.Quote(transitions[i].Name) + " leads to " +
 			strconv.Quote(transitions[i].To.Name) + ", which is not mapped to " + strconv.Quote(m.Project), nil
 	}
+
 	return transitions[i].ID, "", nil
 }
 
@@ -651,14 +758,17 @@ func planComments(c *Config, s *State, api API, pair Pair, visited map[string]bo
 			}
 			op := token(c, commentOp(side), row.ID)
 			visited[op] = true
-			e := &Entry{GitHub: pair.GitHub, Operation: op, Source: side, CommentID: row.ID, Destination: side.Other(),
-				comment: row, pair: pair}
+			e := &Entry{
+				GitHub: pair.GitHub, Operation: op, Source: side, CommentID: row.ID, Destination: side.Other(),
+				comment: row, pair: pair,
+			}
 			entries = append(entries, e)
 			if err := planNewComment(c, s, e, lists[side.Other()]); err != nil {
 				e.block(err.Error())
 			}
 		}
 	}
+
 	return entries, nil
 }
 
@@ -669,12 +779,14 @@ func planLinked(e *Entry, link Link, byID map[Side]map[string]Comment) error {
 		row, ok := byID[side][link.id(side)]
 		if !ok {
 			e.Kind, e.Reason = KindUnavailable, "Comment removed or inaccessible; no deletion or recreation"
+
 			return nil
 		}
 		raw[side] = row
 	}
 	if raw[SideJira].Restricted {
 		e.block("Jira comment restricted; no export or further edits")
+
 		return nil
 	}
 	text, hashes := map[Side]string{}, map[Side]string{}
@@ -711,6 +823,7 @@ func planLinked(e *Entry, link Link, byID map[Side]map[string]Comment) error {
 	default:
 		e.Kind, e.Destination, e.raw, e.text = KindEditComment, dest, raw, text[origin]
 	}
+
 	return nil
 }
 
@@ -748,6 +861,7 @@ func planNewComment(c *Config, s *State, e *Entry, destRows []Comment) error {
 		}
 		if !eligible {
 			e.Kind, e.Reason = KindExcluded, "Before comments_since"
+
 			return nil
 		}
 		text, err := e.comment.Text()
@@ -763,12 +877,15 @@ func planNewComment(c *Config, s *State, e *Entry, destRows []Comment) error {
 			retryNote(e, &old)
 		}
 	}
+
 	return nil
 }
 
 func recoveredLink(e *Entry, record Operation, destination Comment) (Link, error) {
-	link := Link{GitHub: e.GitHub, Origin: e.Source, Prefix: record.Prefix, Suffix: record.Suffix,
-		Baseline: record.Baseline, CopyHash: digest(destination.Body)}
+	link := Link{
+		GitHub: e.GitHub, Origin: e.Source, Prefix: record.Prefix, Suffix: record.Suffix,
+		Baseline: record.Baseline, CopyHash: digest(destination.Body),
+	}
 	link.setID(e.Source, record.SourceID)
 	link.setID(e.Destination, destination.ID)
 	text, err := content(destination, link)
@@ -778,6 +895,7 @@ func recoveredLink(e *Entry, record Operation, destination Comment) (Link, error
 	if digest(text) != record.Baseline {
 		return Link{}, syncErr("Recovered copy content differs; resolve pending operation manually")
 	}
+
 	return link, nil
 }
 
@@ -789,6 +907,7 @@ func finishComment(s *State, e *Entry, record Operation, destination Comment) er
 	s.Comments[e.Operation] = link
 	record.Status = StatusDone
 	s.Operations[e.Operation] = record
+
 	return nil
 }
 
@@ -805,6 +924,7 @@ func reject(s *State, e *Entry, record Operation, status int, cause error, save 
 	if !itemRejections[status] {
 		return cause
 	}
+
 	return nil
 }
 
@@ -832,6 +952,7 @@ func Acknowledge(state *State, entries []*Entry, ops []string) (*State, error) {
 			e.Kind = KindAcknowledged
 		}
 	}
+
 	return s, nil
 }
 
@@ -846,62 +967,91 @@ func Apply(c *Config, state *State, api API, entries []*Entry, save func(*State)
 		if e.Kind.passive() {
 			continue
 		}
-		var err error
-		switch e.Kind {
-		case KindReconciled:
-			// Saved with the final checkpoint; losing it only costs one extra scan.
-			s.Reconciled[strconv.Itoa(e.GitHub)] = e.stamp
-		case KindStatusAgreed:
-			// Saved with the final checkpoint; losing it only means it is recorded next run.
-			setAgreedStatus(s, e.GitHub, e.closed)
-		case KindSyncStatus:
-			err = applyStatus(s, api, e, save)
-		case KindCreateGitHubIssue, KindLinkGitHubIssue:
-			err = applyGitHubIssue(c, s, api, e, save)
-		case KindParentAgreed:
-			setAgreedParent(s, e.GitHub, e.parent)
-		case KindSyncParent:
-			err = applyParent(s, api, e, save)
-		case KindProjectStatusAgreed:
-			setAgreedProjectStatus(s, e.GitHub, e.option)
-		case KindAddToProject:
-			// Adding is idempotent; its status is synced on the next run.
-			err = api.AddProjectItem(e.GitHub)
-			if status, refused := refusedStatus(err); refused && itemRejections[status] {
-				e.Outcome, e.Reason = OutcomeRejected, "Adding to the project was rejected with HTTP "+strconv.Itoa(status)+"; retried next run"
-				if status == 422 {
-					// Seen live: a projects token without read access to the issue's
-					// repository sees the item's issue hidden, so the tool tries to add an
-					// issue that is already there, and the add is refused.
-					e.Reason += ". If the issue is already in the project, the projects token likely " +
-						"lacks read access to its repository (GH_PROJECT_TOKEN needs Issues: read)"
-				}
-				err = nil
-			}
-		case KindSyncProjectStatus:
-			err = applyProjectStatus(c, s, api, e, save)
-		case KindCreateIssue, KindLinkIssue:
-			err = applyIssue(s, api, e, save)
-			// A new Jira issue starts open; recording that lets a GitHub issue that was
-			// already closed close its Jira issue on the next run.
-			if err == nil && e.Kind == KindCreateIssue && e.Outcome == "" && (c.StatusSync != nil || c.ProjectStatus != nil) {
-				setAgreedStatus(s, e.GitHub, false)
-			}
-			// Likewise a new Jira issue has no parent, unless it is a sub-task created under
-			// one; a GitHub parent is applied next run.
-			if err == nil && e.Kind == KindCreateIssue && e.Outcome == "" && c.SyncParents {
-				setAgreedParent(s, e.GitHub, e.parent)
-			}
-		case KindCreateComment, KindRecoverComment:
-			err = applyNewComment(s, api, e, save)
-		case KindEditComment, KindConfirmComment:
-			err = applyLinked(s, api, e, save)
-		}
-		if err != nil {
+		if err := applyEntry(c, s, api, e, save); err != nil {
 			return s, err
 		}
 	}
+
 	return s, save(s)
+}
+
+// applyEntry carries out one planned entry; passive kinds never reach it.
+func applyEntry(c *Config, s *State, api API, e *Entry, save func(*State) error) error {
+	switch e.Kind {
+	case KindReconciled:
+		// Saved with the final checkpoint; losing it only costs one extra scan.
+		s.Reconciled[strconv.Itoa(e.GitHub)] = e.stamp
+	case KindStatusAgreed:
+		// Saved with the final checkpoint; losing it only means it is recorded next run.
+		setAgreedStatus(s, e.GitHub, e.closed)
+	case KindSyncStatus:
+		return applyStatus(s, api, e, save)
+	case KindCreateGitHubIssue, KindLinkGitHubIssue:
+		return applyGitHubIssue(c, s, api, e, save)
+	case KindParentAgreed:
+		setAgreedParent(s, e.GitHub, e.parent)
+	case KindSyncParent:
+		return applyParent(s, api, e, save)
+	case KindProjectStatusAgreed:
+		setAgreedProjectStatus(s, e.GitHub, e.option)
+	case KindAddToProject:
+		return applyAddToProject(api, e)
+	case KindSyncProjectStatus:
+		return applyProjectStatus(c, s, api, e, save)
+	case KindCreateIssue, KindLinkIssue:
+		return applyCreatedIssue(c, s, api, e, save)
+	case KindCreateComment, KindRecoverComment:
+		return applyNewComment(s, api, e, save)
+	case KindEditComment, KindConfirmComment:
+		return applyLinked(s, api, e, save)
+	default:
+		// Report-only kinds (blocked, excluded, deferred, ...) have nothing to apply.
+	}
+
+	return nil
+}
+
+// applyAddToProject adds the issue to the project. Adding is idempotent; its status is
+// synced on the next run.
+func applyAddToProject(api API, e *Entry) error {
+	err := api.AddProjectItem(e.GitHub)
+	if status, refused := refusedStatus(err); refused && itemRejections[status] {
+		e.Outcome, e.Reason = OutcomeRejected, "Adding to the project was rejected with HTTP "+strconv.Itoa(status)+"; retried next run"
+		if status == 422 {
+			// Seen live: a projects token without read access to the issue's
+			// repository sees the item's issue hidden, so the tool tries to add an
+			// issue that is already there, and the add is refused.
+			e.Reason += ". If the issue is already in the project, the projects token likely " +
+				"lacks read access to its repository (GH_PROJECT_TOKEN needs Issues: read)"
+		}
+
+		return nil
+	}
+
+	return err
+}
+
+// applyCreatedIssue creates or links the Jira issue, then records the baselines a new
+// issue starts with.
+func applyCreatedIssue(c *Config, s *State, api API, e *Entry, save func(*State) error) error {
+	if err := applyIssue(s, api, e, save); err != nil {
+		return err
+	}
+	if e.Kind != KindCreateIssue || e.Outcome != "" {
+		return nil
+	}
+	// A new Jira issue starts open; recording that lets a GitHub issue that was
+	// already closed close its Jira issue on the next run.
+	if c.StatusSync != nil || c.ProjectStatus != nil {
+		setAgreedStatus(s, e.GitHub, false)
+	}
+	// Likewise a new Jira issue has no parent, unless it is a sub-task created under
+	// one; a GitHub parent is applied next run.
+	if c.SyncParents {
+		setAgreedParent(s, e.GitHub, e.parent)
+	}
+
+	return nil
 }
 
 func setAgreedStatus(s *State, number int, closed bool) {
@@ -924,8 +1074,10 @@ func applyStatus(s *State, api API, e *Entry, save func(*State) error) error {
 			if err == nil {
 				err = syncErr("Linked issue vanished after plan; rerun")
 			}
+
 			return nil, nil, err
 		}
+
 		return source, jira, nil
 	}
 	source, jira, err := current()
@@ -947,6 +1099,7 @@ func applyStatus(s *State, api API, e *Entry, save func(*State) error) error {
 	if status, refused := refusedStatus(err); refused && itemRejections[status] {
 		// For example a transition screen that needs fields; nothing changed, so retry next run.
 		e.Outcome, e.Reason = OutcomeRejected, "Status change rejected with HTTP "+strconv.Itoa(status)+"; retried next run"
+
 		return nil
 	}
 	if err != nil {
@@ -960,6 +1113,7 @@ func applyStatus(s *State, api API, e *Entry, save func(*State) error) error {
 			statusName(source.closed()), jira.Fields.Status.Name, statusName(jira.done()))
 	}
 	setAgreedStatus(s, e.GitHub, e.closed)
+
 	return save(s)
 }
 
@@ -969,6 +1123,7 @@ func applyStatus(s *State, api API, e *Entry, save func(*State) error) error {
 func alreadyDone(s *State, e *Entry, save func(*State) error, record func()) error {
 	record()
 	e.Outcome, e.Reason = OutcomeAlreadyDone, "Both sides already matched before this write; agreement recorded"
+
 	return save(s)
 }
 
@@ -1009,6 +1164,7 @@ func applyProjectStatus(c *Config, s *State, api API, e *Entry, save func(*State
 			}
 		}
 		now.option, _ = ps.optionFor(jira.Fields.Status.Name, now.inBacklog)
+
 		return now, nil
 	}
 	now, err := current()
@@ -1033,6 +1189,7 @@ func applyProjectStatus(c *Config, s *State, api API, e *Entry, save func(*State
 	}
 	if status, refused := refusedStatus(err); refused && itemRejections[status] {
 		e.Outcome, e.Reason = OutcomeRejected, "Project status change rejected with HTTP "+strconv.Itoa(status)+"; retried next run"
+
 		return nil
 	}
 	if err != nil {
@@ -1046,9 +1203,11 @@ func applyProjectStatus(c *Config, s *State, api API, e *Entry, save func(*State
 			return syncErr("Project status change not confirmed; Jira status is %s, in backlog: %t",
 				now.jira.Fields.Status.Name, now.inBacklog)
 		}
+
 		return syncErr("Project status change not confirmed; Jira status is %s", now.jira.Fields.Status.Name)
 	}
 	setAgreedProjectStatus(s, e.GitHub, e.option)
+
 	return save(s)
 }
 
@@ -1086,7 +1245,51 @@ func moveJiraToOption(ps *ProjectStatus, api API, e *Entry, jira *JiraIssue) err
 	if transition == "" {
 		return nil
 	}
+
 	return api.TransitionJira(e.pair.JiraID, transition)
+}
+
+// recheckFoundJira re-reads a Jira issue that recovery found; its identity property
+// must still name this GitHub issue's operation.
+func recheckFoundJira(api API, e *Entry, source *GitHubIssue) (*JiraIssue, error) {
+	existing, err := api.JiraIssue(e.pair.JiraID)
+	if err != nil {
+		return nil, err
+	}
+	want := IssueIdentity{Operation: e.Operation, GitHubID: source.idString()}
+	if existing == nil || existing.Properties.Identity == nil || *existing.Properties.Identity != want {
+		return nil, syncErr("Jira identity changed after plan")
+	}
+
+	return existing, nil
+}
+
+// createJira journals the intent, then creates the Jira issue. rejected reports a
+// refusal, which reject has already recorded.
+func createJira(s *State, api API, e *Entry, source *GitHubIssue, record Operation, save func(*State) error) (created *JiraIssue, rejected bool, err error) {
+	if e.checkParent {
+		// The parent decides the Jira issue type, which cannot change after creation.
+		parent, err := api.GitHubParent(e.GitHub)
+		if err != nil {
+			return nil, false, err
+		}
+		if parent != e.ghParent {
+			return nil, false, syncErr("GitHub parent changed after plan; rerun")
+		}
+	}
+	s.Operations[e.Operation] = record
+	if err := save(s); err != nil { // Never dispatch creation without a durable intent.
+		return nil, false, err
+	}
+	created, err = api.CreateIssue(source, e.parentKey)
+	if status, refused := refusedStatus(err); refused {
+		return nil, true, reject(s, e, record, status, err, save)
+	}
+	if err != nil {
+		return nil, false, err
+	}
+
+	return created, false, nil
 }
 
 func applyIssue(s *State, api API, e *Entry, save func(*State) error) error {
@@ -1097,46 +1300,25 @@ func applyIssue(s *State, api API, e *Entry, save func(*State) error) error {
 	if !source.sameContent(e.issue) {
 		return syncErr("GitHub issue changed after plan; rerun")
 	}
-	record := Operation{Kind: OpIssue, SourceID: source.idString(), GitHub: e.GitHub, Status: StatusPending,
-		Started: time.Now().UTC().Format(time.RFC3339)}
+	record := Operation{
+		Kind: OpIssue, SourceID: source.idString(), GitHub: e.GitHub, Status: StatusPending,
+		Started: time.Now().UTC().Format(time.RFC3339),
+	}
 	var existing *JiraIssue
 	if e.Kind == KindLinkIssue {
-		// Re-read the found issue itself; its identity property must still match.
-		var err error
-		existing, err = api.JiraIssue(e.pair.JiraID)
-		if err != nil {
+		if existing, err = recheckFoundJira(api, e, source); err != nil {
 			return err
-		}
-		want := IssueIdentity{Operation: e.Operation, GitHubID: source.idString()}
-		if existing == nil || existing.Properties.Identity == nil || *existing.Properties.Identity != want {
-			return syncErr("Jira identity changed after plan")
 		}
 	} else {
-		if e.checkParent {
-			// The parent decides the Jira issue type, which cannot change after creation.
-			parent, err := api.GitHubParent(e.GitHub)
-			if err != nil {
-				return err
-			}
-			if parent != e.ghParent {
-				return syncErr("GitHub parent changed after plan; rerun")
-			}
-		}
-		s.Operations[e.Operation] = record
-		if err := save(s); err != nil { // Never dispatch creation without a durable intent.
-			return err
-		}
-		existing, err = api.CreateIssue(source, e.parentKey)
-		if status, refused := refusedStatus(err); refused {
-			return reject(s, e, record, status, err, save)
-		}
-		if err != nil {
+		var rejected bool
+		if existing, rejected, err = createJira(s, api, e, source, record, save); err != nil || rejected {
 			return err
 		}
 	}
 	s.Pairs[strconv.Itoa(e.GitHub)] = issuePair(source, existing)
 	record.Status = StatusDone
 	s.Operations[e.Operation] = record
+
 	return save(s)
 }
 
@@ -1158,6 +1340,7 @@ func applyNewComment(s *State, api API, e *Entry, save func(*State) error) error
 		if err := finishComment(s, e, e.record, copies[0]); err != nil {
 			return err
 		}
+
 		return save(s)
 	}
 	if len(copies) > 0 {
@@ -1170,8 +1353,10 @@ func applyNewComment(s *State, api API, e *Entry, save func(*State) error) error
 	if !source.sameAs(e.comment) {
 		return syncErr("Source comment changed after plan; rerun")
 	}
-	record := Operation{Kind: commentOp(e.Source), SourceID: e.CommentID, GitHub: e.GitHub, Status: StatusPending,
-		Prefix: e.prefix, Suffix: e.suffix, Baseline: digest(e.text)}
+	record := Operation{
+		Kind: commentOp(e.Source), SourceID: e.CommentID, GitHub: e.GitHub, Status: StatusPending,
+		Prefix: e.prefix, Suffix: e.suffix, Baseline: digest(e.text),
+	}
 	s.Operations[e.Operation] = record
 	if err := save(s); err != nil {
 		return err
@@ -1194,6 +1379,7 @@ func applyNewComment(s *State, api API, e *Entry, save func(*State) error) error
 	if err := finishComment(s, e, record, copied); err != nil {
 		return err
 	}
+
 	return save(s)
 }
 
@@ -1208,6 +1394,7 @@ func applyLinked(s *State, api API, e *Entry, save func(*State) error) error {
 			}
 			raw[side] = row
 		}
+
 		return raw, nil
 	}
 	raw, err := read()
@@ -1224,6 +1411,7 @@ func applyLinked(s *State, api API, e *Entry, save func(*State) error) error {
 		if status, refused := refusedStatus(err); refused && itemRejections[status] {
 			// Edits are not journaled; a refused edit simply stays planned for next run.
 			e.Outcome, e.Reason = OutcomeRejected, "Edit rejected with HTTP "+strconv.Itoa(status)+"; retried next run"
+
 			return nil
 		}
 		if err != nil {
@@ -1251,6 +1439,7 @@ func applyLinked(s *State, api API, e *Entry, save func(*State) error) error {
 	stored.Baseline = digest(g)
 	stored.CopyHash = digest(raw[link.Origin.Other()].Body)
 	s.Comments[e.Operation] = stored
+
 	return save(s)
 }
 
@@ -1258,6 +1447,7 @@ func applyLinked(s *State, api API, e *Entry, save func(*State) error) error {
 func isSyncError(err error) bool {
 	var s *SyncError
 	var h *HTTPStatusError
+
 	return errors.As(err, &s) || errors.As(err, &h)
 }
 
@@ -1281,6 +1471,7 @@ func gitHubParents(s *State, api API, issues map[string]*GitHubIssue) (map[int]i
 			}
 		}
 	}
+
 	return parents, nil
 }
 
@@ -1288,6 +1479,7 @@ func parentName(number int) string {
 	if number == 0 {
 		return "none"
 	}
+
 	return "#" + strconv.Itoa(number)
 }
 
@@ -1298,6 +1490,7 @@ func linkedNumber(s *State, key string) (int, bool) {
 			return p.GitHub, true
 		}
 	}
+
 	return 0, false
 }
 
@@ -1313,6 +1506,7 @@ func planParent(c *Config, s *State, pair Pair, source *GitHubIssue, jira *JiraI
 		number, linked := linkedNumber(s, p.Key)
 		if !linked {
 			e.block("Jira parent " + p.Key + " is not linked to a GitHub issue; parent sync paused for this issue")
+
 			return e
 		}
 		jr = number
@@ -1328,6 +1522,7 @@ func planParent(c *Config, s *State, pair Pair, source *GitHubIssue, jira *JiraI
 	case agreed == nil:
 		e.block("GitHub parent " + parentName(gh) + " and Jira parent " + parentName(jr) +
 			" differ, with no agreed parent recorded; align them manually")
+
 		return e
 	case gh == *agreed: // Jira moved
 		e.Kind, e.Destination, e.parent = KindSyncParent, SideGitHub, jr
@@ -1336,9 +1531,11 @@ func planParent(c *Config, s *State, pair Pair, source *GitHubIssue, jira *JiraI
 	default:
 		e.block("Both sides changed since the agreed parent " + parentName(*agreed) + ": GitHub has " +
 			parentName(gh) + ", Jira has " + parentName(jr) + "; align them manually")
+
 		return e
 	}
 	e.Parent = parentName(e.parent)
+
 	return e
 }
 
@@ -1375,6 +1572,7 @@ func applyParent(s *State, api API, e *Entry, save func(*State) error) error {
 			}
 			jr = number
 		}
+
 		return gh, jr, nil
 	}
 	gh, jr, err := current()
@@ -1400,6 +1598,7 @@ func applyParent(s *State, api API, e *Entry, save func(*State) error) error {
 		// For example a Jira hierarchy rule: a Story's parent must be an Epic.
 		e.Outcome, e.Reason = OutcomeRejected, "Parent change rejected with HTTP "+strconv.Itoa(status)+
 			"; check that the issue types allow this parent (for example an Epic above a Story). Retried next run"
+
 		return nil
 	}
 	if err != nil {
@@ -1412,6 +1611,7 @@ func applyParent(s *State, api API, e *Entry, save func(*State) error) error {
 		return syncErr("Parent change not confirmed; GitHub has %s, Jira has %s", parentName(gh), parentName(jr))
 	}
 	setAgreedParent(s, e.GitHub, e.parent)
+
 	return save(s)
 }
 
@@ -1427,6 +1627,7 @@ func (c *Config) githubTypeFor(jiraTypeID string) string {
 	if len(names) == 1 {
 		return names[0]
 	}
+
 	return ""
 }
 
@@ -1440,6 +1641,7 @@ func githubBody(c *Config, j *JiraIssue, op string) (string, error) {
 			return "", syncErr("Jira description has content that cannot be copied; create the GitHub issue manually")
 		}
 	}
+
 	return "From Jira: " + c.JiraURL + "/browse/" + j.Key + "\n\n" + text + "\n\n" + hiddenMarker(op), nil
 }
 
@@ -1466,9 +1668,12 @@ func planJiraIssues(c *Config, s *State, api API, visited map[string]bool) ([]*E
 		// it is linked, creating a GitHub issue for it would duplicate its GitHub origin.
 		if id := j.Properties.Identity; id != nil {
 			if record, ok := s.Operations[id.Operation]; !ok || record.Kind != OpIssue {
-				entries = append(entries, &Entry{Operation: id.Operation, JiraKey: j.Key, Kind: KindBlocked,
-					Reason: "Jira issue was created from GitHub but is not linked or journaled; restore state"})
+				entries = append(entries, &Entry{
+					Operation: id.Operation, JiraKey: j.Key, Kind: KindBlocked,
+					Reason: "Jira issue was created from GitHub but is not linked or journaled; restore state",
+				})
 			}
+
 			continue
 		}
 		op := token(c, OpJiraIssue, j.ID)
@@ -1478,6 +1683,7 @@ func planJiraIssues(c *Config, s *State, api API, visited map[string]bool) ([]*E
 		old, journaled := s.Operations[op]
 		if journaled && old.Status == StatusDone {
 			e.block("Jira issue was created in GitHub but its link is missing; restore state")
+
 			continue
 		}
 		if journaled && old.Status == StatusPending {
@@ -1487,9 +1693,11 @@ func planJiraIssues(c *Config, s *State, api API, visited map[string]bool) ([]*E
 			}
 			if found == nil {
 				e.block("GitHub issue creation outcome unknown or not visible yet; never retry automatically")
+
 				continue
 			}
 			e.Kind, e.GitHub, e.found = KindLinkGitHubIssue, found.Number, found
+
 			continue
 		}
 		body, err := githubBody(c, j, op)
@@ -1513,47 +1721,62 @@ func planJiraIssues(c *Config, s *State, api API, visited map[string]bool) ([]*E
 			}
 		}
 	}
+
 	return entries, nil
 }
 
 // applyGitHubIssue creates (or, for a recovered intent, links) the GitHub issue for
 // a selected Jira issue, journaling the intent before the request.
+// createGitHub checks the Jira issue is unchanged, journals the intent, then creates
+// the GitHub issue. rejected reports a refusal, which reject has already recorded.
+func createGitHub(s *State, api API, e *Entry, record Operation, save func(*State) error) (issue *GitHubIssue, rejected bool, err error) {
+	current, err := api.JiraIssue(e.jira.ID)
+	if err != nil {
+		return nil, false, err
+	}
+	if current == nil || current.Fields.Summary != e.jira.Fields.Summary ||
+		!sameJSON(current.Fields.Description, e.jira.Fields.Description) {
+		return nil, false, syncErr("Jira issue changed after plan; rerun")
+	}
+	s.Operations[e.Operation] = record
+	if err := save(s); err != nil { // Never dispatch creation without a durable intent.
+		return nil, false, err
+	}
+	issue, err = api.CreateGitHubIssue(e.title, e.text, e.labels, e.issueType)
+	if status, refused := refusedStatus(err); refused && status == 422 && e.issueType != "" {
+		// The type may not exist in this organization. A 4xx proves nothing was
+		// created, so creating again without the type cannot duplicate.
+		issue, err = api.CreateGitHubIssue(e.title, e.text, e.labels, "")
+		if err == nil {
+			e.Reason = "GitHub refused issue type " + strconv.Quote(e.issueType) + "; created without a type"
+		}
+	}
+	if status, refused := refusedStatus(err); refused {
+		return nil, true, reject(s, e, record, status, err, save)
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	if issue == nil || issue.Number == 0 {
+		return nil, false, syncErr("Invalid API response; write outcome may be unknown")
+	}
+
+	return issue, false, nil
+}
+
 func applyGitHubIssue(c *Config, s *State, api API, e *Entry, save func(*State) error) error {
-	record := Operation{Kind: OpJiraIssue, SourceID: e.jira.ID, Status: StatusPending,
-		Started: time.Now().UTC().Format(time.RFC3339)}
+	record := Operation{
+		Kind: OpJiraIssue, SourceID: e.jira.ID, Status: StatusPending,
+		Started: time.Now().UTC().Format(time.RFC3339),
+	}
 	issue := e.found
 	if e.Kind == KindLinkGitHubIssue {
 		record = s.Operations[e.Operation]
 	} else {
-		current, err := api.JiraIssue(e.jira.ID)
-		if err != nil {
+		var rejected bool
+		var err error
+		if issue, rejected, err = createGitHub(s, api, e, record, save); err != nil || rejected {
 			return err
-		}
-		if current == nil || current.Fields.Summary != e.jira.Fields.Summary ||
-			!sameJSON(current.Fields.Description, e.jira.Fields.Description) {
-			return syncErr("Jira issue changed after plan; rerun")
-		}
-		s.Operations[e.Operation] = record
-		if err := save(s); err != nil { // Never dispatch creation without a durable intent.
-			return err
-		}
-		issue, err = api.CreateGitHubIssue(e.title, e.text, e.labels, e.issueType)
-		if status, refused := refusedStatus(err); refused && status == 422 && e.issueType != "" {
-			// The type may not exist in this organization. A 4xx proves nothing was
-			// created, so creating again without the type cannot duplicate.
-			issue, err = api.CreateGitHubIssue(e.title, e.text, e.labels, "")
-			if err == nil {
-				e.Reason = "GitHub refused issue type " + strconv.Quote(e.issueType) + "; created without a type"
-			}
-		}
-		if status, refused := refusedStatus(err); refused {
-			return reject(s, e, record, status, err, save)
-		}
-		if err != nil {
-			return err
-		}
-		if issue == nil || issue.Number == 0 {
-			return syncErr("Invalid API response; write outcome may be unknown")
 		}
 	}
 	n := strconv.Itoa(issue.Number)
@@ -1572,5 +1795,6 @@ func applyGitHubIssue(c *Config, s *State, api API, e *Entry, save func(*State) 
 	if c.SyncParents {
 		setAgreedParent(s, issue.Number, 0)
 	}
+
 	return save(s)
 }

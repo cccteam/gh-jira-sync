@@ -206,6 +206,24 @@ unknown outcomes, pagination, write budgets, privacy exclusions, and durable Git
 state with a real local bare repository. Production permissions, Jira required
 fields, and branch rules still require a live sandbox pilot.
 
+## Releases and distribution
+
+The reusable workflow is the unit other organizations consume, so it and the binary
+are versioned together. release-please writes the release version into the
+workflow's `version` default, so the workflow file at tag `vX.Y.Z` runs binary
+`vX.Y.Z`; a caller pins one ref and cannot mix a workflow with another release's
+tool. A reusable workflow cannot read the ref it was called at, which is why the
+version is written into the file rather than derived at run time.
+
+The workflow downloads the release archive for its runner instead of building, so no
+Go toolchain or token for this repository is needed; the repository is public, and
+the caller's own `GITHUB_TOKEN` reads the release. Before any sync secret is in the
+environment, the archive is checked against the release's `checksums.txt` and its
+build provenance attestation, which binds it to this repository's
+`release-assets.yml` run for the tag. `tool-ref` keeps a build-from-source path for
+testing unreleased commits. Release builds are static (`CGO_ENABLED=0`) and
+Unix-only, because the state lock uses `flock`.
+
 ## API references
 
 * https://docs.github.com/en/rest/issues/issues
@@ -239,7 +257,7 @@ and item IDs are shared, so single-item reads and all writes stay on REST. A nex
 configured GitHub host. Items are matched to issues by GitHub issue ID. Project calls
 use their own client: `GH_PROJECT_TOKEN`, normally a GitHub App installation token
 scoped to organization Projects (the reusable workflow mints separate App tokens for
-the tool checkout, issues, and projects, each limited to one repository or owner), and API version `2026-03-10`, under which the
+issues and projects, each limited to one repository or owner), and API version `2026-03-10`, under which the
 Projects REST endpoints are documented. Adding items and setting the field are
 idempotent and not journaled.
 

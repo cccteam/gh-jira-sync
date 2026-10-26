@@ -1,6 +1,7 @@
 package ghjira
 
 import (
+	"maps"
 	"net/http"
 	"slices"
 	"strconv"
@@ -27,24 +28,21 @@ func newSubtaskWorld(t *testing.T) (*syncer, *subtaskWorld, *State) {
 }
 
 func (w *subtaskWorld) add(n, parent int) {
-	w.issues[n] = &GitHubIssue{ID: int64(100 + n), Number: n, Title: "issue " + strconv.Itoa(n), State: "open",
-		RepositoryURL: "https://api.github.com/repos/acme/test"}
+	w.issues[n] = &GitHubIssue{
+		ID: int64(100 + n), Number: n, Title: "issue " + strconv.Itoa(n), State: "open",
+		RepositoryURL: "https://api.github.com/repos/acme/test",
+	}
 	if parent != 0 {
 		w.ghParent[n] = parent
 	}
 }
 
 func (w *subtaskWorld) Issues() ([]GitHubIssue, error) {
-	var list []GitHubIssue
-	for _, n := range slices.Sorted(func(yield func(int) bool) {
-		for n := range w.issues {
-			if !yield(n) {
-				return
-			}
-		}
-	}) {
+	list := make([]GitHubIssue, 0, len(w.issues))
+	for _, n := range slices.Sorted(maps.Keys(w.issues)) {
 		list = append(list, *w.issues[n])
 	}
+
 	return list, nil
 }
 
@@ -91,6 +89,7 @@ func entryFor(entries []*Entry, n int, kind Kind) *Entry {
 }
 
 func TestTaskUnderTaskBecomesJiraSubtask(t *testing.T) {
+	t.Parallel()
 	x, w, s := newSubtaskWorld(t)
 	w.add(4, 2) // a Task under the Task #2
 	w.add(5, 1) // a Task under the Epic #1
@@ -112,6 +111,7 @@ func TestTaskUnderTaskBecomesJiraSubtask(t *testing.T) {
 }
 
 func TestChildWaitsForParentToReachJira(t *testing.T) {
+	t.Parallel()
 	x, w, s := newSubtaskWorld(t)
 	w.add(6, 7)
 	w.add(7, 0) // the parent, a Task, is new too
@@ -129,6 +129,7 @@ func TestChildWaitsForParentToReachJira(t *testing.T) {
 
 // A parent outside the selection never reaches Jira, so the child does not wait.
 func TestUnselectedParentDoesNotHoldChild(t *testing.T) {
+	t.Parallel()
 	x, w, s := newSubtaskWorld(t)
 	w.add(8, 9)
 	s, _ = subtaskRun(t, x, w, s)
@@ -136,6 +137,7 @@ func TestUnselectedParentDoesNotHoldChild(t *testing.T) {
 }
 
 func TestSubtaskModeOffKeepsStandardType(t *testing.T) {
+	t.Parallel()
 	x, w, s := newSubtaskWorld(t)
 	x.c.JiraSubtaskType = ""
 	w.add(4, 2)
@@ -144,6 +146,7 @@ func TestSubtaskModeOffKeepsStandardType(t *testing.T) {
 }
 
 func TestParentChangedBeforeCreationAborts(t *testing.T) {
+	t.Parallel()
 	x, w, s := newSubtaskWorld(t)
 	x.c.Comments = false
 	w.add(4, 2)
@@ -161,6 +164,7 @@ func TestParentChangedBeforeCreationAborts(t *testing.T) {
 }
 
 func TestSubtaskConfig(t *testing.T) {
+	t.Parallel()
 	c := testConfig(t, Object{"sync_parents": true, "jira_subtask_type": "10302"})
 	eq(t, c.JiraSubtaskType, "10302")
 	for name, extra := range map[string]Object{
@@ -168,8 +172,10 @@ func TestSubtaskConfig(t *testing.T) {
 		"not digits":           {"sync_parents": true, "jira_subtask_type": "Subtask"},
 		"a number":             {"sync_parents": true, "jira_subtask_type": 10302},
 	} {
-		raw := Object{"repository": "acme/test", "jira_url": "https://acme.atlassian.net",
-			"jira_project": "ENG", "jira_issue_type": "10001"}
+		raw := Object{
+			"repository": "acme/test", "jira_url": "https://acme.atlassian.net",
+			"jira_project": "ENG", "jira_issue_type": "10001",
+		}
 		for k, v := range extra {
 			raw[k] = v
 		}
@@ -180,6 +186,7 @@ func TestSubtaskConfig(t *testing.T) {
 }
 
 func TestSubtaskAPIRequests(t *testing.T) {
+	t.Parallel()
 	srv := newServer(t, ok(Object{"id": "200", "key": "ENG-9"}))
 	api := srv.client(t)
 	api.c.JiraSubtaskType = "10302"

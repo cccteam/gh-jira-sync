@@ -22,8 +22,10 @@ func newParentWorld(t *testing.T) (*syncer, *parentWorld, *State) {
 	w := &parentWorld{fakeAPI: x.api, issues: map[int]*GitHubIssue{}, jira: map[string]*JiraIssue{}, ghParent: map[int]int{}}
 	s := NewState(x.c)
 	for n := 1; n <= 3; n++ {
-		w.issues[n] = &GitHubIssue{ID: int64(100 + n), Number: n, Title: "issue", State: "open",
-			RepositoryURL: "https://api.github.com/repos/acme/test"}
+		w.issues[n] = &GitHubIssue{
+			ID: int64(100 + n), Number: n, Title: "issue", State: "open",
+			RepositoryURL: "https://api.github.com/repos/acme/test",
+		}
 		j := &JiraIssue{ID: strconv.Itoa(300 + n), Key: "ENG-" + strconv.Itoa(n)}
 		j.Fields.Project.Key = "ENG"
 		w.jira[j.ID] = j
@@ -71,10 +73,12 @@ func (w *parentWorld) Issue(n int) (*GitHubIssue, error) {
 	issue := *w.issues[n]
 	return &issue, nil
 }
+
 func (w *parentWorld) JiraIssue(id string) (*JiraIssue, error) {
 	issue := *w.jira[id]
 	return &issue, nil
 }
+
 func (w *parentWorld) SubIssues(n int) ([]GitHubIssue, error) {
 	var children []GitHubIssue
 	for child, parent := range w.ghParent {
@@ -85,7 +89,7 @@ func (w *parentWorld) SubIssues(n int) ([]GitHubIssue, error) {
 	return children, nil
 }
 func (w *parentWorld) GitHubParent(n int) (int, error) { return w.ghParent[n], nil }
-func (w *parentWorld) SetGitHubParent(childID int64, parent, old int) error {
+func (w *parentWorld) SetGitHubParent(childID int64, parent, _ int) error {
 	if err := w.maybeRefuse(); err != nil {
 		return err
 	}
@@ -98,6 +102,7 @@ func (w *parentWorld) SetGitHubParent(childID int64, parent, old int) error {
 	w.writes = append(w.writes, write{"github parent", parentName(parent)})
 	return nil
 }
+
 func (w *parentWorld) SetJiraParent(id, key string) error {
 	if err := w.maybeRefuse(); err != nil {
 		return err
@@ -114,6 +119,7 @@ func (w *parentWorld) SetJiraParent(id, key string) error {
 	return nil
 }
 
+//nolint:unparam // names the child, so each test reads as its scenario
 func (w *parentWorld) setJiraParent(child int, key string) {
 	j := w.jira[strconv.Itoa(300+child)]
 	if key == "" {
@@ -125,6 +131,7 @@ func (w *parentWorld) setJiraParent(child int, key string) {
 	}{key}
 }
 
+//nolint:unparam // names the child, so each test reads as its scenario
 func parentEntry(entries []*Entry, child int) *Entry {
 	for _, e := range entries {
 		if e.GitHub == child && (e.Kind == KindSyncParent || e.Kind == KindParentAgreed || strings.Contains(e.Reason, "parent")) {
@@ -142,6 +149,7 @@ func agreedParent(s *State, child int) string {
 }
 
 func TestParentsAgreeThenGitHubSubIssueMovesJira(t *testing.T) {
+	t.Parallel()
 	x, w, s := newParentWorld(t)
 	s, entries := w.ok(t, x, s)
 	eq(t, parentEntry(entries, 2).Kind, KindParentAgreed)
@@ -163,6 +171,7 @@ func TestParentsAgreeThenGitHubSubIssueMovesJira(t *testing.T) {
 }
 
 func TestJiraParentChangesMoveGitHub(t *testing.T) {
+	t.Parallel()
 	x, w, s := newParentWorld(t)
 	w.ghParent[2] = 1
 	w.setJiraParent(2, "ENG-1")
@@ -184,9 +193,10 @@ func TestJiraParentChangesMoveGitHub(t *testing.T) {
 }
 
 func TestParentConflictsBlockForReview(t *testing.T) {
+	t.Parallel()
 	for name, setup := range map[string]func(w *parentWorld, s *State){
-		"not linked to a GitHub issue": func(w *parentWorld, s *State) { w.setJiraParent(2, "ENG-99") },
-		"no agreed parent recorded":    func(w *parentWorld, s *State) { w.ghParent[2] = 1 },
+		"not linked to a GitHub issue": func(w *parentWorld, _ *State) { w.setJiraParent(2, "ENG-99") },
+		"no agreed parent recorded":    func(w *parentWorld, _ *State) { w.ghParent[2] = 1 },
 		"Both sides changed": func(w *parentWorld, s *State) {
 			setAgreedParent(s, 2, 0)
 			w.ghParent[2] = 1
@@ -194,6 +204,7 @@ func TestParentConflictsBlockForReview(t *testing.T) {
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 			x, w, s := newParentWorld(t)
 			setup(w, s)
 			_, entries := w.ok(t, x, s)
@@ -208,6 +219,7 @@ func TestParentConflictsBlockForReview(t *testing.T) {
 }
 
 func TestRejectedParentChangeExplainsHierarchy(t *testing.T) {
+	t.Parallel()
 	x, w, s := newParentWorld(t)
 	setAgreedParent(s, 2, 0)
 	w.ghParent[2] = 3
@@ -222,6 +234,7 @@ func TestRejectedParentChangeExplainsHierarchy(t *testing.T) {
 }
 
 func TestParentAlreadyMatchedBeforeWrite(t *testing.T) {
+	t.Parallel()
 	x, w, s := newParentWorld(t)
 	setAgreedParent(s, 2, 0)
 	w.ghParent[2] = 1
@@ -241,6 +254,7 @@ func TestParentAlreadyMatchedBeforeWrite(t *testing.T) {
 }
 
 func TestParentSyncOffAndCreationBaseline(t *testing.T) {
+	t.Parallel()
 	x, w, s := newParentWorld(t)
 	x.c.SyncParents = false
 	w.ghParent[2] = 1
@@ -259,12 +273,14 @@ func TestParentSyncOffAndCreationBaseline(t *testing.T) {
 }
 
 func TestParentAPIRequests(t *testing.T) {
+	t.Parallel()
 	srv := newServer(t, func(r *http.Request) (int, http.Header, any) {
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/issues/1/sub_issues") && r.Method == "GET":
 			return 200, nil, []any{
 				Object{"id": 102, "number": 2, "repository_url": "https://api.github.com/repos/acme/test"},
-				Object{"id": 900, "number": 9, "repository_url": "https://api.github.com/repos/acme/other"}}
+				Object{"id": 900, "number": 9, "repository_url": "https://api.github.com/repos/acme/other"},
+			}
 		case strings.HasSuffix(r.URL.Path, "/issues/2/parent"):
 			return 200, nil, Object{"id": 101, "number": 1, "repository_url": "https://api.github.com/repos/acme/test"}
 		case strings.HasSuffix(r.URL.Path, "/issues/3/parent"):
@@ -286,13 +302,13 @@ func TestParentAPIRequests(t *testing.T) {
 		}
 	}
 	last := func() string { return string(canonical(srv.bodies[len(srv.bodies)-1], false)) }
-	api.SetGitHubParent(102, 3, 1)
+	must(t, api.SetGitHubParent(102, 3, 1))
 	eq(t, []string{srv.urls[len(srv.urls)-1], last()}, []string{"/repos/acme/test/issues/3/sub_issues", `{"replace_parent":true,"sub_issue_id":102}`})
-	api.SetGitHubParent(102, 0, 1)
+	must(t, api.SetGitHubParent(102, 0, 1))
 	eq(t, []string{srv.urls[len(srv.urls)-1], last()}, []string{"/repos/acme/test/issues/1/sub_issue", `{"sub_issue_id":102}`})
-	api.SetJiraParent("302", "ENG-1")
+	must(t, api.SetJiraParent("302", "ENG-1"))
 	eq(t, last(), `{"fields":{"parent":{"key":"ENG-1"}}}`)
-	api.SetJiraParent("302", "")
+	must(t, api.SetJiraParent("302", ""))
 	eq(t, last(), `{"update":{"parent":[{"set":{"none":true}}]}}`)
 	eq(t, srv.urls[len(srv.urls)-1], "/rest/api/3/issue/302")
 }

@@ -33,6 +33,7 @@ func agreed(t *testing.T, s *State) string {
 }
 
 func TestStatusSyncDisabledByDefault(t *testing.T) {
+	t.Parallel()
 	x := newSyncer(t)
 	s := x.linked()
 	eq(t, agreed(t, s), "none")
@@ -43,12 +44,14 @@ func TestStatusSyncDisabledByDefault(t *testing.T) {
 }
 
 func TestCreationRecordsOpenAsAgreedStatus(t *testing.T) {
+	t.Parallel()
 	x := newSyncer(t)
 	enableStatus(x)
 	eq(t, agreed(t, x.linked()), "open")
 }
 
 func TestGitHubCloseAndReopenMoveJira(t *testing.T) {
+	t.Parallel()
 	x := newSyncer(t)
 	enableStatus(x)
 	s := x.linked()
@@ -73,6 +76,7 @@ func TestGitHubCloseAndReopenMoveJira(t *testing.T) {
 }
 
 func TestJiraDoneClosesAndReopensGitHub(t *testing.T) {
+	t.Parallel()
 	x := newSyncer(t)
 	enableStatus(x)
 	s := x.linked()
@@ -97,6 +101,7 @@ func linkedBeforeStatus(x *syncer) *State {
 }
 
 func TestAgreementRecordedWithoutWrites(t *testing.T) {
+	t.Parallel()
 	x := newSyncer(t)
 	s := linkedBeforeStatus(x)
 	s, entries := x.ok(s)
@@ -107,6 +112,7 @@ func TestAgreementRecordedWithoutWrites(t *testing.T) {
 }
 
 func TestDisagreementWithoutAgreedStatusBlocksUntilAligned(t *testing.T) {
+	t.Parallel()
 	x := newSyncer(t)
 	s := linkedBeforeStatus(x)
 	x.api.source.State = "closed"
@@ -129,11 +135,13 @@ func TestDisagreementWithoutAgreedStatusBlocksUntilAligned(t *testing.T) {
 }
 
 func TestMissingOrWrongTransitionBlocks(t *testing.T) {
+	t.Parallel()
 	for name, transitions := range map[string][]JiraTransition{
 		"is not available": {{ID: "11", Name: "Reopen", To: jiraStatus("To Do", "new")}},
 		"would leave":      {{ID: "21", Name: "Done", To: jiraStatus("In Review", "indeterminate")}},
 	} {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 			x := newSyncer(t)
 			enableStatus(x)
 			s := x.linked()
@@ -152,6 +160,7 @@ func TestMissingOrWrongTransitionBlocks(t *testing.T) {
 }
 
 func TestRejectedStatusChangeIsRetried(t *testing.T) {
+	t.Parallel()
 	x := newSyncer(t)
 	enableStatus(x)
 	s := x.linked()
@@ -166,6 +175,7 @@ func TestRejectedStatusChangeIsRetried(t *testing.T) {
 }
 
 func TestStatusChangedAfterPlanAborts(t *testing.T) {
+	t.Parallel()
 	x := newSyncer(t)
 	enableStatus(x)
 	s := x.linked()
@@ -182,6 +192,7 @@ func TestStatusChangedAfterPlanAborts(t *testing.T) {
 }
 
 func TestStatusAlreadyReachedRecordsAgreement(t *testing.T) {
+	t.Parallel()
 	x := newSyncer(t)
 	enableStatus(x)
 	s := x.linked()
@@ -202,6 +213,7 @@ func TestStatusAlreadyReachedRecordsAgreement(t *testing.T) {
 }
 
 func TestStatusSyncedWhenCommentsOffOrPairQuiet(t *testing.T) {
+	t.Parallel()
 	x := newSyncer(t)
 	enableStatus(x)
 	x.c.Comments = false
@@ -221,6 +233,7 @@ func TestStatusSyncedWhenCommentsOffOrPairQuiet(t *testing.T) {
 }
 
 func TestStatusWritesCountTowardBudget(t *testing.T) {
+	t.Parallel()
 	x := newSyncer(t)
 	enableStatus(x)
 	s := x.linked()
@@ -232,12 +245,17 @@ func TestStatusWritesCountTowardBudget(t *testing.T) {
 }
 
 func TestStatusSyncConfig(t *testing.T) {
+	t.Parallel()
 	c := testConfig(t, Object{"status_sync": Object{"close_transition": "Done", "reopen_transition": "Reopen"}})
 	eq(t, *c.StatusSync, StatusSync{CloseTransition: "Done", ReopenTransition: "Reopen"})
 	eq(t, testConfig(t, Object{"status_sync": nil}).StatusSync, (*StatusSync)(nil))
 	base := Object{"repository": "acme/test", "jira_url": "https://acme.atlassian.net", "jira_project": "ENG", "jira_issue_type": "10001"}
-	for _, bad := range []any{"Done", Object{"close_transition": "Done"}, Object{"close_transition": "Done", "reopen_transition": " "},
-		Object{"close_transition": "Done", "reopen_transition": "Reopen", "extra": true}} {
+	for _, bad := range []any{
+		"Done",
+		Object{"close_transition": "Done"},
+		Object{"close_transition": "Done", "reopen_transition": " "},
+		Object{"close_transition": "Done", "reopen_transition": "Reopen", "extra": true},
+	} {
 		raw := Object{"status_sync": bad}
 		for k, v := range base {
 			raw[k] = v
@@ -249,14 +267,19 @@ func TestStatusSyncConfig(t *testing.T) {
 }
 
 func TestStatusAPIRequests(t *testing.T) {
+	t.Parallel()
 	srv := newServer(t, func(r *http.Request) (int, http.Header, any) {
 		switch {
 		case r.Method == "GET" && strings.HasSuffix(r.URL.Path, "/transitions"):
-			return 200, nil, Object{"transitions": []any{Object{"id": "31", "name": "Done",
-				"to": Object{"name": "Done", "statusCategory": Object{"key": "done"}}}}}
+			return 200, nil, Object{"transitions": []any{Object{
+				"id": "31", "name": "Done",
+				"to": Object{"name": "Done", "statusCategory": Object{"key": "done"}},
+			}}}
 		case r.Method == "GET":
-			return 200, nil, Object{"id": "200", "key": "ENG-1", "fields": Object{"project": Object{"key": "ENG"},
-				"status": Object{"name": "Done", "statusCategory": Object{"key": "done"}}}}
+			return 200, nil, Object{"id": "200", "key": "ENG-1", "fields": Object{
+				"project": Object{"key": "ENG"},
+				"status":  Object{"name": "Done", "statusCategory": Object{"key": "done"}},
+			}}
 		case r.Method == "POST":
 			return 204, nil, nil
 		}

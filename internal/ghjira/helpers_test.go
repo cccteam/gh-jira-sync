@@ -10,8 +10,10 @@ import (
 
 func testConfig(t *testing.T, extra Object) *Config {
 	t.Helper()
-	raw := Object{"repository": "acme/test", "jira_url": "https://acme.atlassian.net",
-		"jira_project": "ENG", "jira_issue_type": "10001"}
+	raw := Object{
+		"repository": "acme/test", "jira_url": "https://acme.atlassian.net",
+		"jira_project": "ENG", "jira_issue_type": "10001",
+	}
 	maps.Copy(raw, extra)
 	c, err := ParseConfig(canonical(raw, false))
 	if err != nil {
@@ -28,8 +30,10 @@ func cp(c Comment) Comment {
 }
 
 func ghComment(id int, text string) Comment {
-	return Comment{Side: SideGitHub, ID: strconv.Itoa(id), Body: text, Created: "2026-01-01T00:00:00Z",
-		Author: "alice", HTMLURL: "https://github.com/acme/test/issues/1#issuecomment-" + strconv.Itoa(id)}
+	return Comment{
+		Side: SideGitHub, ID: strconv.Itoa(id), Body: text, Created: "2026-01-01T00:00:00Z",
+		Author: "alice", HTMLURL: "https://github.com/acme/test/issues/1#issuecomment-" + strconv.Itoa(id),
+	}
 }
 
 func jiraComment(id int, text string) Comment {
@@ -65,10 +69,14 @@ type fakeAPI struct {
 
 func newFake() *fakeAPI {
 	return &fakeAPI{
-		source: GitHubIssue{ID: 42, Number: 1, Title: "Original title", Body: "description",
-			HTMLURL: "https://github.com/acme/test/issues/1", State: "open"},
-		transitions: []JiraTransition{{ID: "31", Name: "Done", To: jiraStatus("Done", "done")},
-			{ID: "11", Name: "Reopen", To: jiraStatus("To Do", "new")}},
+		source: GitHubIssue{
+			ID: 42, Number: 1, Title: "Original title", Body: "description",
+			HTMLURL: "https://github.com/acme/test/issues/1", State: "open",
+		},
+		transitions: []JiraTransition{
+			{ID: "31", Name: "Done", To: jiraStatus("Done", "done")},
+			{ID: "11", Name: "Reopen", To: jiraStatus("To Do", "new")},
+		},
 		rows:   map[Side][]Comment{SideGitHub: {}, SideJira: {}},
 		nextID: 100,
 	}
@@ -269,6 +277,14 @@ func kinds(entries []*Entry) []Kind {
 	return out
 }
 
+// must fails the test on an unexpected error.
+func must(t *testing.T, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 func lastWrite(f *fakeAPI) write { return f.writes[len(f.writes)-1] }
 
 func jiraStatus(name, category string) JiraStatus {
@@ -281,7 +297,7 @@ func (f *fakeAPI) JiraTransitions(string) ([]JiraTransition, error) {
 	return slices.Clone(f.transitions), nil
 }
 
-func (f *fakeAPI) TransitionJira(_ string, transitionID string) error {
+func (f *fakeAPI) TransitionJira(_, transitionID string) error {
 	if err := f.maybeRefuse(); err != nil {
 		return err
 	}
@@ -395,6 +411,7 @@ func (f *fakeAPI) SetJiraParent(string, string) error    { return nil }
 
 // Jira → GitHub creation on the single-issue fake: nothing is selected in Jira.
 func (f *fakeAPI) SelectedJiraIssues() ([]JiraIssue, error) { return nil, nil }
+
 func (f *fakeAPI) CreateGitHubIssue(string, string, []string, string) (*GitHubIssue, error) {
 	return nil, syncErr("unexpected GitHub issue creation")
 }

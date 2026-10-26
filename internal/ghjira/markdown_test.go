@@ -80,6 +80,7 @@ func validADF(t *testing.T, node Object, parent string) {
 }
 
 func TestMarkdownIssueBody(t *testing.T) {
+	t.Parallel()
 	// The shape of the CDP plan issues.
 	got := markdownADF("Instead of `CODEOWNERS`, a ruleset.\n\n- **Owner:** Evan\n- **Jira:** ITINFRA-11821\n\n" +
 		"From the [CDP project plan](https://docs.google.com/x), row 5.")
@@ -87,11 +88,13 @@ func TestMarkdownIssueBody(t *testing.T) {
 		para(txt("Instead of "), txt("CODEOWNERS", code), txt(", a ruleset.")),
 		Object{"type": "bulletList", "content": []any{
 			item(para(txt("Owner:", strong), txt(" Evan"))),
-			item(para(txt("Jira:", strong), txt(" ITINFRA-11821")))}},
+			item(para(txt("Jira:", strong), txt(" ITINFRA-11821"))),
+		}},
 		para(txt("From the "), txt("CDP project plan", link("https://docs.google.com/x")), txt(", row 5."))))
 }
 
 func TestMarkdownBlocks(t *testing.T) {
+	t.Parallel()
 	got := markdownADF("## Plan\nline one\nline two\n\n> quoted **text**\n\n```go\nx := 1\n```\n\n---\n\n" +
 		"3. third\n4. fourth\n   - nested\n\n- [ ] open\n- [x] done\n\n| A | B |\n|---|:-:|\n| 1 | `2` |")
 	sameADF(t, got, doc(
@@ -102,28 +105,37 @@ func TestMarkdownBlocks(t *testing.T) {
 		Object{"type": "rule"},
 		Object{"type": "orderedList", "attrs": Object{"order": 3}, "content": []any{
 			item(para(txt("third"))),
-			item(para(txt("fourth")), Object{"type": "bulletList", "content": []any{item(para(txt("nested")))}})}},
+			item(para(txt("fourth")), Object{"type": "bulletList", "content": []any{item(para(txt("nested")))}}),
+		}},
 		Object{"type": "bulletList", "content": []any{item(para(txt("☐ open"))), item(para(txt("☑ done")))}},
 		Object{"type": "table", "content": []any{
 			Object{"type": "tableRow", "content": []any{
 				Object{"type": "tableHeader", "content": []any{para(txt("A"))}},
-				Object{"type": "tableHeader", "content": []any{para(txt("B"))}}}},
+				Object{"type": "tableHeader", "content": []any{para(txt("B"))}},
+			}},
 			Object{"type": "tableRow", "content": []any{
 				Object{"type": "tableCell", "content": []any{para(txt("1"))}},
-				Object{"type": "tableCell", "content": []any{para(txt("2", code))}}}}}}))
+				Object{"type": "tableCell", "content": []any{para(txt("2", code))}},
+			}},
+		}}))
 }
 
 func TestMarkdownInline(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		in   string
 		want []any
 	}{
 		{"snake_case_name stays", []any{txt("snake_case_name stays")}},
-		{"_em_ and *em* and ~~gone~~", []any{txt("em", em), txt(" and "), txt("em", em), txt(" and "),
-			txt("gone", Object{"type": "strike"})}},
+		{"_em_ and *em* and ~~gone~~", []any{
+			txt("em", em), txt(" and "), txt("em", em), txt(" and "),
+			txt("gone", Object{"type": "strike"}),
+		}},
 		{"**bold with [a link](https://x.io)**", []any{txt("bold with ", strong), txt("a link", strong, link("https://x.io"))}},
-		{"see https://x.io/a_b, then <https://y.io>", []any{txt("see "), txt("https://x.io/a_b", link("https://x.io/a_b")),
-			txt(", then "), txt("https://y.io", link("https://y.io"))}},
+		{"see https://x.io/a_b, then <https://y.io>", []any{
+			txt("see "), txt("https://x.io/a_b", link("https://x.io/a_b")),
+			txt(", then "), txt("https://y.io", link("https://y.io")),
+		}},
 		{`\*not em\* and 2 * 3 * 4`, []any{txt("*not em* and 2 * 3 * 4")}},
 		{"**`code` in bold**", []any{txt("code", code), txt(" in bold", strong)}},
 		{"a<br>b", []any{txt("a"), Object{"type": "hardBreak"}, txt("b")}},
@@ -135,6 +147,7 @@ func TestMarkdownInline(t *testing.T) {
 }
 
 func TestMarkdownDropsHiddenCommentsAndKeepsEverythingElse(t *testing.T) {
+	t.Parallel()
 	got := markdownADF("visible <!-- gh-jira-sync:abc --> text\n<!--\nmulti\n-->\n<div>raw html</div>")
 	sameADF(t, got, doc(para(txt("visible  text")), para(txt("<div>raw html</div>"))))
 	sameADF(t, markdownADF(""), doc(para()))
@@ -142,6 +155,7 @@ func TestMarkdownDropsHiddenCommentsAndKeepsEverythingElse(t *testing.T) {
 }
 
 func TestMarkdownOutputIsValidADF(t *testing.T) {
+	t.Parallel()
 	inputs := []string{
 		"- \n- [ ] \n-", "1.\n2. x", "> \n>", "**", "``", "[]()", "| a |\n|---|\n", "#", "###### h\n####### not",
 		"- a\n\n  continued\n- b\nlazy\n\n  - c\n    1. d\n\ntext", "* * *", "~~~\ncode\n~~~", strings.Repeat("- x\n  ", 40),

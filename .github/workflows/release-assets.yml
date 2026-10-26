@@ -1,0 +1,64 @@
+name: Release Assets
+
+# Attaches binaries to each release that release-please publishes, with a checksums file
+# and build provenance attestations, so a sync workflow in any organization can download
+# and verify the exact binary of the release it calls.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to build and attach assets to (for a release missing them)
+        type: string
+        required: true
+
+permissions: {}
+
+jobs:
+  assets:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # upload release assets
+      id-token: write # sign the provenance attestations
+      attestations: write
+    env:
+      TAG: ${{ inputs.tag || github.event.release.tag_name }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ env.TAG }}
+          # Full history so the Go toolchain stamps the tag as the module version.
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Build
+        run: |
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::$TAG is not a release tag"
+            exit 1
+          fi
+          mkdir dist
+          # Unix only: the state lock uses flock.
+          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
+            os=${target%/*} arch=${target#*/}
+            dir="gh-jira-sync_${TAG#v}_${os}_${arch}"
+            mkdir "$dir"
+            CGO_ENABLED=0 GOOS=$os GOARCH=$arch go build -trimpath \
+              -ldflags "-s -w -X github.com/cccteam/gh-jira-sync/internal/ghjira.releaseVersion=$TAG" \
+              -o "$dir/gh-jira-sync" .
+            cp README.md "$dir/"
+            tar -czf "dist/$dir.tar.gz" "$dir"
+          done
+          (cd dist && sha256sum -- *.tar.gz > checksums.txt)
+          cat dist/checksums.txt
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/*.tar.gz
+      - name: Upload
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$TAG" dist/* --clobber --repo "$GITHUB_REPOSITORY"
