@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="gh-jira-sync">
+  <title>gh-jira-sync</title>
+  <rect width="64" height="64" rx="14" fill="#1f2937"/>
+  <!-- Two issues, one on each side, kept in step by the arrows between them. -->
+  <circle cx="16" cy="32" r="7.5" fill="none" stroke="#f9fafb" stroke-width="3.5"/>
+  <circle cx="16" cy="32" r="2.25" fill="#f9fafb"/>
+  <rect x="42" y="26" width="12" height="12" rx="2.5" transform="rotate(45 48 32)" fill="#3b82f6"/>
+  <path d="M19 19Q32 9 45 19" fill="none" stroke="#f9fafb" stroke-width="3" stroke-linecap="round"/>
+  <path d="M40 15.5l5 3.5-4.5 4" fill="none" stroke="#f9fafb" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M45 45Q32 55 19 45" fill="none" stroke="#3b82f6" stroke-width="3" stroke-linecap="round"/>
+  <path d="M24 48.5l-5-3.5 4.5-4" fill="none" stroke="#3b82f6" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

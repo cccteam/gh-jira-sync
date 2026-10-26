@@ -1,4 +1,4 @@
-# GitHub ↔ Jira issue sync
+# <img src="docs/icon.svg" alt="" width="32" height="32" align="top"> GitHub ↔ Jira issue sync
 
 Creates Jira Cloud issues from GitHub issues labeled **`sync-jira`**, then copies
 original comments and their edits in both directions. Optionally it also mirrors
