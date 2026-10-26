@@ -386,16 +386,18 @@ func parseIssueTypes(in configInput, c *Config) error {
 	if !ok {
 		return syncErr("jira_issue_types must map GitHub issue type names to Jira issue type ID strings")
 	}
+	// Names match GitHub issue types ignoring case, so two that differ only in case
+	// would be ambiguous.
+	accepted := make([]string, 0, len(types))
 	for name, id := range types {
 		idString, _ := id.(string)
 		if strings.TrimSpace(name) == "" || !isDigits(idString) {
 			return syncErr("jira_issue_types must map GitHub issue type names to Jira issue type ID strings")
 		}
-		for existing := range c.JiraIssueTypes {
-			if strings.EqualFold(existing, name) {
-				return syncErr("jira_issue_types lists %q twice (names ignore case)", name)
-			}
+		if slices.ContainsFunc(accepted, func(other string) bool { return strings.EqualFold(other, name) }) {
+			return syncErr("jira_issue_types lists %q twice (names ignore case)", name)
 		}
+		accepted = append(accepted, name)
 		c.JiraIssueTypes[name] = idString
 	}
 
