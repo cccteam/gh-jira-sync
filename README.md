@@ -545,8 +545,15 @@ from a copy, or the HTML comment when editing a GitHub copy's Markdown; either
 blocks that comment for review. Copies made by older releases end with a visible
 `[gh-jira-sync:…]` line and keep working.
 
-GitHub Markdown is preserved literally in Jira, with CRLF line endings from the
-GitHub web editor normalized to LF. Jira comments are rendered as
+A new Jira issue's description is the GitHub issue body rendered as Jira rich text:
+headings, paragraphs (single line breaks kept, as GitHub shows them), bullet,
+numbered and task lists, quotes, code blocks, rules, tables, and bold, italic,
+strikethrough, inline code and links. Markdown it does not recognize stays as literal
+text, and hidden HTML comments are dropped. Descriptions are written once, at
+creation; later edits on either side are not synced.
+
+In comment copies, GitHub Markdown is preserved literally in Jira, with CRLF line
+endings from the GitHub web editor normalized to LF. Jira comments are rendered as
 readable plain text with links and list text; rich visual formatting is not kept.
 Unsupported media/tables block that comment for review. No attachments are uploaded.
 Restricted Jira comments are excluded. A comment's later deletion or loss of access

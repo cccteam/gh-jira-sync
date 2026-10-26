@@ -225,8 +225,12 @@ func TestJiraCreationHasAtomicIdentity(t *testing.T) {
 		t.Fatal("identity must live only in the issue property, not a visible label")
 	}
 	eq(t, fields["summary"], any("Original title"))
-	description, _ := adfText(fields["description"])
-	eq(t, description, "From GitHub: https://github.com/acme/test/issues/1\n\ndescription")
+	// The description is rich text: the source link is a link, the body follows.
+	url := "https://github.com/acme/test/issues/1"
+	eq(t, string(canonical(fields["description"], false)), string(canonical(Object{"type": "doc", "version": 1, "content": []any{
+		Object{"type": "paragraph", "content": []any{Object{"type": "text", "text": "From GitHub: "},
+			Object{"type": "text", "text": url, "marks": []any{Object{"type": "link", "attrs": Object{"href": url}}}}}},
+		Object{"type": "paragraph", "content": []any{Object{"type": "text", "text": "description"}}}}}, false)))
 }
 
 func TestServiceDeskProjectRejected(t *testing.T) {

@@ -404,7 +404,7 @@ func (a *Client) CreateIssue(source *GitHubIssue, parentKey string) (*JiraIssue,
 		fields["parent"] = Object{"key": parentKey}
 	}
 	fields["summary"] = source.Title
-	fields["description"] = toADF(issueDescription(source))
+	fields["description"] = markdownADF(issueDescription(source))
 	// Identity lives only in this issue property, written atomically with the issue.
 	request := struct {
 		Fields     Object `json:"fields"`

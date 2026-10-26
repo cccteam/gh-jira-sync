@@ -137,7 +137,14 @@ advance only after agreement. Copy fingerprints also detect formatting-only edit
 No API operation edits an original comment. Attribution remains the original author;
 API authorship is the service account, not impersonation.
 
-GitHub Markdown is copied literally into Jira ADF paragraphs. Jira text, paragraphs,
+Issue descriptions are converted from GitHub Markdown to rich ADF (`markdownADF`, a
+small standard-library parser for the constructs issue bodies use). Nothing reads a
+description back for comparison, so rich formatting there costs nothing. Comment
+copies stay literal: their edit detection compares the copy's ADF with the expected
+rendering of its text, so a rich conversion would also have to round-trip through
+`adfText` exactly, and existing copies would all look edited.
+
+In comment copies, GitHub Markdown is copied literally into Jira ADF paragraphs. Jira text, paragraphs,
 headings, lists, links, quotes, code, and common formatting are exported as readable
 plain text. Unsupported structures such as media/tables block that comment instead
 of silently dropping content. Restricted Jira comments are excluded. Jira Service
