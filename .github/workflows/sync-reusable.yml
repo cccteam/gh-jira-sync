@@ -94,6 +94,10 @@ jobs:
         env:
           CONFIG: ${{ inputs.config }}
         run: |
+          if [ ! -f "$CONFIG" ]; then
+            echo "::error::Config file $CONFIG not found in the calling repository"
+            exit 1
+          fi
           repo=$(jq -r '.repository // ""' "$CONFIG")
           project_owner=$(jq -r '.project_status.owner // ""' "$CONFIG")
           if [[ ! "$repo" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || [[ ! "$project_owner" =~ ^[A-Za-z0-9-]*$ ]]; then
@@ -130,7 +134,8 @@ jobs:
           (cd "$dir" && grep -F "  $archive" checksums.txt | shasum -a 256 --check --strict)
           # Proves the archive was built by this repository's release workflow from the tag.
           gh attestation verify "$dir/$archive" --repo cccteam/gh-jira-sync \
-            --signer-workflow cccteam/gh-jira-sync/.github/workflows/release-assets.yml
+            --signer-workflow cccteam/gh-jira-sync/.github/workflows/release-assets.yml \
+            --source-ref "refs/tags/$VERSION"
           tar -xzf "$dir/$archive" -C "$dir"
           mv "$dir/${archive%.tar.gz}/gh-jira-sync" "$RUNNER_TEMP/gh-jira-sync"
           rm -rf "$dir"

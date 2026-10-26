@@ -5,8 +5,15 @@ on:
     - cron: "0 14 * * 1" # Monday at 8:00 AM CDT
   workflow_dispatch:
 
+permissions: {}
+
 jobs:
   security_scan:
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+      issues: write
     uses: cccteam/github-workflows/.github/workflows/golang-security-scan.yml@ce3b6a61c4b88c82d3c0c1760dc1a3f5a2731021 # v8.2.3
     with:
       # The whole-repository Semgrep scan, reported by issue; the pull request scan is the gate.

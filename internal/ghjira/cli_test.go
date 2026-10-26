@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -12,6 +13,7 @@ import (
 type cliRun struct {
 	t                     *testing.T
 	api                   *fakeAPI
+	newAPI                apiFactory
 	config, state, report string
 }
 
@@ -28,15 +30,13 @@ func newCLI(t *testing.T) *cliRun {
 	if err := atomicJSON(r.config, raw); err != nil {
 		t.Fatal(err)
 	}
-	original := newAPI
-	newAPI = func(*Config) (API, error) { return r.api, nil }
-	t.Cleanup(func() { newAPI = original })
+	r.newAPI = func(*Config) (API, error) { return r.api, nil }
 	return r
 }
 
 func (r *cliRun) main(extra ...string) int {
 	args := append([]string{"--config", r.config, "--state", r.state, "--report", r.report}, extra...)
-	return Main(args, io.Discard)
+	return mainWith(args, io.Discard, r.newAPI)
 }
 
 func (r *cliRun) readReport() map[string]any {
@@ -55,8 +55,8 @@ func firstEntry(rep map[string]any) map[string]any {
 	return asObject(list(rep["entries"])[0])
 }
 
-//nolint:paralleltest // replaces the package-level newAPI hook
 func TestCLIDryRunDoesNotCreateStateOrWrite(t *testing.T) {
+	t.Parallel()
 	r := newCLI(t)
 	eq(t, r.main("--init-state"), 0)
 	if _, err := os.Stat(r.state); err == nil {
@@ -66,25 +66,25 @@ func TestCLIDryRunDoesNotCreateStateOrWrite(t *testing.T) {
 	eq(t, r.readReport()["planned_writes"], any(1.0))
 }
 
-//nolint:paralleltest // replaces the package-level newAPI hook
 func TestMissingStateFailsBeforeNetwork(t *testing.T) {
+	t.Parallel()
 	r := newCLI(t)
 	called := false
-	newAPI = func(*Config) (API, error) { called = true; return r.api, nil }
+	r.newAPI = func(*Config) (API, error) { called = true; return r.api, nil }
 	eq(t, r.main("--apply"), 1)
 	eq(t, called, false)
 }
 
-//nolint:paralleltest // replaces the package-level newAPI hook
 func TestCLIApplyThenRepeat(t *testing.T) {
+	t.Parallel()
 	r := newCLI(t)
 	eq(t, r.main("--apply", "--init-state"), 0)
 	eq(t, r.main("--apply"), 0)
 	eq(t, len(r.api.writes), 1)
 }
 
-//nolint:paralleltest // replaces the package-level newAPI hook
 func TestCLIAcknowledgeClearsReviewExitCode(t *testing.T) {
+	t.Parallel()
 	r := newCLI(t)
 	eq(t, r.main("--apply", "--init-state"), 0)
 	r.api.rows["github"] = []Comment{ghComment(11, "Original")}
@@ -97,23 +97,23 @@ func TestCLIAcknowledgeClearsReviewExitCode(t *testing.T) {
 	eq(t, firstEntry(r.readReport())["kind"], any("acknowledged"))
 }
 
-//nolint:paralleltest // replaces the package-level newAPI hook
 func TestCLIReportIncludesApplyOutcomes(t *testing.T) {
+	t.Parallel()
 	r := newCLI(t)
 	r.api.refuse = []int{400}
 	eq(t, r.main("--apply", "--init-state"), 2)
 	eq(t, firstEntry(r.readReport())["outcome"], any("rejected"))
 }
 
-//nolint:paralleltest // replaces the package-level newAPI hook
 func TestCLIRejectsSharedPathsAndBadBranch(t *testing.T) {
+	t.Parallel()
 	r := newCLI(t)
-	eq(t, Main([]string{"--config", r.config, "--state", r.config}, io.Discard), 1)
+	eq(t, mainWith([]string{"--config", r.config, "--state", r.config}, io.Discard, r.newAPI), 1)
 	eq(t, r.main("--git-state-branch", "main"), 2)
 }
 
-//nolint:paralleltest // replaces the package-level newAPI hook
 func TestLockExcludesOtherWriter(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "lock")
 	unlock, err := locked(path)
 	if err != nil {
@@ -125,8 +125,8 @@ func TestLockExcludesOtherWriter(t *testing.T) {
 	}
 }
 
-//nolint:paralleltest // replaces the package-level newAPI hook
 func TestCLIReportsMissingConfigPath(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	missing := filepath.Join(dir, "nope.json")
 	report := filepath.Join(dir, "report.json")
@@ -140,4 +140,13 @@ func TestCLIReportsMissingConfigPath(t *testing.T) {
 		t.Fatal(err)
 	}
 	eq(t, rep["error"], any("Cannot open "+missing+": no such file or directory"))
+}
+
+func TestCLIVersionPrintsToStdout(t *testing.T) {
+	t.Parallel()
+	var out strings.Builder
+	eq(t, Main([]string{"--version"}, &out), 0)
+	if !strings.HasPrefix(out.String(), "gh-jira-sync ") {
+		t.Fatalf("version output %q", out.String())
+	}
 }

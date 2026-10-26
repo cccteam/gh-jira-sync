@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"regexp"
 	"slices"
@@ -305,6 +306,9 @@ func ParseConfig(data []byte) (*Config, error) {
 	dec.UseNumber()
 	if err := dec.Decode(&top); err != nil {
 		return nil, fmt.Errorf("decode config: %w", err)
+	}
+	if err := dec.Decode(new(json.RawMessage)); !errors.Is(err, io.EOF) {
+		return nil, syncErr("Configuration must be a single JSON object")
 	}
 	raw, ok := top.(Object)
 	if !ok {

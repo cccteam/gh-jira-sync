@@ -655,6 +655,10 @@ func TestBindingAndBadConfigFailClosed(t *testing.T) {
 	if _, err := ParseConfig([]byte("[]")); err == nil {
 		t.Error("non-object config accepted")
 	}
+	valid := canonical(base, false)
+	if _, err := ParseConfig(append(valid, valid...)); err == nil {
+		t.Error("config with trailing data accepted")
+	}
 }
 
 func TestReportOmitsCommentBodies(t *testing.T) {

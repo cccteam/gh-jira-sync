@@ -50,7 +50,8 @@ The code is one Go package, `internal/ghjira`, with a thin `main.go`:
 * `engine.go` separates planning from execution and manages identity/recovery.
 * `storage.go` defines the state types, local checkpoints, and the Git-branch store.
 * `cli.go` provides dry-run/apply, locking, reports, and nonzero failure codes.
-
+* `markdown.go` converts GitHub Markdown to Jira rich text for new issue descriptions.
+* `version.go` reports the release a binary was built from.
 * `types.go` defines named types for every closed set of values (`Side`, `Kind`,
   `Status`, `OpKind`, `Outcome`) and the GitHub/Jira response shapes.
 

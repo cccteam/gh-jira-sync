@@ -8,15 +8,24 @@ on:
     # pull requests restore: a pull request can read entries saved on its own branch and on
     # its base, nothing else.
 
+permissions: {}
+
 concurrency:
-  group: ${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # Runs on main save the caches pull requests restore, so only pull request runs cancel.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   golang-ci:
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
     uses: cccteam/github-workflows/.github/workflows/golang-ci.yml@ce3b6a61c4b88c82d3c0c1760dc1a3f5a2731021 # v8.2.3
     with:
       build-tags: '[""]'
       golangci-lint-version: "v2.14.0"
   semantic-titles:
+    permissions:
+      pull-requests: read
     uses: cccteam/github-workflows/.github/workflows/semantic-pull-request-title.yml@ce3b6a61c4b88c82d3c0c1760dc1a3f5a2731021 # v8.2.3
