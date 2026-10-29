@@ -233,6 +233,36 @@ starts `release-assets.yml`, which waits for the draft, builds and attests the
 archives, uploads them, and only then publishes the release. A published release is
 never modified; one missing assets is superseded by a new version.
 
+## Jira authentication
+
+Jira is called with HTTP Basic auth (an account email and API token) or, for an
+Atlassian service account, with an OAuth 2.0 client credentials grant. An ordinary
+user's token works against the site URL. A service account's scoped API token or
+OAuth access token works only through the API gateway,
+`https://api.atlassian.com/ex/jira/<cloud ID>`, which `jira_cloud_id` selects; OAuth
+without it fails validation. Exactly one credential pair must be set, so a leftover
+variable cannot silently pick another account.
+
+Only API calls move to the gateway: `jira_url` still
+forms the deployment binding and every link written into a copy, so switching an
+existing deployment to a service account keeps its state and its links. Because a
+wrong cloud ID would write to another site while links point at this one,
+`CheckProject` first reads `/rest/api/3/serverInfo` (anonymous, no scopes) and fails
+unless its `baseUrl` is `jira_url`.
+
+OAuth access tokens come from `https://auth.atlassian.com/oauth/token` and last an
+hour. The client fetches one before the first Jira request and renews it five minutes
+before expiry, so a long run never sends a lapsed token. A failure to get a token is
+reported as a 401 refusal: the Jira request was never sent, so a creation journaled
+just before it becomes `rejected` and is retried next run, instead of staying pending
+where recovery could only block it. Token errors name the HTTP status only, never
+the response, which could echo the credentials.
+
+Nothing checks which account wrote a copy; Jira's permissions decide. With only Edit
+Own Comments, after a switch, edits to originals whose Jira copies the old account
+wrote are refused and reported as `rejected`, then retried each run. Granting the new
+account Edit All Comments avoids that.
+
 ## API references
 
 * https://docs.github.com/en/rest/issues/issues
@@ -242,6 +272,8 @@ never modified; one missing assets is superseded by a new version.
 * https://developer.atlassian.com/cloud/jira/platform/search-and-reconcile/
 * https://developer.atlassian.com/cloud/jira/software/rest/api-group-backlog/
 * https://developer.atlassian.com/cloud/jira/software/rest/api-group-board/
+* https://support.atlassian.com/user-management/docs/manage-api-tokens-for-service-accounts/
+* https://support.atlassian.com/user-management/docs/create-oauth-2-0-credential-for-service-accounts/
 
 ## Project status
 

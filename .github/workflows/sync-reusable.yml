@@ -46,12 +46,20 @@ on:
         type: string
         default: ''
     secrets:
+      # Jira credentials: pass jira-email and jira-api-token, or a service account's
+      # jira-client-id and jira-client-secret (which need jira_cloud_id), not both.
       jira-email:
-        description: Jira Cloud service account email
-        required: true
+        description: Jira Cloud account email, for API token authentication
+        required: false
       jira-api-token:
         description: API token for that account
-        required: true
+        required: false
+      jira-client-id:
+        description: Client ID of a Jira service account's OAuth 2.0 credential
+        required: false
+      jira-client-secret:
+        description: Client secret of that OAuth 2.0 credential
+        required: false
       app-private-key:
         description: Private key of the GitHub App named by app-client-id
         required: false
@@ -191,6 +199,8 @@ jobs:
           GH_PROJECT_TOKEN: ${{ secrets.project-token || steps.projects-token.outputs.token }}
           JIRA_EMAIL: ${{ secrets.jira-email }}
           JIRA_API_TOKEN: ${{ secrets.jira-api-token }}
+          JIRA_CLIENT_ID: ${{ secrets.jira-client-id }}
+          JIRA_CLIENT_SECRET: ${{ secrets.jira-client-secret }}
           APPLY: ${{ inputs.apply }}
           INITIALIZE: ${{ inputs.initialize }}
           CONFIG: ${{ inputs.config }}

@@ -49,9 +49,13 @@ func refusedStatus(err error) (int, bool) {
 
 // Config is a validated sync.json.
 type Config struct {
-	Repository    string
-	GitHubURL     string
-	JiraURL       string
+	Repository string
+	GitHubURL  string
+	JiraURL    string
+	// JiraCloudID routes Jira API calls through Atlassian's API gateway, which
+	// Atlassian service account tokens require; "" calls JiraURL directly. Links
+	// in copies and the deployment binding always use JiraURL.
+	JiraCloudID   string
 	JiraProject   string
 	JiraIssueType string
 	// JiraIssueTypes maps GitHub issue type names (matched ignoring case) to Jira
@@ -284,6 +288,7 @@ type StatusSync struct {
 
 var (
 	repositoryPattern = regexp.MustCompile(`^[\w.-]+/[\w.-]+$`)
+	cloudIDPattern    = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 	projectPattern    = regexp.MustCompile(`^[A-Z][A-Z0-9_]*$`)
 	// markerPattern is the visible marker older releases appended to copies;
 	// hiddenMarkerPattern is the HTML comment GitHub copies now end with.
@@ -296,7 +301,20 @@ var configKeys = map[string]bool{
 	"jira_issue_type": true, "selection_label": true, "issue_state": true, "max_operations": true,
 	"max_pages": true, "comments": true, "comments_since": true, "jira_create_fields": true,
 	"full_rescan_hours": true, "status_sync": true, "project_status": true, "jira_issue_types": true,
-	"sync_parents": true, "jira_selection_label": true, "jira_subtask_type": true,
+	"sync_parents": true, "jira_selection_label": true, "jira_subtask_type": true, "jira_cloud_id": true,
+}
+
+// jiraGateway is Atlassian's API gateway; a site's API lives at jiraGateway + cloud ID.
+const jiraGateway = "https://api.atlassian.com/ex/jira/"
+
+// JiraAPIURL is the base URL for Jira API calls: the gateway when JiraCloudID is
+// set, otherwise the site itself.
+func (c *Config) JiraAPIURL() string {
+	if c.JiraCloudID != "" {
+		return jiraGateway + c.JiraCloudID
+	}
+
+	return c.JiraURL
 }
 
 // ParseConfig validates sync.json. Unknown keys and wrong types fail closed.
@@ -370,6 +388,15 @@ func parseEndpoints(in configInput, c *Config) error {
 	}
 	if c.JiraProject, str = in["jira_project"].(string); !str || !projectPattern.MatchString(c.JiraProject) {
 		return syncErr("jira_project must be a project key")
+	}
+	switch id := in.value("jira_cloud_id", nil).(type) {
+	case nil:
+	case string:
+		if c.JiraCloudID = strings.ToLower(id); !cloudIDPattern.MatchString(c.JiraCloudID) {
+			return syncErr("jira_cloud_id must be the site's cloud ID, a UUID")
+		}
+	default:
+		return syncErr("jira_cloud_id must be a string or null")
 	}
 
 	return nil

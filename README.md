@@ -22,12 +22,50 @@ Jira site, project key, and issue type ID. Then set credentials:
 | --- | --- |
 | `GH_TOKEN` | GitHub token with Issues read/write on the repository |
 | `GH_PROJECT_TOKEN` | Projects read/write; only with `project_status` |
-| `JIRA_EMAIL`, `JIRA_API_TOKEN` | Jira Cloud service account |
+| `JIRA_EMAIL`, `JIRA_API_TOKEN` | Jira account email and API token; see [Jira account](#jira-account) |
+| `JIRA_CLIENT_ID`, `JIRA_CLIENT_SECRET` | Instead: a service account's OAuth 2.0 credential |
 
 The Jira account needs Browse Projects, Create Issues, Add Comments, Edit Own
 Comments, and access to issue properties. Add Transition Issues for `status_sync` or
 `project_status`, Edit Issues for `sync_parents`, and board browse and rank
 permissions for backlog mode. Jira Service Management projects are not supported.
+
+### Jira account
+
+Use an [Atlassian service account](https://support.atlassian.com/user-management/docs/understand-service-accounts/)
+where you can. It does not use a Jira seat, but it needs Atlassian Guard Standard or
+Enterprise.
+
+1. Create the service account in Atlassian Administration, give it Jira access, and
+   grant it the project permissions above.
+2. Create one credential for it, with the scopes `read:jira-work` and
+   `write:jira-work`. Backlog mode also needs `read:board-scope:jira-software`,
+   `read:issue-details:jira`, and `write:board-scope:jira-software`. Scopes cannot be
+   changed later. Either:
+   * an [OAuth 2.0 credential](https://support.atlassian.com/user-management/docs/create-oauth-2-0-credential-for-service-accounts/):
+     set `JIRA_CLIENT_ID` and `JIRA_CLIENT_SECRET`. Each run trades them for an access
+     token, which lasts an hour, and renews it before it runs out; or
+   * an [API token](https://support.atlassian.com/user-management/docs/manage-api-tokens-for-service-accounts/):
+     set `JIRA_EMAIL` to the service account's email and `JIRA_API_TOKEN` to the
+     token. It expires, after one year by default.
+3. Set `jira_cloud_id` to the [site's cloud ID](https://support.atlassian.com/jira/kb/retrieve-my-atlassian-sites-cloud-id/),
+   for example from `https://<site>.atlassian.net/_edge/tenant_info`. Service account
+   credentials work only through Atlassian's API gateway, so this sends API calls
+   there. Keep `jira_url` as the site; links in copies still point to it.
+
+Set one pair of Jira variables, never both; a run with both, or with only half of
+one, stops before contacting Jira. If an access token cannot be obtained, the run
+stops and the write it was for is `rejected` and retried next run.
+
+Each run first confirms that the cloud ID belongs to `jira_url`. An existing deployment
+can switch to a service account without new state, since state is bound to `jira_url`.
+Jira copies the old account wrote can be edited only by that account unless the new
+one also has Edit All Comments. Without it, later edits to those originals are
+`rejected` and retried each run.
+
+A dedicated ordinary Atlassian user with an
+[API token](https://support.atlassian.com/atlassian-account/docs/manage-api-tokens-for-your-atlassian-account/)
+also works. Leave `jira_cloud_id` unset for it.
 
 ```sh
 go install github.com/cccteam/gh-jira-sync@latest
@@ -96,7 +134,8 @@ pin current. Releases v0.1.1 and later carry binaries; v0.1.0 does not.
 
 | Secret | Purpose |
 | --- | --- |
-| `jira-email`, `jira-api-token` | Required. Jira Cloud service account |
+| `jira-email`, `jira-api-token` | Jira account email and API token |
+| `jira-client-id`, `jira-client-secret` | Instead: a service account's OAuth 2.0 credential |
 | `app-private-key` | The GitHub App's private key, with `app-client-id` |
 | `github-token` | Instead of the App: Issues read/write on the configured repository |
 | `project-token` | Instead of the App: Projects read/write, for example for a user-owned project |
@@ -148,6 +187,7 @@ Unknown keys fail validation.
 | --- | --- |
 | `repository` | Required `owner/name` |
 | `jira_url` | Required Jira Cloud HTTPS site URL |
+| `jira_cloud_id` | `null`; the site's cloud ID, to call Jira through Atlassian's API gateway as a [service account](#jira-account) does |
 | `jira_project` | Required project key, e.g. `ENG` |
 | `jira_issue_type` | Required issue type **ID**, e.g. `"10001"` |
 | `jira_issue_types` | `{}`; GitHub issue type name → Jira issue type ID, e.g. `{"Bug": "10004"}` |
