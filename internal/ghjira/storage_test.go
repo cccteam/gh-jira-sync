@@ -17,7 +17,7 @@ func TestRealGitPersistenceReloadAndCompetingWriter(t *testing.T) {
 			t.Fatalf("git %v: %v\n%s", args, err, out)
 		}
 	}
-	store := func() *GitStore { return &GitStore{Branch: "sync-state", Dir: local} }
+	store := func() *GitStore { return &GitStore{Ref: "refs/heads/sync-state", Dir: local} }
 	loaded := func() *State {
 		s, err := store().Load()
 		if err != nil {
@@ -113,7 +113,7 @@ func TestSeveralDeploymentsShareOneRemote(t *testing.T) {
 	local := gitClone(t)
 	states := map[string]*State{}
 	for _, d := range []struct{ branch, project string }{{"sync-state", "ENG"}, {"sync-state-ops", "OPS"}} {
-		store := &GitStore{Branch: d.branch, Dir: local}
+		store := &GitStore{Ref: "refs/heads/" + d.branch, Dir: local}
 		if s, err := store.Load(); err != nil || s != nil {
 			t.Fatalf("%s: expected no state yet: %v %v", d.branch, s, err)
 		}
@@ -123,7 +123,7 @@ func TestSeveralDeploymentsShareOneRemote(t *testing.T) {
 		}
 	}
 	for branch, want := range states {
-		got, err := (&GitStore{Branch: branch, Dir: local}).Load()
+		got, err := (&GitStore{Ref: "refs/heads/" + branch, Dir: local}).Load()
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -151,8 +151,45 @@ func TestRefusesBranchHoldingMoreThanState(t *testing.T) {
 			t.Fatalf("git %v: %v\n%s", args, err, out)
 		}
 	}
-	_, err := (&GitStore{Branch: "sync-state-docs", Dir: local}).Load()
+	_, err := (&GitStore{Ref: "refs/heads/sync-state-docs", Dir: local}).Load()
 	if err == nil || !strings.Contains(err.Error(), "holds more than state.json") {
 		t.Fatalf("expected refusal, got %v", err)
 	}
+}
+
+func TestHiddenRefStateIsSeparateFromBranches(t *testing.T) {
+	t.Parallel()
+	local := gitClone(t)
+	hidden, err := NewHiddenGitStore("sync-state")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hidden.Dir = local
+	eq(t, hidden.Ref, "refs/gh-jira-sync/sync-state")
+	if _, err := NewHiddenGitStore("refs/gh-jira-sync/sync-state"); err == nil {
+		t.Fatal("full ref accepted as a name")
+	}
+	if s, err := hidden.Load(); err != nil || s != nil {
+		t.Fatalf("expected no state yet: %v %v", s, err)
+	}
+	state := NewState(testConfig(t, nil))
+	if err := hidden.Save(state); err != nil {
+		t.Fatal(err)
+	}
+	// A competing writer that loaded before the save is rejected, as on a branch.
+	stale := &GitStore{Ref: hidden.Ref, Dir: local}
+	stale.parent = ""
+	if stale.Save(state) == nil {
+		t.Fatal("competing writer pushed to the hidden ref")
+	}
+	// The branch of the same name is untouched and still empty.
+	branch := &GitStore{Ref: "refs/heads/sync-state", Dir: local}
+	if s, err := branch.Load(); err != nil || s != nil {
+		t.Fatalf("hidden save reached the branch: %v %v", s, err)
+	}
+	got, err := (&GitStore{Ref: hidden.Ref, Dir: local}).Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	eq(t, got.Binding, state.Binding)
 }

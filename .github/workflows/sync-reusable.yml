@@ -17,6 +17,12 @@ on:
         description: Dedicated state branch in the calling repository (sync-state or sync-state-<name>)
         type: string
         default: sync-state
+      hidden-state:
+        description: >-
+          Keep state on the hidden ref refs/gh-jira-sync/<state-branch> instead of a
+          branch, so it stays out of the branch list and clones.
+        type: boolean
+        default: false
       apply:
         description: Apply remote changes (otherwise dry-run)
         type: boolean
@@ -205,8 +211,11 @@ jobs:
           INITIALIZE: ${{ inputs.initialize }}
           CONFIG: ${{ inputs.config }}
           BRANCH: ${{ inputs.state-branch }}
+          HIDDEN: ${{ inputs.hidden-state }}
         run: |
-          args=(--config "$CONFIG" --git-state-branch "$BRANCH"
+          store=--git-state-branch
+          if [ "$HIDDEN" = true ]; then store=--git-state-ref; fi
+          args=(--config "$CONFIG" "$store" "$BRANCH"
                 --state "$RUNNER_TEMP/state/state.json" --report "$RUNNER_TEMP/sync-report.json")
           if [ "$APPLY" = true ]; then args+=(--apply); fi
           if [ "$INITIALIZE" = true ]; then args+=(--init-state); fi

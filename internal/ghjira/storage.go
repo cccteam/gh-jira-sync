@@ -204,10 +204,11 @@ func atomicJSON(path string, v any) error {
 	return nil
 }
 
-// GitStore checkpoints state to a dedicated branch on origin. It never checks out,
-// force-pushes, or retries: a rejected push means a concurrent writer.
+// GitStore checkpoints state to a dedicated ref on origin: a branch, or a hidden ref
+// under refs/gh-jira-sync/ that clones and the branch list do not show. It never checks
+// out, force-pushes, or retries: a rejected push means a concurrent writer.
 type GitStore struct {
-	Branch   string
+	Ref      string // full ref name, such as refs/heads/sync-state
 	Dir      string // working directory for git; empty means the current directory
 	parent   string
 	previous []byte
@@ -218,13 +219,27 @@ type GitStore struct {
 // existing "sync-state" branch in Git's ref namespace, so names use a dash.
 var stateBranchPattern = regexp.MustCompile(`^sync-state(-[A-Za-z0-9][A-Za-z0-9_-]*)?$`)
 
+// hiddenRefPrefix holds hidden state refs. Git enforces fast-forward pushes there as
+// for branches, so a stale writer is still rejected.
+const hiddenRefPrefix = "refs/gh-jira-sync/"
+
 // NewGitStore returns a store for a state branch, after checking its name.
 func NewGitStore(branch string) (*GitStore, error) {
 	if !stateBranchPattern.MatchString(branch) {
 		return nil, syncErr("State branch must be sync-state or sync-state-<name>")
 	}
 
-	return &GitStore{Branch: branch}, nil
+	return &GitStore{Ref: "refs/heads/" + branch}, nil
+}
+
+// NewHiddenGitStore returns a store for the hidden ref refs/gh-jira-sync/<name>, after
+// checking the name, which follows the state branch rules.
+func NewHiddenGitStore(name string) (*GitStore, error) {
+	if !stateBranchPattern.MatchString(name) {
+		return nil, syncErr("State ref name must be sync-state or sync-state-<name>")
+	}
+
+	return &GitStore{Ref: hiddenRefPrefix + name}, nil
 }
 
 func (g *GitStore) git(data string, allowed []int, args ...string) (code int, out string, err error) {
@@ -252,14 +267,14 @@ func (g *GitStore) git(data string, allowed []int, args ...string) (code int, ou
 	return code, "", syncErr("Git checkpoint failed; check remote, permissions, or concurrent writer")
 }
 
-// Load returns nil when the branch does not exist yet.
+// Load returns nil when the ref does not exist yet.
 func (g *GitStore) Load() (*State, error) {
-	// The full ref avoids matching another branch that merely ends in the same name.
-	code, _, err := g.git("", []int{0, 2}, "ls-remote", "--exit-code", "origin", "refs/heads/"+g.Branch)
+	// The full ref avoids matching another ref that merely ends in the same name.
+	code, _, err := g.git("", []int{0, 2}, "ls-remote", "--exit-code", "origin", g.Ref)
 	if err != nil || code == 2 {
 		return nil, err
 	}
-	if _, _, err := g.git("", []int{0}, "fetch", "origin", "refs/heads/"+g.Branch); err != nil {
+	if _, _, err := g.git("", []int{0}, "fetch", "origin", g.Ref); err != nil {
 		return nil, err
 	}
 	_, parent, err := g.git("", []int{0}, "rev-parse", "FETCH_HEAD")
@@ -267,10 +282,10 @@ func (g *GitStore) Load() (*State, error) {
 		return nil, err
 	}
 	// Each checkpoint replaces the whole tree with state.json, so pointing the store at
-	// a branch holding anything else would wipe that branch's files on the next save.
+	// a ref holding anything else would wipe that ref's files on the next save.
 	if _, files, err := g.git("", []int{0}, "ls-tree", "--name-only", parent); err != nil || files != "state.json" {
 		if err == nil {
-			err = syncErr("Branch %s holds more than state.json; refusing to use it as sync state", g.Branch)
+			err = syncErr("%s holds more than state.json; refusing to use it as sync state", g.Ref)
 		}
 
 		return nil, err
@@ -312,7 +327,7 @@ func (g *GitStore) Save(s *State) error {
 		return err
 	}
 	// A normal push must reject conflicting writers; never retry or force it.
-	if _, _, err := g.git("", []int{0}, "push", "origin", commit+":refs/heads/"+g.Branch); err != nil {
+	if _, _, err := g.git("", []int{0}, "push", "origin", commit+":"+g.Ref); err != nil {
 		return err
 	}
 	g.parent, g.previous = commit, current

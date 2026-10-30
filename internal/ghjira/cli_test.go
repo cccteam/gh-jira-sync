@@ -110,6 +110,8 @@ func TestCLIRejectsSharedPathsAndBadBranch(t *testing.T) {
 	r := newCLI(t)
 	eq(t, mainWith([]string{"--config", r.config, "--state", r.config}, io.Discard, r.newAPI), 1)
 	eq(t, r.main("--git-state-branch", "main"), 2)
+	eq(t, r.main("--git-state-ref", "refs/gh-jira-sync/sync-state"), 2)
+	eq(t, r.main("--git-state-branch", "sync-state", "--git-state-ref", "sync-state"), 2)
 }
 
 func TestLockExcludesOtherWriter(t *testing.T) {
