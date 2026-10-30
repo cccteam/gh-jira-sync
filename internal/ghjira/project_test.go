@@ -360,7 +360,7 @@ func TestPaginationRefusesForeignHosts(t *testing.T) {
 }
 
 func TestProjectTokenRequired(t *testing.T) {
-	for k, v := range map[string]string{"GH_TOKEN": "x", "JIRA_EMAIL": "x", "JIRA_API_TOKEN": "x", "GH_PROJECT_TOKEN": ""} {
+	for k, v := range map[string]string{"GH_TOKEN": "x", "JIRA_EMAIL": "x", "JIRA_API_TOKEN": "x", "JIRA_CLIENT_ID": "", "JIRA_CLIENT_SECRET": "", "GH_PROJECT_TOKEN": ""} {
 		t.Setenv(k, v)
 	}
 	c := testConfig(t, nil)

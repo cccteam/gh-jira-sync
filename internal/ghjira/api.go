@@ -17,6 +17,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -66,9 +67,12 @@ type API interface {
 type HTTP struct {
 	base    string
 	headers map[string]string
-	client  *http.Client
-	sleep   func(time.Duration)
-	now     func() time.Time
+	// auth, when set, supplies the Authorization header before each attempt, so a
+	// short-lived token can be renewed during a run.
+	auth   func() (string, error)
+	client *http.Client
+	sleep  func(time.Duration)
+	now    func() time.Time
 }
 
 func newHTTP(base string, headers map[string]string) *HTTP {
@@ -143,6 +147,13 @@ func (h *HTTP) exchange(method, path string, body, out any) (http.Header, error)
 		for k, v := range h.headers {
 			req.Header.Set(k, v)
 		}
+		if h.auth != nil {
+			value, err := h.auth()
+			if err != nil {
+				return nil, err
+			}
+			req.Header.Set(headerAuthorization, value)
+		}
 		req.Header.Set("Content-Type", "application/json")
 		resp, err := h.client.Do(req)
 		var result []byte
@@ -192,21 +203,24 @@ type Client struct {
 	projects *HTTP // project status mode only; uses GH_PROJECT_TOKEN
 }
 
-// NewClient reads credentials from GH_TOKEN, JIRA_EMAIL, and JIRA_API_TOKEN, plus
-// GH_PROJECT_TOKEN in project status mode.
+// NewClient reads credentials from GH_TOKEN and either JIRA_EMAIL and JIRA_API_TOKEN
+// or JIRA_CLIENT_ID and JIRA_CLIENT_SECRET, plus GH_PROJECT_TOKEN in project status mode.
 func NewClient(c *Config) (*Client, error) {
-	gh, email, apiToken := os.Getenv("GH_TOKEN"), os.Getenv("JIRA_EMAIL"), os.Getenv("JIRA_API_TOKEN")
-	if gh == "" || email == "" || apiToken == "" {
-		return nil, syncErr("Set GH_TOKEN, JIRA_EMAIL, and JIRA_API_TOKEN")
+	gh := os.Getenv("GH_TOKEN")
+	if gh == "" {
+		return nil, syncErr("Set GH_TOKEN")
 	}
-	basic := base64.StdEncoding.EncodeToString([]byte(email + ":" + apiToken))
+	jira, err := newJiraHTTP(c)
+	if err != nil {
+		return nil, err
+	}
 	client := &Client{
 		c: c,
 		github: newHTTP(c.GitHubURL, map[string]string{
 			headerAuthorization: "Bearer " + gh,
 			headerAccept:        "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28",
 		}),
-		jira: newHTTP(c.JiraURL, map[string]string{headerAuthorization: "Basic " + basic, headerAccept: "application/json"}),
+		jira: jira,
 	}
 	if c.ProjectStatus != nil {
 		projectToken := os.Getenv("GH_PROJECT_TOKEN")
@@ -223,8 +237,122 @@ func NewClient(c *Config) (*Client, error) {
 	return client, nil
 }
 
-// CheckProject verifies the Jira project's type and that every configured issue type exists in it.
+// newJiraHTTP picks the Jira credentials: an account email and API token (HTTP Basic
+// auth), or a service account's OAuth 2.0 client credentials. Exactly one pair must
+// be set, so a leftover variable can never silently choose the other account.
+func newJiraHTTP(c *Config) (*HTTP, error) {
+	email, apiToken := os.Getenv("JIRA_EMAIL"), os.Getenv("JIRA_API_TOKEN")
+	clientID, secret := os.Getenv("JIRA_CLIENT_ID"), os.Getenv("JIRA_CLIENT_SECRET")
+	basic, oauth := email != "" || apiToken != "", clientID != "" || secret != ""
+	headers := map[string]string{headerAccept: "application/json"}
+	switch {
+	case basic && oauth:
+		return nil, syncErr("Set JIRA_EMAIL and JIRA_API_TOKEN, or JIRA_CLIENT_ID and JIRA_CLIENT_SECRET, not both")
+	case oauth:
+		if clientID == "" || secret == "" {
+			return nil, syncErr("Set both JIRA_CLIENT_ID and JIRA_CLIENT_SECRET")
+		}
+		if c.JiraCloudID == "" {
+			return nil, syncErr("OAuth credentials work only through Atlassian's API gateway; set jira_cloud_id")
+		}
+		h := newHTTP(c.JiraAPIURL(), headers)
+		h.auth = newOAuthToken(atlassianTokenURL, clientID, secret).header
+
+		return h, nil
+	case email == "" || apiToken == "":
+		return nil, syncErr("Set JIRA_EMAIL and JIRA_API_TOKEN, or JIRA_CLIENT_ID and JIRA_CLIENT_SECRET")
+	}
+	headers[headerAuthorization] = "Basic " + base64.StdEncoding.EncodeToString([]byte(email+":"+apiToken))
+
+	return newHTTP(c.JiraAPIURL(), headers), nil
+}
+
+// atlassianTokenURL issues OAuth 2.0 access tokens for service account credentials.
+const atlassianTokenURL = "https://auth.atlassian.com/oauth/token"
+
+// oauthRenewBefore renews an access token this long before it expires, so a request
+// never starts with a token about to lapse.
+const oauthRenewBefore = 5 * time.Minute
+
+// oauthToken holds a service account's client credentials and its current access
+// token, which lasts about an hour and is renewed when close to expiry.
+type oauthToken struct {
+	mu                         sync.Mutex
+	endpoint, clientID, secret string
+	client                     *http.Client
+	now                        func() time.Time
+	token                      string
+	expires                    time.Time
+}
+
+func newOAuthToken(endpoint, clientID, secret string) *oauthToken {
+	return &oauthToken{
+		endpoint: endpoint, clientID: clientID, secret: secret, now: time.Now,
+		client: &http.Client{
+			Timeout:       30 * time.Second,
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		},
+	}
+}
+
+// header returns the Authorization header value, requesting a new token when needed.
+func (o *oauthToken) header() (string, error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.token == "" || !o.now().Add(oauthRenewBefore).Before(o.expires) {
+		if err := o.renew(); err != nil {
+			return "", err
+		}
+	}
+
+	return "Bearer " + o.token, nil
+}
+
+// renew runs the client credentials grant. Failures name only the HTTP status: the
+// response could echo the credentials, so it is never logged.
+func (o *oauthToken) renew() error {
+	form := url.Values{"grant_type": {"client_credentials"}, "client_id": {o.clientID}, "client_secret": {o.secret}}
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, o.endpoint, strings.NewReader(form.Encode()))
+	if err != nil {
+		return tokenErr("Jira OAuth token request could not be built")
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set(headerAccept, "application/json")
+	resp, err := o.client.Do(req)
+	if err != nil {
+		return tokenErr("Jira OAuth token request failed")
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return tokenErr(fmt.Sprintf("Jira OAuth token request failed with HTTP %d; check JIRA_CLIENT_ID and JIRA_CLIENT_SECRET", resp.StatusCode))
+	}
+	var grant struct {
+		AccessToken string `json:"access_token"`
+		TokenType   string `json:"token_type"`
+		ExpiresIn   int64  `json:"expires_in"`
+	}
+	if json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&grant) != nil ||
+		grant.AccessToken == "" || !strings.EqualFold(grant.TokenType, "Bearer") || grant.ExpiresIn <= 0 {
+		return tokenErr("Invalid Jira OAuth token response")
+	}
+	o.token, o.expires = grant.AccessToken, o.now().Add(time.Duration(grant.ExpiresIn)*time.Second)
+
+	return nil
+}
+
+// tokenErr reports a failure to get an access token as a 401 refusal. The Jira
+// request it was for was never sent, so a creation is rejected and retried next run
+// instead of being left pending, where recovery would block it.
+func tokenErr(msg string) error {
+	return &HTTPStatusError{Status: http.StatusUnauthorized, Msg: msg + "; no Jira request was sent"}
+}
+
+// CheckProject verifies the Jira site and the project's type, and that every
+// configured issue type exists in the project.
 func (a *Client) CheckProject() error {
+	if err := a.checkJiraSite(); err != nil {
+		return err
+	}
 	var project struct {
 		ProjectTypeKey string `json:"projectTypeKey"`
 		IssueTypes     []struct {
@@ -253,6 +381,25 @@ func (a *Client) CheckProject() error {
 		if standard, found := usable[id]; !found || standard {
 			return syncErr("jira_subtask_type %s is not a sub-task issue type in project %s", id, a.c.JiraProject)
 		}
+	}
+
+	return nil
+}
+
+// checkJiraSite confirms that a configured cloud ID belongs to jira_url, so a
+// mistyped ID cannot write to another site while links point at this one.
+func (a *Client) checkJiraSite() error {
+	if a.c.JiraCloudID == "" {
+		return nil
+	}
+	var info struct {
+		BaseURL string `json:"baseUrl"`
+	}
+	if err := a.jira.Do("GET", "/rest/api/3/serverInfo", nil, &info); err != nil {
+		return err
+	}
+	if site := strings.TrimRight(info.BaseURL, "/"); !strings.EqualFold(site, a.c.JiraURL) {
+		return syncErr("jira_cloud_id %s belongs to %q, not jira_url %q", a.c.JiraCloudID, site, a.c.JiraURL)
 	}
 
 	return nil

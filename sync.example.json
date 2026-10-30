@@ -1,6 +1,7 @@
 {
   "repository": "your-org/your-repository",
   "jira_url": "https://your-company.atlassian.net",
+  "jira_cloud_id": null,
   "jira_project": "ENG",
   "jira_issue_type": "10001",
   "selection_label": "sync-jira",
