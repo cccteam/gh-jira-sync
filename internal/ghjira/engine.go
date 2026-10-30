@@ -3,7 +3,9 @@ package ghjira
 // Plan first; journal each create before dispatch; recover without blind retries.
 
 import (
+	"cmp"
 	"errors"
+	"fmt"
 	"slices"
 	"sort"
 	"strconv"
@@ -66,6 +68,23 @@ type Entry struct {
 }
 
 func (e *Entry) block(reason string) { e.Kind, e.Reason = KindBlocked, reason }
+
+// subject names an entry in errors by its kind, GitHub issue, and Jira issue, such
+// as "sync_project_status for GitHub #66 / ZACH-72".
+func (e *Entry) subject() string {
+	var names []string
+	if e.GitHub != 0 {
+		names = append(names, "GitHub #"+strconv.Itoa(e.GitHub))
+	}
+	if key := cmp.Or(e.pair.JiraKey, e.JiraKey); key != "" {
+		names = append(names, key)
+	}
+	if len(names) == 0 {
+		return string(e.Kind)
+	}
+
+	return string(e.Kind) + " for " + strings.Join(names, " / ")
+}
 
 // NewState returns an empty journal bound to the config's endpoints and projects.
 func NewState(c *Config) *State {
@@ -968,7 +987,7 @@ func Apply(c *Config, state *State, api API, entries []*Entry, save func(*State)
 			continue
 		}
 		if err := applyEntry(c, s, api, e, save); err != nil {
-			return s, err
+			return s, fmt.Errorf("%s: %w", e.subject(), err)
 		}
 	}
 
