@@ -65,6 +65,8 @@ type API interface {
 
 // HTTP is a small JSON REST client. Only GET requests are automatically retried.
 type HTTP struct {
+	// service names the API in errors, such as "Jira" or "GitHub".
+	service string
 	base    string
 	headers map[string]string
 	// auth, when set, supplies the Authorization header before each attempt, so a
@@ -75,8 +77,9 @@ type HTTP struct {
 	now    func() time.Time
 }
 
-func newHTTP(base string, headers map[string]string) *HTTP {
+func newHTTP(service, base string, headers map[string]string) *HTTP {
 	return &HTTP{
+		service: service,
 		base:    base,
 		headers: headers,
 		client: &http.Client{
@@ -130,6 +133,40 @@ func (h *HTTP) DoPage(path string, out any) (string, error) {
 	return strings.TrimPrefix(m[1], h.base), nil
 }
 
+// describe names a request in errors: the service, method, and path without its
+// query, which can carry search text. Paths hold only IDs, keys, and names from the
+// configuration, which reports already contain.
+func (h *HTTP) describe(method, path string) string {
+	if i := strings.IndexByte(path, '?'); i >= 0 {
+		path = path[:i]
+	}
+
+	return h.service + " " + method + " " + path
+}
+
+// request builds one attempt with its headers, including a fresh Authorization
+// value when auth is set. An error here means nothing was sent.
+func (h *HTTP) request(method, path string, data []byte) (*http.Request, error) {
+	// The client's timeout bounds every request; there is no caller context to carry.
+	req, err := http.NewRequestWithContext(context.Background(), method, h.base+path, bytes.NewReader(data))
+	if err != nil {
+		return nil, syncErr("%s network failure; write outcome may be unknown", h.describe(method, path))
+	}
+	for k, v := range h.headers {
+		req.Header.Set(k, v)
+	}
+	if h.auth != nil {
+		value, err := h.auth()
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set(headerAuthorization, value)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	return req, nil
+}
+
 func (h *HTTP) exchange(method, path string, body, out any) (http.Header, error) {
 	var data []byte
 	if body != nil {
@@ -139,22 +176,10 @@ func (h *HTTP) exchange(method, path string, body, out any) (http.Header, error)
 		}
 	}
 	for attempt := 0; ; attempt++ {
-		// The client's timeout bounds every request; there is no caller context to carry.
-		req, err := http.NewRequestWithContext(context.Background(), method, h.base+path, bytes.NewReader(data))
+		req, err := h.request(method, path, data)
 		if err != nil {
-			return nil, syncErr("%s network failure; write outcome may be unknown", method)
+			return nil, err
 		}
-		for k, v := range h.headers {
-			req.Header.Set(k, v)
-		}
-		if h.auth != nil {
-			value, err := h.auth()
-			if err != nil {
-				return nil, err
-			}
-			req.Header.Set(headerAuthorization, value)
-		}
-		req.Header.Set("Content-Type", "application/json")
 		resp, err := h.client.Do(req)
 		var result []byte
 		if err == nil {
@@ -168,7 +193,7 @@ func (h *HTTP) exchange(method, path string, body, out any) (http.Header, error)
 				continue
 			}
 
-			return nil, syncErr("%s network failure; write outcome may be unknown", method)
+			return nil, syncErr("%s network failure; write outcome may be unknown", h.describe(method, path))
 		}
 		if code := resp.StatusCode; code >= 300 {
 			// GitHub signals primary and secondary rate limits with 403 plus these headers.
@@ -180,7 +205,7 @@ func (h *HTTP) exchange(method, path string, body, out any) (http.Header, error)
 				continue
 			}
 			// API response bodies can contain issue text or credentials; never log them.
-			return nil, &HTTPStatusError{Status: code, Msg: method + " failed with HTTP " + strconv.Itoa(code) + "; writes are not retried"}
+			return nil, &HTTPStatusError{Status: code, Msg: h.describe(method, path) + " failed with HTTP " + strconv.Itoa(code) + "; writes are not retried"}
 		}
 		if out == nil {
 			return resp.Header, nil
@@ -188,7 +213,7 @@ func (h *HTTP) exchange(method, path string, body, out any) (http.Header, error)
 		dec := json.NewDecoder(bytes.NewReader(result))
 		dec.UseNumber() // raw ADF bodies keep exact numbers for hashing
 		if dec.Decode(out) != nil || dec.Decode(new(json.RawMessage)) != io.EOF {
-			return nil, syncErr("Invalid API response; write outcome may be unknown")
+			return nil, syncErr("Invalid response to %s; write outcome may be unknown", h.describe(method, path))
 		}
 
 		return resp.Header, nil
@@ -216,7 +241,7 @@ func NewClient(c *Config) (*Client, error) {
 	}
 	client := &Client{
 		c: c,
-		github: newHTTP(c.GitHubURL, map[string]string{
+		github: newHTTP("GitHub", c.GitHubURL, map[string]string{
 			headerAuthorization: "Bearer " + gh,
 			headerAccept:        "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28",
 		}),
@@ -228,7 +253,7 @@ func NewClient(c *Config) (*Client, error) {
 			return nil, syncErr("Set GH_PROJECT_TOKEN for project_status; GitHub Actions tokens cannot reach organization projects")
 		}
 		// The Projects REST endpoints are documented under this newer API version.
-		client.projects = newHTTP(c.GitHubURL, map[string]string{
+		client.projects = newHTTP("GitHub Projects", c.GitHubURL, map[string]string{
 			headerAuthorization: "Bearer " + projectToken,
 			headerAccept:        "application/vnd.github+json", "X-GitHub-Api-Version": "2026-03-10",
 		})
@@ -255,7 +280,7 @@ func newJiraHTTP(c *Config) (*HTTP, error) {
 		if c.JiraCloudID == "" {
 			return nil, syncErr("OAuth credentials work only through Atlassian's API gateway; set jira_cloud_id")
 		}
-		h := newHTTP(c.JiraAPIURL(), headers)
+		h := newHTTP("Jira", c.JiraAPIURL(), headers)
 		h.auth = newOAuthToken(atlassianTokenURL, clientID, secret).header
 
 		return h, nil
@@ -264,11 +289,11 @@ func newJiraHTTP(c *Config) (*HTTP, error) {
 	}
 	headers[headerAuthorization] = "Basic " + base64.StdEncoding.EncodeToString([]byte(email+":"+apiToken))
 
-	return newHTTP(c.JiraAPIURL(), headers), nil
+	return newHTTP("Jira", c.JiraAPIURL(), headers), nil
 }
 
 // atlassianTokenURL issues OAuth 2.0 access tokens for service account credentials.
-const atlassianTokenURL = "https://auth.atlassian.com/oauth/token"
+const atlassianTokenURL = "https://auth.atlassian.com/oauth/token" //nolint:gosec // G101: a public endpoint URL, not a credential
 
 // oauthRenewBefore renews an access token this long before it expires, so a request
 // never starts with a token about to lapse.
