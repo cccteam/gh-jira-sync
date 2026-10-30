@@ -207,7 +207,8 @@ func (h *HTTP) exchange(method, path string, body, out any) (http.Header, error)
 			// API response bodies can contain issue text or credentials; never log them.
 			return nil, &HTTPStatusError{Status: code, Msg: h.describe(method, path) + " failed with HTTP " + strconv.Itoa(code) + "; writes are not retried"}
 		}
-		if out == nil {
+		// 204 No Content has no body to decode, whatever out expects.
+		if out == nil || resp.StatusCode == http.StatusNoContent {
 			return resp.Header, nil
 		}
 		dec := json.NewDecoder(bytes.NewReader(result))
@@ -1155,7 +1156,7 @@ func (a *Client) InBacklog(issue string) (bool, error) {
 // confirm the move by reading membership again.
 func (a *Client) MoveToBacklog(key string) error {
 	path := "/rest/agile/1.0/backlog/" + strconv.Itoa(a.c.ProjectStatus.JiraBoard) + "/issue"
-	if err := a.jira.Do("POST", path, map[string][]string{"issues": {key}}, nil); err != nil {
+	if err := a.boardMove(path, key); err != nil {
 		return err
 	}
 
@@ -1163,8 +1164,8 @@ func (a *Client) MoveToBacklog(key string) error {
 }
 
 // settleBacklog waits until the backlog listing shows a move, which lags the write by
-// about a second (observed live). Giving up is not an error: the caller's
-// confirmation reports a move that never shows.
+// about a second (observed live). A move that has not shown after ten seconds is an
+// error, so nothing else is changed for an issue whose board position is unknown.
 func (a *Client) settleBacklog(key string, want bool) error {
 	for range 10 {
 		in, err := a.InBacklog(key)
@@ -1173,16 +1174,61 @@ func (a *Client) settleBacklog(key string, want bool) error {
 		}
 		a.jira.sleep(time.Second)
 	}
+	// Continuing would change the status of an issue that may still be in the
+	// backlog, leaving it half moved; stop instead and let the next run re-read it.
+	if want {
+		return syncErr("Jira does not list %s in board %d's backlog 10 seconds after moving it there", key, a.c.ProjectStatus.JiraBoard)
+	}
 
-	return nil
+	return syncErr("Jira still lists %s in board %d's backlog 10 seconds after moving it onto the board; its status was not changed",
+		key, a.c.ProjectStatus.JiraBoard)
 }
 
 // MoveToBoard puts an issue on the board; on a Kanban board with a backlog, Jira also
 // moves it to the first column.
 func (a *Client) MoveToBoard(key string) error {
-	if err := a.jira.Do("POST", a.boardPath()+"/issue", map[string][]string{"issues": {key}}, nil); err != nil {
+	if err := a.boardMove(a.boardPath()+"/issue", key); err != nil {
 		return err
 	}
 
 	return a.settleBacklog(key, false)
+}
+
+// boardMoveErrorLimit caps how much of Jira's explanation a refusal quotes.
+const boardMoveErrorLimit = 300
+
+// boardMove posts one issue to a board or backlog. Jira answers 204 when it moved
+// everything, or 207 with a status per issue when it refused some; a refusal becomes
+// an HTTPStatusError with that issue's status, so a 4xx is retried like any other.
+// Jira's reasons name permissions or board rules, not issue text.
+func (a *Client) boardMove(path, key string) error {
+	var result struct {
+		Entries []struct {
+			IssueKey string   `json:"issueKey"`
+			Status   int      `json:"status"`
+			Errors   []string `json:"errors"`
+		} `json:"entries"`
+	}
+	if err := a.jira.Do("POST", path, map[string][]string{"issues": {key}}, &result); err != nil {
+		return err
+	}
+	for _, entry := range result.Entries {
+		if entry.Status >= 200 && entry.Status < 300 {
+			continue
+		}
+		reason := strings.Join(entry.Errors, "; ")
+		if len(reason) > boardMoveErrorLimit {
+			reason = reason[:boardMoveErrorLimit] + "…"
+		}
+		if reason == "" {
+			reason = "no reason given"
+		}
+
+		return &HTTPStatusError{
+			Status: entry.Status,
+			Msg:    fmt.Sprintf("Jira refused to move %s (HTTP %d): %s", entry.IssueKey, entry.Status, reason),
+		}
+	}
+
+	return nil
 }

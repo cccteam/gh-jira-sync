@@ -310,9 +310,13 @@ unchanged, including the agreed baseline. Membership is read once per run from t
 board's backlog listing (Agile API `GET /board/{id}/backlog`, every page or the run
 fails) and re-read per issue with a JQL filter before and after each write. Writes use
 `POST /backlog/{board}/issue` and `POST /board/{board}/issue`; both may answer 207 with
-per-issue failures, which the confirming re-read catches. The backlog listing lags a
-move by about a second (observed live), so each move polls membership for up to ten
-seconds before the confirmation reads it. A board move can itself
+a status and reasons per issue. A refused issue becomes an HTTP error with that
+issue's status, so a 4xx is `rejected` and retried like any other refusal, and the
+report quotes Jira's reason (such as a missing Schedule work items permission). The
+backlog listing lags a move by about a second (observed live), so each move polls
+membership for up to ten seconds. A move still not shown by then stops the run before
+anything else changes for that issue. Transitioning after an unconfirmed board move
+once left a live issue done in status but still in the backlog. A board move can itself
 change the status (Kanban boards put the issue in the first column), so the
 transition planned from the old status is recomputed from the new one when they
 differ, and skipped when the new status already maps to the target. Jira omits done
