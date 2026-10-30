@@ -451,10 +451,12 @@ func TestHTTPErrorsNameServiceAndPath(t *testing.T) {
 }
 
 func TestClientsNameTheirService(t *testing.T) {
-	for k, v := range map[string]string{"GH_TOKEN": "x", "JIRA_EMAIL": "x", "JIRA_API_TOKEN": "x",
-		"JIRA_CLIENT_ID": "", "JIRA_CLIENT_SECRET": "", "GH_PROJECT_TOKEN": "p"} {
-		t.Setenv(k, v)
-	}
+	t.Setenv("GH_TOKEN", "x")
+	t.Setenv("JIRA_EMAIL", "x")
+	t.Setenv("JIRA_API_TOKEN", "x")
+	t.Setenv("JIRA_CLIENT_ID", "")
+	t.Setenv("JIRA_CLIENT_SECRET", "")
+	t.Setenv("GH_PROJECT_TOKEN", "p")
 	c := testConfig(t, nil)
 	c.ProjectStatus = &ProjectStatus{Owner: "acme", OwnerType: "org", ProjectNumber: 1, Field: "Status"}
 	client, err := NewClient(c)

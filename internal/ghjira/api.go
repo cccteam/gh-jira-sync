@@ -144,6 +144,29 @@ func (h *HTTP) describe(method, path string) string {
 	return h.service + " " + method + " " + path
 }
 
+// request builds one attempt with its headers, including a fresh Authorization
+// value when auth is set. An error here means nothing was sent.
+func (h *HTTP) request(method, path string, data []byte) (*http.Request, error) {
+	// The client's timeout bounds every request; there is no caller context to carry.
+	req, err := http.NewRequestWithContext(context.Background(), method, h.base+path, bytes.NewReader(data))
+	if err != nil {
+		return nil, syncErr("%s network failure; write outcome may be unknown", h.describe(method, path))
+	}
+	for k, v := range h.headers {
+		req.Header.Set(k, v)
+	}
+	if h.auth != nil {
+		value, err := h.auth()
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set(headerAuthorization, value)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	return req, nil
+}
+
 func (h *HTTP) exchange(method, path string, body, out any) (http.Header, error) {
 	var data []byte
 	if body != nil {
@@ -153,22 +176,10 @@ func (h *HTTP) exchange(method, path string, body, out any) (http.Header, error)
 		}
 	}
 	for attempt := 0; ; attempt++ {
-		// The client's timeout bounds every request; there is no caller context to carry.
-		req, err := http.NewRequestWithContext(context.Background(), method, h.base+path, bytes.NewReader(data))
+		req, err := h.request(method, path, data)
 		if err != nil {
-			return nil, syncErr("%s network failure; write outcome may be unknown", h.describe(method, path))
+			return nil, err
 		}
-		for k, v := range h.headers {
-			req.Header.Set(k, v)
-		}
-		if h.auth != nil {
-			value, err := h.auth()
-			if err != nil {
-				return nil, err
-			}
-			req.Header.Set(headerAuthorization, value)
-		}
-		req.Header.Set("Content-Type", "application/json")
 		resp, err := h.client.Do(req)
 		var result []byte
 		if err == nil {
@@ -282,7 +293,7 @@ func newJiraHTTP(c *Config) (*HTTP, error) {
 }
 
 // atlassianTokenURL issues OAuth 2.0 access tokens for service account credentials.
-const atlassianTokenURL = "https://auth.atlassian.com/oauth/token"
+const atlassianTokenURL = "https://auth.atlassian.com/oauth/token" //nolint:gosec // G101: a public endpoint URL, not a credential
 
 // oauthRenewBefore renews an access token this long before it expires, so a request
 // never starts with a token about to lapse.
