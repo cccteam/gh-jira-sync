@@ -2,6 +2,7 @@ package ghjira
 
 import (
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -252,4 +253,92 @@ func TestBacklogAPIRequests(t *testing.T) {
 	if _, err := api.BacklogIssues(); err == nil || !strings.Contains(err.Error(), "has no backlog") {
 		t.Fatalf("expected a backlog-disabled error, got %v", err)
 	}
+}
+
+// A board move Jira refuses must not be followed by a transition, which would leave
+// the issue half moved: done in status but still in the backlog. The run's error
+// names the issue.
+func TestRefusedBoardMoveSkipsTransition(t *testing.T) {
+	t.Parallel()
+	for _, status := range []int{403, 400} {
+		x := backlogSyncer(t)
+		s := backlogInSync(t, x)
+		x.setOption("Done")
+		entries, err := Plan(x.c, s, x.api, time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		e := projectEntry(t, x, entries)
+		writes := len(x.api.writes)
+		x.api.refuse = []int{status}
+		_, err = Apply(x.c, s, x.api, entries, x.save)
+		eq(t, len(x.api.writes), writes)
+		eq(t, x.api.jira.Fields.Status.Name, "To Do")
+		if status == 400 {
+			// One issue's refusal is retried next run without stopping the others.
+			if err != nil || e.Outcome != OutcomeRejected {
+				t.Fatalf("status 400: err %v, outcome %q", err, e.Outcome)
+			}
+			continue
+		}
+		want := "sync_project_status for GitHub #" + strconv.Itoa(e.GitHub) + " / " + e.pair.JiraKey + ": "
+		if err == nil || !strings.HasPrefix(err.Error(), want) || !isSyncError(err) {
+			t.Fatalf("status %d: got %v, want prefix %q", status, err, want)
+		}
+	}
+}
+
+// Jira answers 207 when it refuses an issue; the refusal carries that issue's status
+// and Jira's reason. A move the backlog listing never reflects stops after ten
+// seconds instead of letting a transition follow.
+func TestBoardMoveRefusalsAndTimeouts(t *testing.T) {
+	t.Parallel()
+	refusal := Object{
+		"entries": []any{
+			Object{
+				"issueId": 10010, "issueKey": "ENG-1", "status": 403,
+				"errors": []any{"You do not have permission to rank issues."},
+			},
+		},
+	}
+	refused := newServer(t, func(r *http.Request) (int, http.Header, any) {
+		if r.URL.Path == "/rest/agile/1.0/board/150/issue" {
+			return 207, nil, refusal
+		}
+		return 200, nil, Object{"startAt": 0, "total": 1, "issues": []any{}}
+	})
+	api := refused.client(t)
+	api.c.ProjectStatus = &ProjectStatus{JiraBoard: 150}
+	err := api.MoveToBoard("ENG-1")
+	if code, ok := refusedStatus(err); !ok || code != 403 {
+		t.Fatalf("got %v", err)
+	}
+	eq(t, err.Error(), "Jira refused to move ENG-1 (HTTP 403): You do not have permission to rank issues.")
+	eq(t, len(refused.urls), 1) // no settling after a refusal
+
+	accepted := newServer(t, func(r *http.Request) (int, http.Header, any) {
+		if r.URL.Path == "/rest/agile/1.0/board/150/issue" {
+			return 207, nil, Object{"entries": []any{Object{"issueId": 10010, "issueKey": "ENG-1", "status": 200}}}
+		}
+		return 200, nil, Object{"startAt": 0, "total": 0, "issues": []any{}}
+	})
+	api = accepted.client(t)
+	api.c.ProjectStatus = &ProjectStatus{JiraBoard: 150}
+	if err := api.MoveToBoard("ENG-1"); err != nil {
+		t.Fatal(err)
+	}
+
+	stuck := newServer(t, func(r *http.Request) (int, http.Header, any) {
+		if r.URL.Path == "/rest/agile/1.0/board/150/issue" {
+			return 204, nil, nil
+		}
+		return 200, nil, Object{"startAt": 0, "total": 1, "issues": []any{}}
+	})
+	api = stuck.client(t)
+	api.c.ProjectStatus = &ProjectStatus{JiraBoard: 150}
+	err = api.MoveToBoard("ENG-1")
+	if err == nil || !strings.Contains(err.Error(), "still lists ENG-1 in board 150's backlog") {
+		t.Fatalf("got %v", err)
+	}
+	eq(t, len(stuck.sleeps), 10)
 }
