@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.3](https://github.com/cccteam/gh-jira-sync/compare/v0.1.2...v0.1.3) (2026-10-30)
+
+
+### Features
+
+* support Atlassian service accounts with OAuth or API tokens ([#11](https://github.com/cccteam/gh-jira-sync/issues/11)) ([6478b44](https://github.com/cccteam/gh-jira-sync/commit/6478b444e44d5e86927f070ca906155bff320ca0))
+
 ## [0.1.2](https://github.com/cccteam/gh-jira-sync/compare/v0.1.1...v0.1.2) (2026-10-26)
 
 
