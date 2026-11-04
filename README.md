@@ -3,10 +3,10 @@
 Creates Jira Cloud issues from GitHub issues labeled **`sync-jira`**, then copies
 original comments and their edits in both directions. Optionally it also mirrors
 open/closed status, a GitHub Project's Status field, parent links (Epics and
-sub-issues), and creates GitHub issues from labeled Jira issues. It is a single Go
-binary with a reusable GitHub Actions workflow.
+sub-issues), and later title and description edits, and creates GitHub issues from
+labeled Jira issues. It is a single Go binary with a reusable GitHub Actions workflow.
 
-* Title and description are copied once, at creation.
+* Title and description are copied at creation, and later edits only with `sync_content`.
 * Nothing is ever deleted, and attachments are not copied.
 * Edits to copies are reported for review; originals are never modified.
 * Dry-run by default; `--apply` is required for remote writes.
@@ -262,7 +262,9 @@ are mirrored between linked issues. Add an Epic issue type in GitHub and map it 
 `rejected`. Set `jira_subtask_type` so an issue nested under a Task is created as a
 Jira sub-task; it waits until its parent is in Jira.
 
-**Titles and descriptions.** With `sync_content`, later edits to the title or
+**Titles and descriptions.** A GitHub description becomes Jira rich text: headings,
+lists, task lists, quotes, code, tables, links, and inline formatting carry over, and
+anything else stays as literal text. With `sync_content`, later edits to the title or
 description of the issue a pair started on are copied to the other issue, in the same
 form as at creation. Edits made to the copy are never copied back or overwritten: the
 field is `blocked` until the same change is made on the original or the copy edit is
@@ -276,7 +278,8 @@ Descriptions with media or tables block that issue.
 **Comments.** Copies start with a header naming the original author and linking to
 the original, and carry a hidden identity marker. Don't remove either when editing a
 copy, or the comment is blocked for review. GitHub Markdown is copied literally to
-Jira; Jira comments become plain text on GitHub. Restricted Jira comments are skipped.
+Jira; Jira comments become plain text on GitHub, and those with media or tables are
+blocked rather than copied with content missing. Restricted Jira comments are skipped.
 
 ## The report
 
