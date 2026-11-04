@@ -108,7 +108,7 @@ func (v fieldValues) shown() bool {
 // planContent plans the title and description of a linked pair.
 func planContent(c *Config, s *State, pair Pair, source *GitHubIssue, jira *JiraIssue) []*Entry {
 	origin := originSide(c, s, pair)
-	var entries []*Entry
+	entries := make([]*Entry, 0, 2)
 	for _, f := range []struct {
 		name   string
 		op     OpKind

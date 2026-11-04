@@ -107,16 +107,10 @@ func validateState(s *State, c *Config) error {
 	}
 	jiraIDs := map[string]bool{}
 	for n, p := range s.Pairs {
-		number, err := strconv.Atoi(n)
-		if !isDigits(n) || err != nil || p.GitHub != number || !isDigits(p.GitHubID) || !isDigits(p.JiraID) || jiraIDs[p.JiraID] {
-			return syncErr("Invalid or duplicate issue mapping")
+		if err := validatePair(n, p, jiraIDs); err != nil {
+			return err
 		}
 		jiraIDs[p.JiraID] = true
-		for _, r := range []*Copied{p.Title, p.Description} {
-			if r != nil && (len(r.Original) != 64 || len(r.Copy) != 64) {
-				return syncErr("Invalid content record")
-			}
-		}
 	}
 	for op, r := range s.Operations {
 		if !r.Status.valid() || op != token(c, r.Kind, r.SourceID) {
@@ -137,6 +131,21 @@ func validateState(s *State, c *Config) error {
 				return syncErr("Duplicate comment mapping")
 			}
 			seen[side][id] = true
+		}
+	}
+
+	return nil
+}
+
+// validatePair checks one pair against its key and the Jira issues already linked.
+func validatePair(n string, p Pair, jiraIDs map[string]bool) error {
+	number, err := strconv.Atoi(n)
+	if !isDigits(n) || err != nil || p.GitHub != number || !isDigits(p.GitHubID) || !isDigits(p.JiraID) || jiraIDs[p.JiraID] {
+		return syncErr("Invalid or duplicate issue mapping")
+	}
+	for _, r := range []*Copied{p.Title, p.Description} {
+		if r != nil && (len(r.Original) != 64 || len(r.Copy) != 64) {
+			return syncErr("Invalid content record")
 		}
 	}
 
