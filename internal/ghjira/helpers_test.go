@@ -409,6 +409,34 @@ func (f *fakeAPI) GitHubParent(int) (int, error)         { return 0, nil }
 func (f *fakeAPI) SetGitHubParent(int64, int, int) error { return nil }
 func (f *fakeAPI) SetJiraParent(string, string) error    { return nil }
 
+func (f *fakeAPI) EditGitHubIssue(_ int, field, value string) error {
+	if err := f.maybeRefuse(); err != nil {
+		return err
+	}
+	if field == "title" {
+		f.source.Title = value
+	} else {
+		f.source.Body = value
+	}
+	f.writes = append(f.writes, write{"github_" + field, value})
+	return f.lost()
+}
+
+func (f *fakeAPI) EditJiraIssue(_ string, fields Object) error {
+	if err := f.maybeRefuse(); err != nil {
+		return err
+	}
+	for field, value := range fields {
+		if field == "summary" {
+			f.jira.Fields.Summary, _ = value.(string)
+		} else {
+			f.jira.Fields.Description = decodeJSON(canonical(value, false))
+		}
+		f.writes = append(f.writes, write{"jira_" + field, string(canonical(value, false))})
+	}
+	return f.lost()
+}
+
 // Jira → GitHub creation on the single-issue fake: nothing is selected in Jira.
 func (f *fakeAPI) SelectedJiraIssues() ([]JiraIssue, error) { return nil, nil }
 

@@ -169,7 +169,7 @@ func TestSubtaskConfig(t *testing.T) {
 	eq(t, c.JiraSubtaskType, "10302")
 	for name, extra := range map[string]Object{
 		"without sync_parents": {"jira_subtask_type": "10302"},
-		"not digits":           {"sync_parents": true, "jira_subtask_type": "Subtask"},
+		"blank":                {"sync_parents": true, "jira_subtask_type": " "},
 		"a number":             {"sync_parents": true, "jira_subtask_type": 10302},
 	} {
 		raw := Object{

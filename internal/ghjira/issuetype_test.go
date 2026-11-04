@@ -31,7 +31,7 @@ func TestIssueTypeMapping(t *testing.T) {
 	for _, bad := range []any{
 		"10300",
 		Object{"Feature": 10300},
-		Object{"Feature": "Story"},
+		Object{"Feature": ""},
 		Object{" ": "10300"},
 		Object{"Bug": "1", "bug": "2"},
 	} {
@@ -108,5 +108,57 @@ func TestCheckProjectValidatesIssueTypes(t *testing.T) {
 	}
 	if err := project(story).client(t).CheckProject(); err == nil {
 		t.Error("missing default jira_issue_type accepted")
+	}
+}
+
+func TestCheckProjectResolvesIssueTypeNames(t *testing.T) {
+	t.Parallel()
+	project := func(types ...Object) *server {
+		list := make([]any, len(types))
+		for i, ty := range types {
+			list[i] = ty
+		}
+		return newServer(t, func(*http.Request) (int, http.Header, any) {
+			return 200, nil, Object{"projectTypeKey": "software", "issueTypes": list}
+		})
+	}
+	task := Object{"id": "10001", "name": "Task", "subtask": false}
+	story := Object{"id": "10300", "name": "Story", "subtask": false}
+	subtask := Object{"id": "10302", "name": "Subtask", "subtask": true}
+
+	api := project(task, story, subtask).client(t)
+	api.c.JiraIssueType, api.c.JiraSubtaskType = "task", "Subtask"
+	api.c.JiraIssueTypes = map[string]string{"Feature": "STORY", "Bug": "10001"}
+	if err := api.CheckProject(); err != nil {
+		t.Fatalf("valid names rejected: %v", err)
+	}
+	eq(t, []any{api.c.JiraIssueType, api.c.JiraSubtaskType, api.c.JiraIssueTypes["Feature"], api.c.JiraIssueTypes["Bug"]},
+		[]any{"10001", "10302", "10300", "10001"})
+	eq(t, api.c.githubTypeFor("10300"), "Feature")
+
+	for name, tc := range map[string]struct {
+		types []Object
+		set   func(*Config)
+		want  string
+	}{
+		"unknown name":         {[]Object{task}, func(c *Config) { c.JiraIssueTypes = map[string]string{"Feature": "Epic"} }, `Epic is not a standard`},
+		"sub-task as standard": {[]Object{task, subtask}, func(c *Config) { c.JiraIssueType = "Subtask" }, `Subtask is not a standard`},
+		"standard as sub-task": {[]Object{task}, func(c *Config) { c.JiraSubtaskType = "Task" }, `jira_subtask_type Task`},
+		"ambiguous name": {
+			[]Object{task, {"id": "10400", "name": "TASK", "subtask": false}},
+			func(c *Config) { c.JiraIssueType = "Task" }, `matches 2 issue types`,
+		},
+		// Digits are IDs only, so a type named like another's ID is never picked.
+		"digits match IDs only": {
+			[]Object{task, {"id": "10500", "name": "10001", "subtask": true}},
+			func(c *Config) { c.JiraIssueType = "10001" }, "",
+		},
+	} {
+		api := project(tc.types...).client(t)
+		tc.set(api.c)
+		err := api.CheckProject()
+		if (tc.want == "" && err != nil) || (tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want))) {
+			t.Errorf("%s: got %v, want %q", name, err, tc.want)
+		}
 	}
 }

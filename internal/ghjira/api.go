@@ -40,6 +40,9 @@ type API interface {
 	JiraTransitions(id string) ([]JiraTransition, error)
 	TransitionJira(id, transitionID string) error
 	SetGitHubState(number int, closed bool) error
+	// Content sync: EditGitHubIssue sets "title" or "body"; EditJiraIssue sets fields.
+	EditGitHubIssue(number int, field, value string) error
+	EditJiraIssue(id string, fields Object) error
 	// Project reads the configured project's status field and every issue item's value.
 	Project() (*ProjectSnapshot, error)
 	ProjectItem(itemID, fieldID int64) (ProjectItem, error)
@@ -374,17 +377,15 @@ func tokenErr(msg string) error {
 }
 
 // CheckProject verifies the Jira site and the project's type, and that every
-// configured issue type exists in the project.
+// configured issue type exists in the project. It replaces issue type names in the
+// config with their IDs, which creation and the reverse type mapping use.
 func (a *Client) CheckProject() error {
 	if err := a.checkJiraSite(); err != nil {
 		return err
 	}
 	var project struct {
-		ProjectTypeKey string `json:"projectTypeKey"`
-		IssueTypes     []struct {
-			ID      string `json:"id"`
-			Subtask bool   `json:"subtask"`
-		} `json:"issueTypes"`
+		ProjectTypeKey string          `json:"projectTypeKey"`
+		IssueTypes     []jiraIssueType `json:"issueTypes"`
 	}
 	if err := a.jira.Do("GET", "/rest/api/3/project/"+a.c.JiraProject, nil, &project); err != nil {
 		return err
@@ -392,24 +393,52 @@ func (a *Client) CheckProject() error {
 	if project.ProjectTypeKey != "software" && project.ProjectTypeKey != "business" {
 		return syncErr("Only Jira Software/business projects supported; service-desk privacy requires separate handling")
 	}
-	// A wrong type ID would fail every creation, or create issues of an unintended type.
-	usable := map[string]bool{}
-	for _, t := range project.IssueTypes {
-		usable[t.ID] = !t.Subtask
+	// A wrong type would fail every creation, or create issues of an unintended type.
+	var err error
+	if a.c.JiraIssueType, err = resolveIssueType(project.IssueTypes, a.c.JiraIssueType, false, a.c.JiraProject); err != nil {
+		return err
 	}
-	configured := append([]string{a.c.JiraIssueType}, slices.Collect(maps.Values(a.c.JiraIssueTypes))...)
-	for _, id := range configured {
-		if !usable[id] {
-			return syncErr("Jira issue type %s is not a standard issue type in project %s", id, a.c.JiraProject)
+	for name, ref := range a.c.JiraIssueTypes {
+		if a.c.JiraIssueTypes[name], err = resolveIssueType(project.IssueTypes, ref, false, a.c.JiraProject); err != nil {
+			return err
 		}
 	}
-	if id := a.c.JiraSubtaskType; id != "" {
-		if standard, found := usable[id]; !found || standard {
-			return syncErr("jira_subtask_type %s is not a sub-task issue type in project %s", id, a.c.JiraProject)
+	if ref := a.c.JiraSubtaskType; ref != "" {
+		if a.c.JiraSubtaskType, err = resolveIssueType(project.IssueTypes, ref, true, a.c.JiraProject); err != nil {
+			return err
 		}
 	}
 
 	return nil
+}
+
+// jiraIssueType is one issue type a Jira project offers.
+type jiraIssueType struct {
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Subtask bool   `json:"subtask"`
+}
+
+// resolveIssueType returns the ID of the project issue type that ref names: by ID when
+// ref is all digits, otherwise by name ignoring case. The type must be a sub-task type
+// exactly when subtask is set.
+func resolveIssueType(types []jiraIssueType, ref string, subtask bool, project string) (string, error) {
+	var matches []jiraIssueType
+	for _, t := range types {
+		if t.ID == ref || (!isDigits(ref) && strings.EqualFold(t.Name, ref)) {
+			matches = append(matches, t)
+		}
+	}
+	switch {
+	case len(matches) > 1:
+		return "", syncErr("Jira issue type name %q matches %d issue types in project %s; use the ID instead", ref, len(matches), project)
+	case len(matches) == 1 && matches[0].Subtask == subtask:
+		return matches[0].ID, nil
+	case subtask:
+		return "", syncErr("jira_subtask_type %s is not a sub-task issue type in project %s", ref, project)
+	default:
+		return "", syncErr("Jira issue type %s is not a standard issue type in project %s", ref, project)
+	}
 }
 
 // checkJiraSite confirms that a configured cloud ID belongs to jira_url, so a
@@ -737,6 +766,16 @@ func (a *Client) SetGitHubState(number int, closed bool) error {
 	}
 
 	return a.github.Do("PATCH", a.ghPath(number), body, nil)
+}
+
+// EditGitHubIssue sets one field of an issue, such as its title or body.
+func (a *Client) EditGitHubIssue(number int, field, value string) error {
+	return a.github.Do("PATCH", a.ghPath(number), map[string]string{field: value}, nil)
+}
+
+// EditJiraIssue sets fields of an issue, such as its summary or description.
+func (a *Client) EditJiraIssue(id string, fields Object) error {
+	return a.jira.Do("PUT", "/rest/api/3/issue/"+id, Object{"fields": fields}, nil)
 }
 
 func (a *Client) projectPath() string {

@@ -55,11 +55,14 @@ type Config struct {
 	// JiraCloudID routes Jira API calls through Atlassian's API gateway, which
 	// Atlassian service account tokens require; "" calls JiraURL directly. Links
 	// in copies and the deployment binding always use JiraURL.
-	JiraCloudID   string
-	JiraProject   string
+	JiraCloudID string
+	JiraProject string
+	// JiraIssueType, the values of JiraIssueTypes, and JiraSubtaskType name a Jira
+	// issue type by ID (digits) or by name (ignoring case); CheckProject replaces
+	// names with IDs.
 	JiraIssueType string
 	// JiraIssueTypes maps GitHub issue type names (matched ignoring case) to Jira
-	// issue type IDs for new issues; others use JiraIssueType.
+	// issue types for new issues; others use JiraIssueType.
 	JiraIssueTypes   map[string]string
 	SelectionLabel   *string // nil explicitly opts into all issues
 	IssueState       string
@@ -73,7 +76,10 @@ type Config struct {
 	// SyncParents mirrors GitHub sub-issue parents and Jira parent links between
 	// linked issues, such as an Epic and its stories.
 	SyncParents bool
-	// JiraSubtaskType is the Jira sub-task issue type ID for new issues whose GitHub
+	// SyncContent copies later title and description edits from the issue a pair
+	// started on to its copy; edits made in the copy are reported, never copied back.
+	SyncContent bool
+	// JiraSubtaskType is the Jira sub-task issue type for new issues whose GitHub
 	// parent is a standard Jira issue (such as a Task under a Task); "" turns this off.
 	JiraSubtaskType string
 	// JiraSelectionLabel selects Jira issues in the project to create in GitHub; nil
@@ -301,7 +307,7 @@ var configKeys = map[string]bool{
 	"jira_issue_type": true, "selection_label": true, "issue_state": true, "max_operations": true,
 	"max_pages": true, "comments": true, "comments_since": true, "jira_create_fields": true,
 	"full_rescan_hours": true, "status_sync": true, "project_status": true, "jira_issue_types": true,
-	"sync_parents": true, "jira_selection_label": true, "jira_subtask_type": true, "jira_cloud_id": true,
+	"sync_parents": true, "sync_content": true, "jira_selection_label": true, "jira_subtask_type": true, "jira_cloud_id": true,
 }
 
 // jiraGateway is Atlassian's API gateway; a site's API lives at jiraGateway + cloud ID.
@@ -405,8 +411,8 @@ func parseEndpoints(in configInput, c *Config) error {
 // parseIssueTypes reads the default Jira issue type and the per-GitHub-type mapping.
 func parseIssueTypes(in configInput, c *Config) error {
 	var str bool
-	if c.JiraIssueType, str = in["jira_issue_type"].(string); !str || !isDigits(c.JiraIssueType) {
-		return syncErr("jira_issue_type must be an issue type ID string")
+	if c.JiraIssueType, str = in["jira_issue_type"].(string); !str || strings.TrimSpace(c.JiraIssueType) == "" {
+		return syncErr("jira_issue_type must be an issue type ID or name")
 	}
 	c.JiraIssueTypes = map[string]string{}
 	raw, present := in["jira_issue_types"]
@@ -415,15 +421,15 @@ func parseIssueTypes(in configInput, c *Config) error {
 	}
 	types, ok := raw.(Object)
 	if !ok {
-		return syncErr("jira_issue_types must map GitHub issue type names to Jira issue type ID strings")
+		return syncErr("jira_issue_types must map GitHub issue type names to Jira issue type IDs or names")
 	}
 	// Names match GitHub issue types ignoring case, so two that differ only in case
 	// would be ambiguous.
 	accepted := make([]string, 0, len(types))
 	for name, id := range types {
 		idString, _ := id.(string)
-		if strings.TrimSpace(name) == "" || !isDigits(idString) {
-			return syncErr("jira_issue_types must map GitHub issue type names to Jira issue type ID strings")
+		if strings.TrimSpace(name) == "" || strings.TrimSpace(idString) == "" {
+			return syncErr("jira_issue_types must map GitHub issue type names to Jira issue type IDs or names")
 		}
 		if slices.ContainsFunc(accepted, func(other string) bool { return strings.EqualFold(other, name) }) {
 			return syncErr("jira_issue_types lists %q twice (names ignore case)", name)
@@ -482,11 +488,14 @@ func parseToggles(in configInput, c *Config) error {
 	if c.SyncParents, ok = in.value("sync_parents", false).(bool); !ok {
 		return syncErr("sync_parents must be boolean")
 	}
+	if c.SyncContent, ok = in.value("sync_content", false).(bool); !ok {
+		return syncErr("sync_content must be boolean")
+	}
 	switch id := in.value("jira_subtask_type", nil).(type) {
 	case nil:
 	case string:
-		if !isDigits(id) {
-			return syncErr("jira_subtask_type must be a sub-task issue type ID string or null")
+		if strings.TrimSpace(id) == "" {
+			return syncErr("jira_subtask_type must be a sub-task issue type ID or name, or null")
 		}
 		// A sub-task's parent is fixed at creation and then kept by parent sync.
 		if !c.SyncParents {
@@ -494,7 +503,7 @@ func parseToggles(in configInput, c *Config) error {
 		}
 		c.JiraSubtaskType = id
 	default:
-		return syncErr("jira_subtask_type must be a sub-task issue type ID string or null")
+		return syncErr("jira_subtask_type must be a sub-task issue type ID or name, or null")
 	}
 	switch label := in.value("jira_selection_label", nil).(type) {
 	case nil:
@@ -876,7 +885,7 @@ func isOne(v any) bool {
 
 func runeLen(s string) int { return len([]rune(s)) }
 
-// issueTypeFor returns the Jira issue type ID for a new issue: the one mapped to its
+// issueTypeFor returns the Jira issue type for a new issue: the one mapped to its
 // GitHub issue type, or jira_issue_type when it has no type or an unmapped one.
 func (c *Config) issueTypeFor(source *GitHubIssue) string {
 	if source.Type != nil {
