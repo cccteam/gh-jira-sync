@@ -1202,24 +1202,38 @@ func (a *Client) MoveToBacklog(key string) error {
 	return a.settleBacklog(key, true)
 }
 
-// settleBacklog waits until the backlog listing shows a move, which lags the write by
-// about a second (observed live). A move that has not shown after ten seconds is an
-// error, so nothing else is changed for an issue whose board position is unknown.
+// settleDelays are the pauses between backlog reads after a move, a minute in all. The
+// listing comes from Jira's search index, which usually shows a move within a second
+// but has been seen live to take longer than ten.
+var settleDelays = []time.Duration{
+	time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second,
+	15 * time.Second, 15 * time.Second, 15 * time.Second,
+}
+
+// settleBacklog waits until the backlog listing shows a move. A move that has not
+// shown after a minute is an error, so nothing else is changed for an issue whose
+// board position is unknown.
 func (a *Client) settleBacklog(key string, want bool) error {
-	for range 10 {
+	for i := 0; ; i++ {
 		in, err := a.InBacklog(key)
 		if err != nil || in == want {
 			return err
 		}
-		a.jira.sleep(time.Second)
+		if i == len(settleDelays) {
+			break
+		}
+		a.jira.sleep(settleDelays[i])
 	}
 	// Continuing would change the status of an issue that may still be in the
 	// backlog, leaving it half moved; stop instead and let the next run re-read it.
 	if want {
-		return syncErr("Jira does not list %s in board %d's backlog 10 seconds after moving it there", key, a.c.ProjectStatus.JiraBoard)
+		return syncErr("Jira does not list %s in board %d's backlog a minute after moving it there; "+
+			"the move may have worked with Jira's search index behind, and the next run reads it again",
+			key, a.c.ProjectStatus.JiraBoard)
 	}
 
-	return syncErr("Jira still lists %s in board %d's backlog 10 seconds after moving it onto the board; its status was not changed",
+	return syncErr("Jira still lists %s in board %d's backlog a minute after moving it onto the board, so its status was not changed; "+
+		"the move may have worked with Jira's search index behind, and the next run reads it again",
 		key, a.c.ProjectStatus.JiraBoard)
 }
 

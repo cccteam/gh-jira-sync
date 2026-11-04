@@ -241,7 +241,7 @@ func TestBacklogAPIRequests(t *testing.T) {
 	}
 	eq(t, srv.urls[3], "/rest/agile/1.0/backlog/150/issue")
 	eq(t, string(canonical(srv.bodies[3], false)), `{"issues":["ENG-1"]}`)
-	eq(t, []any{len(srv.urls), len(srv.sleeps)}, []any{7, 2})
+	eq(t, []any{len(srv.urls), srv.sleeps}, []any{7, []time.Duration{time.Second, 2 * time.Second}})
 	if err := api.MoveToBoard("ENG-1"); err != nil {
 		t.Fatal(err)
 	}
@@ -340,5 +340,6 @@ func TestBoardMoveRefusalsAndTimeouts(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "still lists ENG-1 in board 150's backlog") {
 		t.Fatalf("got %v", err)
 	}
-	eq(t, len(stuck.sleeps), 10)
+	eq(t, stuck.sleeps, settleDelays)
+	eq(t, len(stuck.urls), 1+len(settleDelays)+1)
 }

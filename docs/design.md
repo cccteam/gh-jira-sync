@@ -316,9 +316,10 @@ fails) and re-read per issue with a JQL filter before and after each write. Writ
 a status and reasons per issue. A refused issue becomes an HTTP error with that
 issue's status, so a 4xx is `rejected` and retried like any other refusal, and the
 report quotes Jira's reason (such as a missing Schedule work items permission). The
-backlog listing lags a move by about a second (observed live), so each move polls
-membership for up to ten seconds. A move still not shown by then stops the run before
-anything else changes for that issue. Transitioning after an unconfirmed board move
+backlog listing comes from Jira's search index and usually lags a move by about a
+second, but a live move onto the board was still unlisted after ten, so each move polls
+membership with backoff for up to a minute. A move still not shown by then stops the
+run before anything else changes for that issue, and the next run reads it again. Transitioning after an unconfirmed board move
 once left a live issue done in status but still in the backlog. A board move can itself
 change the status (Kanban boards put the issue in the first column), so the
 transition planned from the old status is recomputed from the new one when they
