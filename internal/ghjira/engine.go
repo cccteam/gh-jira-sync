@@ -54,9 +54,6 @@ type Entry struct {
 	option      string       // project option to apply or record
 	fieldID     int64        // project status field
 	optionID    string       // ID of option, for project writes
-	inBacklog   bool         // Jira issue in the board's backlog, as planned
-	toBacklog   bool         // move the Jira issue into the board's backlog
-	toBoard     bool         // move the Jira issue out of the backlog onto the board
 	parent      int          // parent to apply or record (GitHub number, 0 for none)
 	ghParent    int          // GitHub parent as planned
 	jiraParent  int          // Jira parent as planned, as a GitHub number
@@ -301,8 +298,8 @@ func Plan(c *Config, s *State, api API, now time.Time) ([]*Entry, error) {
 	return entries, nil
 }
 
-// readProject reads the GitHub Project in project status mode, and the board's
-// backlog when an option mirrors it; nil without project status.
+// readProject reads the GitHub Project in project status mode; nil without project
+// status.
 func readProject(c *Config, api API) (*ProjectSnapshot, error) {
 	if c.ProjectStatus == nil {
 		return nil, nil
@@ -316,11 +313,6 @@ func readProject(c *Config, api API) (*ProjectSnapshot, error) {
 		if _, ok := project.Options[m.Project]; !ok {
 			return nil, syncErr("project_status maps option %q, which the project's %s field does not have",
 				m.Project, c.ProjectStatus.Field)
-		}
-	}
-	if c.ProjectStatus.backlogOption() != "" {
-		if project.Backlog, err = api.BacklogIssues(); err != nil {
-			return nil, err
 		}
 	}
 
@@ -654,8 +646,7 @@ func planProjectStatus(c *Config, api API, project *ProjectSnapshot, pair Pair, 
 	e.item = item
 	current := project.optionName(item.OptionID)
 	jiraStatus := jira.Fields.Status.Name
-	e.inBacklog = project.Backlog[jira.ID]
-	fromJira, mapped := ps.optionFor(jiraStatus, e.inBacklog)
+	fromJira, mapped := ps.forJira(jiraStatus)
 	if !mapped {
 		e.block("Jira status " + strconv.Quote(jiraStatus) + " is not mapped in project_status")
 
@@ -696,36 +687,20 @@ func planProjectStatus(c *Config, api API, project *ProjectSnapshot, pair Pair, 
 	return e, nil
 }
 
-// planJiraMove plans moving the Jira issue to the project's option: into the board's
-// backlog, out of it, and through a transition when its status does not already map.
+// planJiraMove plans the Jira transition to the project's option. Each Jira status
+// maps to one option, so a status that maps to the agreed option needs a transition.
 func planJiraMove(api API, ps *ProjectStatus, e *Entry, current string) error {
 	m, _ := ps.mapping(current)
-	jiraStatus := e.jira.Fields.Status.Name
-	switch {
-	case m.JiraBacklog && e.jira.Fields.Status.done():
-		e.block("Jira lists only incomplete issues in the backlog; reopen " + e.jira.Key + " before moving it to " +
-			strconv.Quote(current))
+	id, blocked, err := projectTransition(api, e.pair.JiraID, e.jira.Fields.Status.Name, m)
+	if err != nil {
+		return err
+	}
+	if blocked != "" {
+		e.block(blocked)
 
 		return nil
-	case m.JiraBacklog:
-		e.toBacklog = true
-	default:
-		// Leaving the backlog may be all it takes, as for To Do; otherwise a transition
-		// follows, planned from today's status and checked again after the board move.
-		e.toBoard = e.inBacklog
-		if !slices.Contains(m.Jira, jiraStatus) {
-			id, blocked, err := projectTransition(api, e.pair.JiraID, jiraStatus, m)
-			if err != nil {
-				return err
-			}
-			if blocked != "" {
-				e.block(blocked)
-
-				return nil
-			}
-			e.transition = id
-		}
 	}
+	e.transition = id
 	e.Kind, e.Destination, e.option, e.Status = KindSyncProjectStatus, SideJira, current, current
 	e.optionID = e.item.OptionID // the project already shows the target
 
@@ -1181,10 +1156,9 @@ func setAgreedProjectStatus(s *State, number int, option string) {
 func applyProjectStatus(c *Config, s *State, api API, e *Entry, save func(*State) error) error {
 	ps := c.ProjectStatus
 	type snapshot struct {
-		item      ProjectItem
-		jira      *JiraIssue
-		inBacklog bool
-		option    string // project option the Jira side maps to
+		item   ProjectItem
+		jira   *JiraIssue
+		option string // project option the Jira side maps to
 	}
 	current := func() (snapshot, error) {
 		var now snapshot
@@ -1200,12 +1174,7 @@ func applyProjectStatus(c *Config, s *State, api API, e *Entry, save func(*State
 			return now, err
 		}
 		now.item, now.jira = item, jira
-		if ps.backlogOption() != "" {
-			if now.inBacklog, err = api.InBacklog(jira.ID); err != nil {
-				return now, err
-			}
-		}
-		now.option, _ = ps.optionFor(jira.Fields.Status.Name, now.inBacklog)
+		now.option, _ = ps.forJira(jira.Fields.Status.Name)
 
 		return now, nil
 	}
@@ -1217,17 +1186,13 @@ func applyProjectStatus(c *Config, s *State, api API, e *Entry, save func(*State
 		// Something else, such as the project's own workflows, already made the change.
 		return alreadyDone(s, e, save, func() { setAgreedProjectStatus(s, e.GitHub, e.option) })
 	}
-	if now.item.OptionID != e.item.OptionID || now.jira.Fields.Status.Name != e.jira.Fields.Status.Name ||
-		now.inBacklog != e.inBacklog {
+	if now.item.OptionID != e.item.OptionID || now.jira.Fields.Status.Name != e.jira.Fields.Status.Name {
 		return syncErr("Project or Jira status changed after plan; rerun")
 	}
-	switch {
-	case e.Destination == SideProject:
+	if e.Destination == SideProject {
 		err = api.SetProjectStatus(e.item.ID, e.fieldID, e.optionID)
-	case e.toBacklog:
-		err = api.MoveToBacklog(now.jira.Key)
-	default:
-		err = moveJiraToOption(ps, api, e, now.jira)
+	} else {
+		err = api.TransitionJira(e.pair.JiraID, e.transition)
 	}
 	if status, refused := refusedStatus(err); refused && itemRejections[status] {
 		e.Outcome, e.Reason = OutcomeRejected, "Project status change rejected with HTTP "+strconv.Itoa(status)+"; retried next run"
@@ -1241,54 +1206,11 @@ func applyProjectStatus(c *Config, s *State, api API, e *Entry, save func(*State
 		return err
 	}
 	if e.Destination == SideProject && now.item.OptionID != e.optionID || now.option != e.option {
-		if e.toBacklog || e.toBoard {
-			return syncErr("Project status change not confirmed; Jira status is %s, in backlog: %t",
-				now.jira.Fields.Status.Name, now.inBacklog)
-		}
-
 		return syncErr("Project status change not confirmed; Jira status is %s", now.jira.Fields.Status.Name)
 	}
 	setAgreedProjectStatus(s, e.GitHub, e.option)
 
 	return save(s)
-}
-
-// moveJiraToOption takes a Jira issue off the backlog when planned, then transitions
-// it unless its status already maps to the option. Moving onto a Kanban board can
-// change the status, so the transition is looked up again after the move.
-func moveJiraToOption(ps *ProjectStatus, api API, e *Entry, jira *JiraIssue) error {
-	m, _ := ps.mapping(e.option)
-	transition := e.transition
-	if e.toBoard {
-		if err := api.MoveToBoard(jira.Key); err != nil {
-			return err
-		}
-		moved, err := api.JiraIssue(jira.ID)
-		if err == nil && moved == nil {
-			err = syncErr("Linked Jira issue vanished during the board move; rerun")
-		}
-		if err != nil {
-			return err
-		}
-		if slices.Contains(m.Jira, moved.Fields.Status.Name) {
-			return nil
-		}
-		if moved.Fields.Status.Name != jira.Fields.Status.Name {
-			id, blocked, err := projectTransition(api, jira.ID, moved.Fields.Status.Name, m)
-			if err != nil {
-				return err
-			}
-			if blocked != "" {
-				return syncErr("%s after moving %s onto the board", blocked, jira.Key)
-			}
-			transition = id
-		}
-	}
-	if transition == "" {
-		return nil
-	}
-
-	return api.TransitionJira(e.pair.JiraID, transition)
 }
 
 // recheckFoundJira re-reads a Jira issue that recovery found; its identity property

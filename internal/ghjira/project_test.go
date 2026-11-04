@@ -226,6 +226,25 @@ func TestProjectStatusChangedAfterPlanAborts(t *testing.T) {
 	eq(t, len(x.api.writes), writes)
 }
 
+// A Jira Backlog status is mapped like any other: no board or backlog listing is read.
+func TestBacklogStatusMapsLikeAnyOther(t *testing.T) {
+	t.Parallel()
+	x := projectSyncer(t)
+	x.c.ProjectStatus.Map = append(x.c.ProjectStatus.Map, ProjectStatusMapping{Project: "Backlog", Jira: []string{"Backlog"}})
+	x.api.project.Options["Backlog"] = "o-backlog"
+	x.api.transitions = append(x.api.transitions, JiraTransition{ID: "5", Name: "Shelve", To: jiraStatus("Backlog", "new")})
+	s := projectInSync(t, x)
+	x.setOption("Backlog")
+	s, _ = x.ok(s)
+	eq(t, lastWrite(x.api), write{"transition", "Shelve"})
+	eq(t, []any{x.api.jira.Fields.Status.Name, agreedOption(s)}, []any{"Backlog", "Backlog"})
+
+	x.api.jira.Fields.Status = jiraStatus("To Do", "new")
+	s, _ = x.ok(s)
+	eq(t, lastWrite(x.api), write{"project", "Todo"})
+	eq(t, agreedOption(s), "Todo")
+}
+
 func TestProjectStatusConfig(t *testing.T) {
 	t.Parallel()
 	ps := Object{"owner": "cccteam", "project_number": 7, "map": []any{
@@ -260,6 +279,17 @@ func TestProjectStatusConfig(t *testing.T) {
 	} {
 		if _, err := ParseConfig(canonical(withPS(change), false)); err == nil {
 			t.Errorf("%s: accepted", name)
+		}
+	}
+	// The board backlog mode of earlier releases is refused with what to use instead.
+	for name, change := range map[string]func(Object){
+		"jira_board": func(r Object) { asObject(r["project_status"])["jira_board"] = 150 },
+		"jira_backlog": func(r Object) {
+			list(asObject(r["project_status"])["map"])[0] = Object{"project": "Todo", "jira_backlog": true}
+		},
+	} {
+		if _, err := ParseConfig(canonical(withPS(change), false)); err == nil || !strings.Contains(err.Error(), "map a Jira Backlog status") {
+			t.Errorf("%s: got %v", name, err)
 		}
 	}
 }

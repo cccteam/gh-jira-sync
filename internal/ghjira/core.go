@@ -98,9 +98,6 @@ type ProjectStatus struct {
 	Field         string
 	AddToProject  bool
 	Map           []ProjectStatusMapping
-	// JiraBoard is the board whose backlog the jira_backlog option mirrors (team-managed
-	// boards keep backlog membership apart from status).
-	JiraBoard int
 }
 
 // ProjectStatusMapping pairs one project option with the Jira statuses it covers.
@@ -109,9 +106,6 @@ type ProjectStatusMapping struct {
 	Project    string
 	Jira       []string
 	Transition string
-	// JiraBacklog marks the option that means "in the Jira board's backlog"; every
-	// other option then also means "on the board".
-	JiraBacklog bool
 }
 
 func (p *ProjectStatus) mapping(option string) (ProjectStatusMapping, bool) {
@@ -122,27 +116,6 @@ func (p *ProjectStatus) mapping(option string) (ProjectStatusMapping, bool) {
 	}
 
 	return ProjectStatusMapping{}, false
-}
-
-// backlogOption returns the option marked jira_backlog, or "".
-func (p *ProjectStatus) backlogOption() string {
-	for _, m := range p.Map {
-		if m.JiraBacklog {
-			return m.Project
-		}
-	}
-
-	return ""
-}
-
-// optionFor returns the project option for a Jira issue: the backlog option while it
-// is in the board's backlog, otherwise the option covering its status.
-func (p *ProjectStatus) optionFor(status string, inBacklog bool) (string, bool) {
-	if b := p.backlogOption(); b != "" && inBacklog {
-		return b, true
-	}
-
-	return p.forJira(status)
 }
 
 // forJira returns the project option that covers a Jira status.
@@ -180,13 +153,16 @@ func jiraStatuses(v any) []string {
 // parseStatusMapping reads one project_status map entry, recording its option and
 // statuses as seen. It returns a problem description instead of the mapping when the
 // entry is invalid.
-func parseStatusMapping(entry any, seenOption, seenJira map[string]bool, backlogSeen bool) (m ProjectStatusMapping, problem string) {
+func parseStatusMapping(entry any, seenOption, seenJira map[string]bool) (m ProjectStatusMapping, problem string) {
 	e, ok := entry.(Object)
 	if !ok {
 		return m, "each map entry must be an object"
 	}
 	for k := range e {
-		if k != "project" && k != "jira" && k != "transition" && k != "jira_backlog" {
+		switch {
+		case k == "jira_backlog":
+			return m, backlogModeRemoved
+		case k != "project" && k != "jira" && k != "transition":
 			return m, "unknown map key " + strconv.Quote(k)
 		}
 	}
@@ -194,18 +170,7 @@ func parseStatusMapping(entry any, seenOption, seenJira map[string]bool, backlog
 		return m, "each map entry needs a distinct project option name"
 	}
 	seenOption[m.Project] = true
-	m.Jira = jiraStatuses(e["jira"])
-	if v, present := e["jira_backlog"]; present {
-		if m.JiraBacklog, ok = v.(bool); !ok {
-			return m, "jira_backlog must be boolean"
-		}
-	}
-	switch {
-	case m.JiraBacklog && (len(m.Jira) > 0 || e["transition"] != nil):
-		return m, "the jira_backlog entry " + strconv.Quote(m.Project) + " takes no Jira statuses or transition"
-	case m.JiraBacklog && backlogSeen:
-		return m, "only one map entry can be jira_backlog"
-	case !m.JiraBacklog && len(m.Jira) == 0:
+	if m.Jira = jiraStatuses(e["jira"]); len(m.Jira) == 0 {
 		return m, "map entry " + strconv.Quote(m.Project) + " needs at least one Jira status"
 	}
 	for _, name := range m.Jira {
@@ -223,6 +188,11 @@ func parseStatusMapping(entry any, seenOption, seenJira map[string]bool, backlog
 	return m, ""
 }
 
+// backlogModeRemoved explains configurations written for the board backlog mode that
+// earlier releases had, which tracked backlog membership apart from status.
+const backlogModeRemoved = "jira_board and jira_backlog were removed; " +
+	"map a Jira Backlog status instead, after moving backlog issues into it"
+
 func parseProjectStatus(raw any) (*ProjectStatus, error) {
 	bad := func(detail string) (*ProjectStatus, error) {
 		return nil, syncErr("project_status: %s", detail)
@@ -231,8 +201,11 @@ func parseProjectStatus(raw any) (*ProjectStatus, error) {
 	if !ok {
 		return bad("must be null or an object")
 	}
-	allowed := map[string]bool{"owner": true, "owner_type": true, "project_number": true, "field": true, "add_to_project": true, "map": true, "jira_board": true}
+	allowed := map[string]bool{"owner": true, "owner_type": true, "project_number": true, "field": true, "add_to_project": true, "map": true}
 	for k := range obj {
+		if k == "jira_board" {
+			return bad(backlogModeRemoved)
+		}
 		if !allowed[k] {
 			return bad("unknown key " + strconv.Quote(k))
 		}
@@ -264,22 +237,12 @@ func parseProjectStatus(raw any) (*ProjectStatus, error) {
 		return bad("map must list at least one option")
 	}
 	seenOption, seenJira := map[string]bool{}, map[string]bool{}
-	backlogSeen := false
 	for _, entry := range entries {
-		m, problem := parseStatusMapping(entry, seenOption, seenJira, backlogSeen)
+		m, problem := parseStatusMapping(entry, seenOption, seenJira)
 		if problem != "" {
 			return bad(problem)
 		}
-		backlogSeen = backlogSeen || m.JiraBacklog
 		p.Map = append(p.Map, m)
-	}
-	if v, present := obj["jira_board"]; present {
-		if p.JiraBoard, ok = strictInt(v); !ok || p.JiraBoard < 1 {
-			return bad("jira_board must be a board ID")
-		}
-	}
-	if backlogSeen != (p.JiraBoard != 0) {
-		return bad("a jira_backlog map entry and jira_board go together")
 	}
 
 	return p, nil

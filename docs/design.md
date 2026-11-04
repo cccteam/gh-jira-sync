@@ -272,8 +272,6 @@ account Edit All Comments avoids that.
 * https://developer.atlassian.com/cloud/jira/platform/rest/v3/api-group-issues/
 * https://developer.atlassian.com/cloud/jira/platform/rest/v3/api-group-issue-comments/
 * https://developer.atlassian.com/cloud/jira/platform/search-and-reconcile/
-* https://developer.atlassian.com/cloud/jira/software/rest/api-group-backlog/
-* https://developer.atlassian.com/cloud/jira/software/rest/api-group-board/
 * https://support.atlassian.com/user-management/docs/manage-api-tokens-for-service-accounts/
 * https://support.atlassian.com/user-management/docs/create-oauth-2-0-credential-for-service-accounts/
 
@@ -304,27 +302,13 @@ issues and projects, each limited to one repository or owner), and API version `
 Projects REST endpoints are documented. Adding items and setting the field are
 idempotent and not journaled.
 
-Backlog mode (`jira_board` plus one `jira_backlog` option) adds board-backlog
-membership to the Jira side, since in team-managed projects it is independent of
-status. A workflow with a Backlog status needs none of this; it maps like any other
-status. The Jira side's option becomes "the backlog option if the issue is in the
-backlog, else the option covering its status", and everything above applies to it
-unchanged, including the agreed baseline. Membership is read once per run from the
-board's backlog listing (Agile API `GET /board/{id}/backlog`, every page or the run
-fails) and re-read per issue with a JQL filter before and after each write. Writes use
-`POST /backlog/{board}/issue` and `POST /board/{board}/issue`; both may answer 207 with
-a status and reasons per issue. A refused issue becomes an HTTP error with that
-issue's status, so a 4xx is `rejected` and retried like any other refusal, and the
-report quotes Jira's reason (such as a missing Schedule work items permission). The
-backlog listing lags a move by about a second (observed live), so each move polls
-membership for up to ten seconds. A move still not shown by then stops the run before
-anything else changes for that issue. Transitioning after an unconfirmed board move
-once left a live issue done in status but still in the backlog. A board move can itself
-change the status (Kanban boards put the issue in the first column), so the
-transition planned from the old status is recomputed from the new one when they
-differ, and skipped when the new status already maps to the target. Jira omits done
-issues from backlog listings, so moving a done issue to the backlog option is
-blocked instead of attempted.
+Board backlog membership is not tracked; a Backlog status maps like any other.
+Releases up to v0.1.3 had a backlog mode (`jira_board` plus one `jira_backlog`
+option) for team-managed boards, where backlog membership is independent of status.
+It was removed because confirming a board move meant reading the backlog listing,
+which comes from Jira's search index and lagged a live move by more than ten seconds,
+stopping runs although the move had worked. Configurations that still name it fail
+validation with a message pointing to a Backlog status.
 
 ## Parent links
 
