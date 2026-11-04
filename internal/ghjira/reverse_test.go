@@ -88,6 +88,10 @@ func (w *reverseWorld) JiraIssue(id string) (*JiraIssue, error) {
 	return nil, nil
 }
 
+func (w *reverseWorld) JiraIssues(ids []string) (map[string]*JiraIssue, error) {
+	return readJiraIssues(w.JiraIssue, ids)
+}
+
 func (w *reverseWorld) SelectedJiraIssues() ([]JiraIssue, error) {
 	w.searches++
 	out := make([]JiraIssue, 0, len(w.selected))
