@@ -48,7 +48,7 @@ func newServer(t *testing.T, respond func(r *http.Request) (int, http.Header, an
 }
 
 func (s *server) http() *HTTP {
-	h := newHTTP(s.instance.URL, map[string]string{})
+	h := newHTTP("Test", s.instance.URL, map[string]string{})
 	h.sleep = func(d time.Duration) { s.sleeps = append(s.sleeps, d) }
 	return h
 }
@@ -340,7 +340,7 @@ func TestGitHubRateLimit403RetriedForReadsOnly(t *testing.T) {
 
 func TestRateLimitResetDelayIsCapped(t *testing.T) {
 	t.Parallel()
-	h := newHTTP("https://example.test", nil)
+	h := newHTTP("Test", "https://example.test", nil)
 	h.now = func() time.Time { return time.Unix(1000, 0) }
 	eq(t, h.retryDelay(http.Header{"X-Ratelimit-Reset": {"1005"}}, 0), 5*time.Second)
 	eq(t, h.retryDelay(http.Header{"X-Ratelimit-Reset": {"9999"}}, 0), 60*time.Second)
@@ -420,4 +420,48 @@ func TestJiraRestrictionSignals(t *testing.T) {
 			t.Errorf("%s: restricted=%v, want %v", raw, got, want)
 		}
 	}
+}
+
+// Errors name the service, method, and path, so a failure such as a 401 shows which
+// API refused it, but never the query, which can carry search text.
+func TestHTTPErrorsNameServiceAndPath(t *testing.T) {
+	t.Parallel()
+	refused := newServer(t, status(401, nil))
+	h := refused.http()
+	h.service = "Jira"
+	err := h.Do("GET", "/rest/api/3/search/jql?jql=labels%3Dsecret", nil, nil)
+	if code, ok := refusedStatus(err); !ok || code != 401 {
+		t.Fatalf("got %v", err)
+	}
+	eq(t, err.Error(), "Jira GET /rest/api/3/search/jql failed with HTTP 401; writes are not retried")
+
+	garbled := newServer(t, func(*http.Request) (int, http.Header, any) { return 200, nil, []byte("not json") })
+	h = garbled.http()
+	h.service = "GitHub"
+	var out Object
+	err = h.Do("GET", "/repos/acme/test/issues/1", nil, &out)
+	eq(t, err.Error(), "Invalid response to GitHub GET /repos/acme/test/issues/1; write outcome may be unknown")
+
+	down := newServer(t, ok(nil))
+	h = down.http()
+	h.service = "Jira"
+	down.instance.Close()
+	err = h.Do("POST", "/rest/api/3/issue", Object{}, nil)
+	eq(t, err.Error(), "Jira POST /rest/api/3/issue network failure; write outcome may be unknown")
+}
+
+func TestClientsNameTheirService(t *testing.T) {
+	t.Setenv("GH_TOKEN", "x")
+	t.Setenv("JIRA_EMAIL", "x")
+	t.Setenv("JIRA_API_TOKEN", "x")
+	t.Setenv("JIRA_CLIENT_ID", "")
+	t.Setenv("JIRA_CLIENT_SECRET", "")
+	t.Setenv("GH_PROJECT_TOKEN", "p")
+	c := testConfig(t, nil)
+	c.ProjectStatus = &ProjectStatus{Owner: "acme", OwnerType: "org", ProjectNumber: 1, Field: "Status"}
+	client, err := NewClient(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eq(t, []string{client.github.service, client.jira.service, client.projects.service}, []string{"GitHub", "Jira", "GitHub Projects"})
 }

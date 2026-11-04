@@ -21,9 +21,11 @@ func TestCloudIDRoutesAPIThroughGateway(t *testing.T) {
 		t.Fatal("state from a site deployment rejected after switching to the gateway")
 	}
 
-	for k, v := range map[string]string{"GH_TOKEN": "x", "JIRA_EMAIL": "x", "JIRA_API_TOKEN": "x", "JIRA_CLIENT_ID": "", "JIRA_CLIENT_SECRET": ""} {
-		t.Setenv(k, v)
-	}
+	t.Setenv("GH_TOKEN", "x")
+	t.Setenv("JIRA_EMAIL", "x")
+	t.Setenv("JIRA_API_TOKEN", "x")
+	t.Setenv("JIRA_CLIENT_ID", "")
+	t.Setenv("JIRA_CLIENT_SECRET", "")
 	client, err := NewClient(gateway)
 	if err != nil {
 		t.Fatal(err)
@@ -43,8 +45,10 @@ func TestCloudIDRoutesAPIThroughGateway(t *testing.T) {
 func TestCloudIDMustBeAUUID(t *testing.T) {
 	t.Parallel()
 	for _, bad := range []any{"acme", "https://api.atlassian.com/ex/jira/" + testCloudID, testCloudID + "0", 5, true} {
-		raw := Object{"repository": "acme/test", "jira_url": "https://acme.atlassian.net",
-			"jira_project": "ENG", "jira_issue_type": "10001", "jira_cloud_id": bad}
+		raw := Object{
+			"repository": "acme/test", "jira_url": "https://acme.atlassian.net",
+			"jira_project": "ENG", "jira_issue_type": "10001", "jira_cloud_id": bad,
+		}
 		if _, err := ParseConfig(canonical(raw, false)); err == nil {
 			t.Errorf("jira_cloud_id %v accepted", bad)
 		}
