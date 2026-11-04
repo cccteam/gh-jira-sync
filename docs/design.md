@@ -5,8 +5,10 @@
 * Jira Cloud, initially Software and business projects.
 * Create a Jira issue for each eligible GitHub issue labeled `sync-jira`.
 * Copy title and description at creation, choosing the Jira issue type from the
-  GitHub issue type when `jira_issue_types` maps it. Do not subsequently sync issue fields,
-  labels, assignees, or deletions.
+  GitHub issue type when `jira_issue_types` maps it. Jira issue types are configured by
+  name or ID; each run resolves names against the project's issue types before planning.
+  Optionally copy later title and description edits from the original issue to its
+  copy (`sync_content`). Do not sync other issue fields, labels, assignees, or deletions.
 * Optionally create GitHub issues from Jira issues with `jira_selection_label`.
 * Optionally mirror open/closed status in both directions (`status_sync`).
 * Optionally mirror parent links: GitHub sub-issues and Jira parents (`sync_parents`).
@@ -304,6 +306,7 @@ idempotent and not journaled.
 
 Backlog mode (`jira_board` plus one `jira_backlog` option) adds board-backlog
 membership to the Jira side, since in team-managed projects it is independent of
+status. A workflow with a Backlog status needs none of this; it maps like any other
 status. The Jira side's option becomes "the backlog option if the issue is in the
 backlog, else the option covering its status", and everything above applies to it
 unchanged, including the agreed baseline. Membership is read once per run from the
@@ -365,6 +368,33 @@ The two directions must never feed each other. A GitHub issue that ends with the
 tool's marker is never sent to Jira, and a Jira issue carrying the tool's identity
 property is never sent to GitHub, even when either carries the other side's
 selection label: each is left to its own recovery, or blocked when its journal is
-missing. Once linked, a pair created from Jira is indistinguishable from any other.
+missing. Once linked, a pair created from Jira syncs like any other, except that
+content sync treats Jira as its original (its `jira_issue` operation is journaled).
 New pairs record "open" and "no parent" as agreed, so status and parent sync carry
 Jira's current values to GitHub on the next run.
+
+## Titles and descriptions
+
+`sync_content` copies later edits of the title and description from a pair's
+original (the issue it started on: Jira when a `jira_issue` operation created the
+GitHub issue, otherwise GitHub) to its copy, rendered exactly as creation rendered
+them: Markdown to ADF with the "From GitHub" link, or ADF to text with the "From Jira"
+link and hidden marker. Nothing flows from copy to original, because ADF to Markdown
+is lossy (headings, emphasis, code blocks, tables), so a round trip would degrade
+GitHub bodies; titles follow descriptions for one consistent rule.
+
+Each field is decided separately, like comments, and the pair records digests of both
+sides as last copied or found matching (`title`, `description`). A copy whose digest
+differs from its record was edited there, and is blocked rather than overwritten. It
+clears when the copy shows the original again, either because the same change was made
+on the original or because the copy edit was undone. A copy edit is not copied back
+either, so blocking until a person decides is the only way to lose nothing.
+"Shows" is a lenient comparison (surrounding spaces for text; ADF compared through
+its plain-text rendering), since Jira may store ADF differently from what was sent.
+Recording the read-back value after each write keeps that normalization from looking
+like an edit, so writes never repeat. With no record (sync newly turned on), a copy
+that shows the original is recorded, and any other is replaced from the original:
+copy edits made before then were never synced, and the dry-run report lists them.
+Writes re-read both sides first and abort the run if either changed since the plan;
+a 4xx refusal (for example a field missing from the Jira edit screen) is reported as
+`rejected` and retried next run.

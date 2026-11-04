@@ -34,6 +34,7 @@ type Entry struct {
 	IssueType         string  `json:"issue_type,omitempty"` // Jira issue type ID for create_issue
 	Parent            string  `json:"parent,omitempty"`     // target parent, "#<number>" or "none", for parent entries
 	JiraKey           string  `json:"jira_key,omitempty"`   // Jira issue for create_github_issue and link_github_issue
+	Field             string  `json:"field,omitempty"`      // "title" or "description" for content entries
 
 	issue       *GitHubIssue     // source issue as planned
 	comment     Comment          // source comment as planned
@@ -65,6 +66,7 @@ type Entry struct {
 	labels      []string     // GitHub labels for a created issue
 	issueType   string       // GitHub issue type for a created issue
 	found       *GitHubIssue // GitHub issue a pending creation already made
+	content     fieldValues  // a content entry's field on both sides, as planned
 }
 
 func (e *Entry) block(reason string) { e.Kind, e.Reason = KindBlocked, reason }
@@ -110,6 +112,11 @@ func validateState(s *State, c *Config) error {
 			return syncErr("Invalid or duplicate issue mapping")
 		}
 		jiraIDs[p.JiraID] = true
+		for _, r := range []*Copied{p.Title, p.Description} {
+			if r != nil && (len(r.Original) != 64 || len(r.Copy) != 64) {
+				return syncErr("Invalid content record")
+			}
+		}
 	}
 	for op, r := range s.Operations {
 		if !r.Status.valid() || op != token(c, r.Kind, r.SourceID) {
@@ -395,7 +402,7 @@ func (p *pairPlanner) planUntracked(source *GitHubIssue, issues map[string]*GitH
 	return []*Entry{e}, nil
 }
 
-// planPair plans status, project status, parent, and comments for a linked pair.
+// planPair plans status, project status, parent, content, and comments for a linked pair.
 func (p *pairPlanner) planPair(n string, pair Pair, source *GitHubIssue) ([]*Entry, error) {
 	issueOp := token(p.c, OpIssue, pair.GitHubID)
 	// One vanished pair is reported for review; it must not stall every other pair.
@@ -435,6 +442,9 @@ func (p *pairPlanner) planPair(n string, pair Pair, source *GitHubIssue) ([]*Ent
 		if parentEntry := planParent(p.c, p.s, pair, source, jira, p.ghParents); parentEntry != nil {
 			entries = append(entries, parentEntry)
 		}
+	}
+	if p.c.SyncContent {
+		entries = append(entries, planContent(p.c, p.s, pair, source, jira)...)
 	}
 	if !p.c.Comments {
 		return entries, nil
@@ -1011,6 +1021,10 @@ func applyEntry(c *Config, s *State, api API, e *Entry, save func(*State) error)
 		setAgreedParent(s, e.GitHub, e.parent)
 	case KindSyncParent:
 		return applyParent(s, api, e, save)
+	case KindContentAgreed:
+		setCopied(s, e)
+	case KindSyncContent:
+		return applyContent(c, s, api, e, save)
 	case KindProjectStatusAgreed:
 		setAgreedProjectStatus(s, e.GitHub, e.option)
 	case KindAddToProject:

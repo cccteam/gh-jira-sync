@@ -45,6 +45,17 @@ type Pair struct {
 	// Parent is the parent both sides last agreed on, as a GitHub issue number (0 for
 	// none); nil until they first agree. It works like Closed.
 	Parent *int `json:"parent,omitempty"`
+	// Title and Description record what content sync last copied or found matching;
+	// nil until then. A copy that differs from its record was edited in the copy.
+	Title       *Copied `json:"title,omitempty"`
+	Description *Copied `json:"description,omitempty"`
+}
+
+// Copied holds digests of a field on the issue a pair started on and on its copy,
+// as they stood when content sync last copied it or found them matching.
+type Copied struct {
+	Original string `json:"original"`
+	Copy     string `json:"copy"`
 }
 
 // Operation is a journaled create: pending before dispatch, done after confirmation,

@@ -16,7 +16,7 @@ See [the design](docs/design.md) for identity, recovery, and tradeoffs.
 ## Quick start
 
 Copy [`sync.example.json`](sync.example.json) to `sync.json` and set the repository,
-Jira site, project key, and issue type ID. Then set credentials:
+Jira site, project key, and issue type. Then set credentials:
 
 | Environment variable | Purpose |
 | --- | --- |
@@ -27,7 +27,7 @@ Jira site, project key, and issue type ID. Then set credentials:
 
 The Jira account needs Browse Projects, Create Issues, Add Comments, Edit Own
 Comments, and access to issue properties. Add Transition Issues for `status_sync` or
-`project_status`, Edit Issues for `sync_parents`, and board browse and rank
+`project_status`, Edit Issues for `sync_parents` or `sync_content`, and board browse and rank
 permissions for backlog mode. Jira Service Management projects are not supported.
 
 ### Jira account
@@ -189,8 +189,8 @@ Unknown keys fail validation.
 | `jira_url` | Required Jira Cloud HTTPS site URL |
 | `jira_cloud_id` | `null`; the site's cloud ID, to call Jira through Atlassian's API gateway as a [service account](#jira-account) does |
 | `jira_project` | Required project key, e.g. `ENG` |
-| `jira_issue_type` | Required issue type **ID**, e.g. `"10001"` |
-| `jira_issue_types` | `{}`; GitHub issue type name → Jira issue type ID, e.g. `{"Bug": "10004"}` |
+| `jira_issue_type` | Required issue type name or ID, e.g. `"Task"` or `"10001"` |
+| `jira_issue_types` | `{}`; GitHub issue type name → Jira issue type name or ID, e.g. `{"Bug": "Bug"}` |
 | `selection_label` | `sync-jira`; `null` selects all issues |
 | `issue_state` | `open`; or `closed` or `all` |
 | `comments` | `true`; copy new comments and edits to originals |
@@ -198,7 +198,8 @@ Unknown keys fail validation.
 | `status_sync` | `null`; `{"close_transition": "Done", "reopen_transition": "Reopen"}` mirrors open/closed |
 | `project_status` | `null`; mirrors a GitHub Project field instead of `status_sync` |
 | `sync_parents` | `false`; mirror GitHub sub-issue parents and Jira parents |
-| `jira_subtask_type` | `null`; sub-task type ID for issues nested under a standard Jira issue |
+| `sync_content` | `false`; copy later title and description edits from the issue a pair started on |
+| `jira_subtask_type` | `null`; sub-task type name or ID for issues nested under a standard Jira issue |
 | `jira_selection_label` | `null`; Jira issues with this label are created in GitHub |
 | `jira_create_fields` | Extra Jira create fields, such as required custom fields or `labels` |
 | `max_operations` | `20` writes per run; the rest are `deferred` to the next run |
@@ -209,7 +210,10 @@ Unknown keys fail validation.
 The label and state filters choose which issues are **created**. Once a pair is
 linked, it keeps syncing even if the issue closes or loses its label.
 
-List a project's issue type IDs with:
+Jira issue types can be given by name (ignoring case) or by ID; a value of only
+digits is always an ID. Names are looked up in the project at the start of each run,
+and a name that matches more than one type stops the run. List a project's issue
+types with:
 
 ```sh
 curl -s -u "$JIRA_EMAIL:$JIRA_API_TOKEN" "$JIRA_SITE/rest/api/3/project/<KEY>" | jq '.issueTypes[] | {id, name, subtask}'
@@ -235,17 +239,20 @@ the Jira status in step, in both directions:
   "owner": "cccteam",
   "project_number": 7,
   "map": [
-    {"project": "Todo",        "jira": ["To Do", "Backlog"]},
+    {"project": "Backlog",     "jira": "Backlog"},
+    {"project": "Todo",        "jira": "To Do"},
     {"project": "In Progress", "jira": "In Progress"},
     {"project": "Done",        "jira": ["Done", "Won't Do"]}
   ]
 }
 ```
 
-Other keys: `owner_type` (`org` or `user`), `field` (default `Status`),
-`add_to_project` (default `true`), `map[].transition` to pick among several
-transitions, and `jira_board` with one `map[].jira_backlog` option to mirror a board's
-backlog instead of a status. A status or option missing from `map` blocks that issue.
+Statuses and transitions are matched by name, exactly as Jira shows them. A Backlog
+status maps like any other, as above. Other keys: `owner_type` (`org` or `user`),
+`field` (default `Status`), `add_to_project` (default `true`), `map[].transition` to
+pick among several transitions, and `jira_board` with one `map[].jira_backlog` option
+for a board whose backlog is kept apart from status (team-managed boards with the
+backlog turned on). A status or option missing from `map` blocks that issue.
 Turn on the project's **Item closed** and **Item reopened** workflows so GitHub
 close/reopen reaches Jira through the project.
 
@@ -254,6 +261,13 @@ are mirrored between linked issues. Add an Epic issue type in GitHub and map it 
 `jira_issue_types` so Epics create Epics. Jira's hierarchy refusals are reported as
 `rejected`. Set `jira_subtask_type` so an issue nested under a Task is created as a
 Jira sub-task; it waits until its parent is in Jira.
+
+**Titles and descriptions.** With `sync_content`, later edits to the title or
+description of the issue a pair started on are copied to the other issue, in the same
+form as at creation. Edits made to the copy are never copied back or overwritten: the
+field is `blocked` until the same change is made on the original or the copy edit is
+undone. The first run after turning it on records copies that already match and
+replaces any that differ from the original; run without `--apply` first to see which.
 
 **Jira → GitHub creation.** With `jira_selection_label`, each labeled Jira issue gets
 a GitHub issue with its summary and description. The pair then syncs like any other.
@@ -286,7 +300,8 @@ summary. It holds IDs and decisions, never issue or comment text.
 
 Each entry has a `kind`. Writes are `create_issue`, `create_github_issue`,
 `create_comment`, `edit_comment`, `sync_status`, `add_to_project`,
-`sync_project_status`, and `sync_parent`; an `outcome` of `rejected` means the service
+`sync_project_status`, `sync_parent`, and `sync_content` (with `field` set to `title`
+or `description`); an `outcome` of `rejected` means the service
 refused it and it is retried next run. The kinds that need a person are:
 
 | Kind | Meaning |

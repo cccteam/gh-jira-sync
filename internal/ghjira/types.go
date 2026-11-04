@@ -92,13 +92,17 @@ const (
 	// (jira_selection_label).
 	KindCreateGitHubIssue Kind = "create_github_issue"
 	KindLinkGitHubIssue   Kind = "link_github_issue"
+	// KindSyncContent copies a title or description from the issue a pair started on
+	// to its copy (sync_content); KindContentAgreed records that they already match.
+	KindSyncContent   Kind = "sync_content"
+	KindContentAgreed Kind = "content_agreed"
 )
 
 // writes reports kinds that perform a remote write and count against max_operations.
 func (k Kind) writes() bool {
 	switch k {
 	case KindCreateIssue, KindCreateComment, KindEditComment, KindSyncStatus, KindAddToProject, KindSyncProjectStatus,
-		KindSyncParent, KindCreateGitHubIssue:
+		KindSyncParent, KindCreateGitHubIssue, KindSyncContent:
 		return true
 	default:
 		return false
@@ -163,6 +167,12 @@ const OpProjectStatus OpKind = "project_status"
 
 // OpParent identifies a pair's parent decisions, like OpStatus.
 const OpParent OpKind = "parent"
+
+// OpTitle and OpDescription identify a pair's content sync decisions, like OpStatus.
+const (
+	OpTitle       OpKind = "title"
+	OpDescription OpKind = "description"
+)
 
 // commentOp is the operation kind for copying a comment that originates on side.
 func commentOp(side Side) OpKind {
