@@ -47,27 +47,29 @@ type write struct {
 
 // fakeAPI simulates GitHub and Jira for one issue, with switches for failure modes.
 type fakeAPI struct {
-	source       GitHubIssue
-	jira         *JiraIssue
-	rows         map[Side][]Comment
-	writes       []write
-	loseResponse bool // perform the write, then fail as if the response was lost
-	hideJira     bool // search lags behind writes
-	githubGone   bool
-	jiraGone     bool
-	reads        []string
-	listReads    []Side
-	refuse       []int         // HTTP statuses for upcoming writes to reject without effect
-	storeADF     func(any) any // how Jira stores a written description, if not as sent
-	transitions  []JiraTransition
-	project      *ProjectSnapshot // the GitHub Project, in project status mode
-	searches     []string         // started values passed to FindIssue
-	itemClosed   bool             // mimic the project workflow: closing the issue sets Done
-	itemLate     bool             // like itemClosed, but landing after the next project write
-	lateDone     bool
-	timeline     StateChange // the issue's latest close or reopen, as LastStateChange reads it
-	jiraChanged  string      // when Jira's status last changed, as its changelog reads
-	nextID       int
+	source         GitHubIssue
+	jira           *JiraIssue
+	rows           map[Side][]Comment
+	writes         []write
+	loseResponse   bool // perform the write, then fail as if the response was lost
+	hideJira       bool // search lags behind writes
+	githubGone     bool
+	jiraGone       bool
+	reads          []string
+	listReads      []Side
+	refuse         []int         // HTTP statuses for upcoming writes to reject without effect
+	storeADF       func(any) any // how Jira stores a written description, if not as sent
+	transitions    []JiraTransition
+	project        *ProjectSnapshot // the GitHub Project, in project status mode
+	searches       []string         // started values passed to FindIssue
+	itemClosed     bool             // mimic the project workflow: closing the issue sets Done
+	itemLate       bool             // like itemClosed, but landing after the next project write
+	lateDone       bool
+	timeline       StateChange // the issue's latest close or reopen, as LastStateChange reads it
+	jiraChanged    string      // when Jira's status last changed, as its changelog reads
+	summaryChanged string      // when Jira's summary last changed
+	titleChanged   string      // when the GitHub title was last renamed
+	nextID         int
 }
 
 func newFake() *fakeAPI {
@@ -398,7 +400,14 @@ func (f *fakeAPI) workflowDone() {
 
 func (f *fakeAPI) LastStateChange(int) (StateChange, error) { return f.timeline, nil }
 
-func (f *fakeAPI) JiraStatusChanged(string) (string, error) { return f.jiraChanged, nil }
+func (f *fakeAPI) JiraFieldChanged(_, field string) (string, error) {
+	if field == "summary" {
+		return f.summaryChanged, nil
+	}
+	return f.jiraChanged, nil
+}
+
+func (f *fakeAPI) GitHubTitleChanged(int) (string, error) { return f.titleChanged, nil }
 
 // fakeConfig has the binding every test config shares, so the fake can compute the
 // identity Jira would store on a created issue.

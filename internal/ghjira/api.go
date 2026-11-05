@@ -50,8 +50,10 @@ type API interface {
 	ProjectItem(itemID, fieldID int64) (ProjectItem, error)
 	AddProjectItem(number int) error
 	SetProjectStatus(itemID, fieldID int64, optionID string) error
-	// JiraStatusChanged returns when the issue's status last changed, or "" if never.
-	JiraStatusChanged(id string) (string, error)
+	// JiraFieldChanged returns when a Jira field, such as "status", last changed, or ""
+	// if never; GitHubTitleChanged does the same for a GitHub issue's title.
+	JiraFieldChanged(id, field string) (string, error)
+	GitHubTitleChanged(number int) (string, error)
 	// LastStateChange reads the issue's latest close or reopen from its timeline.
 	LastStateChange(number int) (StateChange, error)
 	// Parent sync. Parents are GitHub issue numbers in the synced repository; 0 means none.
@@ -862,6 +864,11 @@ func (a *Client) Project() (*ProjectSnapshot, error) {
 	return snap, nil
 }
 
+// graphqlBody is a GraphQL request for a query and its variables.
+func graphqlBody(query string, variables map[string]any) map[string]any {
+	return map[string]any{"query": query, "variables": variables}
+}
+
 // projectItemsQuery lists a project's items with their issue and single-select
 // value. The REST item listing returns no items to GitHub App installation tokens
 // (seen live), while GraphQL lists them all. Option IDs and item database IDs are
@@ -892,9 +899,9 @@ func (a *Client) projectItems() (map[int64]ProjectItem, error) {
 	items := map[int64]ProjectItem{}
 	var cursor *string
 	for range a.c.MaxPages {
-		body := map[string]any{"query": query, "variables": map[string]any{
+		body := graphqlBody(query, map[string]any{
 			"login": p.Owner, "number": p.ProjectNumber, "field": p.Field, "cursor": cursor,
-		}}
+		})
 		var resp struct {
 			Data struct {
 				Owner *struct {
@@ -985,9 +992,9 @@ func (a *Client) SetProjectStatus(itemID, fieldID int64, optionID string) error 
 	return a.projects.Do("PATCH", a.projectPath()+"/items/"+strconv.FormatInt(itemID, 10), body, nil)
 }
 
-// JiraStatusChanged returns when the issue's status last changed, from its changelog,
+// JiraFieldChanged returns when a field of the issue last changed, from its changelog,
 // or "" when it never has. Every page is read or the call fails.
-func (a *Client) JiraStatusChanged(id string) (string, error) {
+func (a *Client) JiraFieldChanged(id, field string) (string, error) {
 	type change struct {
 		Field string `json:"field"`
 	}
@@ -1007,7 +1014,7 @@ func (a *Client) JiraStatusChanged(id string) (string, error) {
 			return "", err
 		}
 		for _, v := range page.Values {
-			if !slices.ContainsFunc(v.Items, func(c change) bool { return c.Field == "status" }) {
+			if !slices.ContainsFunc(v.Items, func(c change) bool { return c.Field == field }) {
 				continue
 			}
 			at, err := parseTimestamp(v.Created)
@@ -1028,6 +1035,54 @@ func (a *Client) JiraStatusChanged(id string) (string, error) {
 	}
 
 	return "", syncErr("Jira changelog pagination limit exceeded")
+}
+
+// renamesQuery reads an issue's last title rename.
+const renamesQuery = `query($repoOwner: String!, $repoName: String!, $issue: Int!) {
+  repository(owner: $repoOwner, name: $repoName) {
+    issue(number: $issue) {
+      timelineItems(last: 1, itemTypes: [RENAMED_TITLE_EVENT]) { nodes { ... on RenamedTitleEvent { createdAt } } }
+    }
+  }
+}`
+
+// GitHubTitleChanged returns when the issue's title was last renamed, from its
+// timeline, or "" when it never was.
+func (a *Client) GitHubTitleChanged(number int) (string, error) {
+	owner, repo, _ := strings.Cut(a.c.Repository, "/")
+	body := graphqlBody(renamesQuery, map[string]any{"repoOwner": owner, "repoName": repo, "issue": number})
+	var resp struct {
+		Data struct {
+			Repository *struct {
+				Issue *struct {
+					TimelineItems struct {
+						Nodes []struct {
+							CreatedAt string `json:"createdAt"`
+						} `json:"nodes"`
+					} `json:"timelineItems"`
+				} `json:"issue"`
+			} `json:"repository"`
+		} `json:"data"`
+		Errors []struct {
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+	if err := a.github.Do("POST", "/graphql", body, &resp); err != nil {
+		return "", err
+	}
+	if len(resp.Errors) > 0 || resp.Data.Repository == nil || resp.Data.Repository.Issue == nil {
+		msg := "issue not visible"
+		if len(resp.Errors) > 0 {
+			msg = resp.Errors[0].Message
+		}
+
+		return "", syncErr("GitHub GraphQL error reading issue #%d's timeline: %s", number, msg)
+	}
+	if nodes := resp.Data.Repository.Issue.TimelineItems.Nodes; len(nodes) > 0 {
+		return nodes[0].CreatedAt, nil
+	}
+
+	return "", nil
 }
 
 // projectAutomation is the actor GitHub's built-in project workflows act as.
@@ -1058,9 +1113,9 @@ const stateEventsQuery = `query($repoOwner: String!, $repoName: String!, $issue:
 // which can see project events. An issue that token cannot see reads as no change.
 func (a *Client) LastStateChange(number int) (StateChange, error) {
 	owner, repo, _ := strings.Cut(a.c.Repository, "/")
-	body := map[string]any{"query": stateEventsQuery, "variables": map[string]any{
+	body := graphqlBody(stateEventsQuery, map[string]any{
 		"repoOwner": owner, "repoName": repo, "issue": number,
-	}}
+	})
 	var resp struct {
 		Data struct {
 			Repository *struct {
