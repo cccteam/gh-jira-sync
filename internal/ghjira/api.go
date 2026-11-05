@@ -50,6 +50,8 @@ type API interface {
 	ProjectItem(itemID, fieldID int64) (ProjectItem, error)
 	AddProjectItem(number int) error
 	SetProjectStatus(itemID, fieldID int64, optionID string) error
+	// LastStateChange reads the issue's latest close or reopen from its timeline.
+	LastStateChange(number int) (StateChange, error)
 	// Parent sync. Parents are GitHub issue numbers in the synced repository; 0 means none.
 	SubIssues(number int) ([]GitHubIssue, error)
 	GitHubParent(number int) (int, error)
@@ -978,6 +980,93 @@ func (a *Client) SetProjectStatus(itemID, fieldID int64, optionID string) error 
 	body := map[string]any{"fields": []map[string]any{{"id": fieldID, "value": optionID}}}
 
 	return a.projects.Do("PATCH", a.projectPath()+"/items/"+strconv.FormatInt(itemID, 10), body, nil)
+}
+
+// projectAutomation is the actor GitHub's built-in project workflows act as.
+const projectAutomation = "github-project-automation"
+
+// stateEventsQuery reads an issue's latest close, reopen, and project status events,
+// oldest first. Status events carry their actor, which the project REST API does not.
+const stateEventsQuery = `query($owner: String!, $repo: String!, $number: Int!) {
+  repository(owner: $owner, name: $repo) {
+    issue(number: $number) {
+      timelineItems(last: 50, itemTypes: [CLOSED_EVENT, REOPENED_EVENT, PROJECT_V2_ITEM_STATUS_CHANGED_EVENT]) {
+        nodes {
+          __typename
+          ... on ClosedEvent { id }
+          ... on ReopenedEvent { id }
+          ... on ProjectV2ItemStatusChangedEvent {
+            actor { login }
+            project { number owner { ... on Organization { login } ... on User { login } } }
+          }
+        }
+      }
+    }
+  }
+}`
+
+// LastStateChange reads the issue's latest close or reopen, and whether the project's
+// status changed after it by the project's own workflows. It uses the project token,
+// which can see project events. An issue that token cannot see reads as no change.
+func (a *Client) LastStateChange(number int) (StateChange, error) {
+	owner, repo, _ := strings.Cut(a.c.Repository, "/")
+	body := map[string]any{"query": stateEventsQuery, "variables": map[string]any{
+		"owner": owner, "repo": repo, "number": number,
+	}}
+	var resp struct {
+		Data struct {
+			Repository *struct {
+				Issue *struct {
+					TimelineItems struct {
+						Nodes []struct {
+							Typename string `json:"__typename"`
+							ID       string `json:"id"`
+							Actor    *struct {
+								Login string `json:"login"`
+							} `json:"actor"`
+							Project *struct {
+								Number int `json:"number"`
+								Owner  struct {
+									Login string `json:"login"`
+								} `json:"owner"`
+							} `json:"project"`
+						} `json:"nodes"`
+					} `json:"timelineItems"`
+				} `json:"issue"`
+			} `json:"repository"`
+		} `json:"data"`
+		Errors []struct {
+			Type    string `json:"type"`
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+	if err := a.projects.Do("POST", "/graphql", body, &resp); err != nil {
+		return StateChange{}, err
+	}
+	if resp.Data.Repository == nil || resp.Data.Repository.Issue == nil {
+		if len(resp.Errors) > 0 && resp.Errors[0].Type != "NOT_FOUND" && resp.Errors[0].Type != "FORBIDDEN" {
+			return StateChange{}, syncErr("GitHub GraphQL error reading issue #%d's timeline: %s", number, resp.Errors[0].Message)
+		}
+
+		return StateChange{}, nil
+	}
+	if len(resp.Errors) > 0 {
+		return StateChange{}, syncErr("GitHub GraphQL error reading issue #%d's timeline: %s", number, resp.Errors[0].Message)
+	}
+	p := a.c.ProjectStatus
+	var change StateChange
+	for _, n := range resp.Data.Repository.Issue.TimelineItems.Nodes {
+		switch n.Typename {
+		case "ClosedEvent", "ReopenedEvent":
+			change = StateChange{Event: n.ID, Closed: n.Typename == "ClosedEvent"}
+		case "ProjectV2ItemStatusChangedEvent":
+			if n.Project != nil && n.Project.Number == p.ProjectNumber && strings.EqualFold(n.Project.Owner.Login, p.Owner) {
+				change.Automated = n.Actor != nil && n.Actor.Login == projectAutomation
+			}
+		}
+	}
+
+	return change, nil
 }
 
 // withProperties fills in comment properties through the comment/list endpoint,

@@ -695,6 +695,18 @@ func planProjectStatus(c *Config, api API, project *ProjectSnapshot, pair Pair, 
 	case current == *agreed: // Jira moved
 		setProject()
 	case fromJira == *agreed: // the project moved
+		echo, err := workflowEcho(api, pair.GitHub, pair.StateEvent)
+		if err != nil {
+			return nil, err
+		}
+		if echo {
+			// A project workflow reacted to this tool carrying Jira's move to the issue's
+			// open/closed state; Jira still decides the option.
+			setProject()
+			e.Reason = "Project workflow changed the status after the issue was closed or reopened for Jira; restoring it"
+
+			return e, nil
+		}
 		if err := planJiraMove(api, ps, e, current); err != nil {
 			return nil, err
 		}
@@ -1017,7 +1029,7 @@ func applyEntry(c *Config, s *State, api API, e *Entry, save func(*State) error)
 		// Saved with the final checkpoint; losing it only means it is recorded next run.
 		setAgreedStatus(s, e.GitHub, e.closed)
 	case KindSyncStatus:
-		return applyStatus(s, api, e, save)
+		return applyStatus(c, s, api, e, save)
 	case KindCreateGitHubIssue, KindLinkGitHubIssue:
 		return applyGitHubIssue(c, s, api, e, save)
 	case KindParentAgreed:
@@ -1099,7 +1111,7 @@ func setAgreedStatus(s *State, number int, closed bool) {
 
 // applyStatus closes or reopens one side. Status changes are idempotent and not
 // journaled: if a response is lost, the next run sees both sides agree and records it.
-func applyStatus(s *State, api API, e *Entry, save func(*State) error) error {
+func applyStatus(c *Config, s *State, api API, e *Entry, save func(*State) error) error {
 	current := func() (*GitHubIssue, *JiraIssue, error) {
 		source, err := api.Issue(e.GitHub)
 		if err != nil {
@@ -1149,8 +1161,38 @@ func applyStatus(s *State, api API, e *Entry, save func(*State) error) error {
 			statusName(source.closed()), jira.Fields.Status.Name, statusName(jira.done()))
 	}
 	setAgreedStatus(s, e.GitHub, e.closed)
+	if e.Destination == SideGitHub && c.ProjectStatus != nil {
+		// Remember this close or reopen, so that a project workflow reacting to it is not
+		// taken for a project move. Only an event matching this write can be it.
+		change, err := api.LastStateChange(e.GitHub)
+		if err != nil {
+			return err
+		}
+		if change.Closed == e.closed {
+			setStateEvent(s, e.GitHub, change.Event)
+		}
+	}
 
 	return save(s)
+}
+
+func setStateEvent(s *State, number int, event string) {
+	n := strconv.Itoa(number)
+	pair := s.Pairs[n]
+	pair.StateEvent = event
+	s.Pairs[n] = pair
+}
+
+// workflowEcho reports a project status change made by the project's own workflows
+// after this tool's last close or reopen of the issue (event), with none since. Such a
+// change, like "Item closed" setting Done, follows Jira rather than leading it.
+func workflowEcho(api API, number int, event string) (bool, error) {
+	if event == "" {
+		return false, nil
+	}
+	change, err := api.LastStateChange(number)
+
+	return err == nil && change.Event == event && change.Automated, err
 }
 
 // alreadyDone handles a status change whose target both sides reached before this
@@ -1205,8 +1247,23 @@ func applyProjectStatus(c *Config, s *State, api API, e *Entry, save func(*State
 		// Something else, such as the project's own workflows, already made the change.
 		return alreadyDone(s, e, save, func() { setAgreedProjectStatus(s, e.GitHub, e.option) })
 	}
+	// A project workflow reacting to this run closing or reopening the issue may change
+	// the project around this write; Jira's status still decides it.
+	echoed := func(now snapshot) (bool, error) {
+		if e.Destination != SideProject || now.jira.Fields.Status.Name != e.jira.Fields.Status.Name {
+			return false, nil
+		}
+
+		return workflowEcho(api, e.GitHub, s.Pairs[strconv.Itoa(e.GitHub)].StateEvent)
+	}
 	if now.item.OptionID != e.item.OptionID || now.jira.Fields.Status.Name != e.jira.Fields.Status.Name {
-		return syncErr("Project or Jira status changed after plan; rerun")
+		if echo, err := echoed(now); err != nil || !echo {
+			if err == nil {
+				err = syncErr("Project or Jira status changed after plan; rerun")
+			}
+
+			return err
+		}
 	}
 	if e.Destination == SideProject {
 		err = api.SetProjectStatus(e.item.ID, e.fieldID, e.optionID)
@@ -1225,7 +1282,14 @@ func applyProjectStatus(c *Config, s *State, api API, e *Entry, save func(*State
 		return err
 	}
 	if e.Destination == SideProject && now.item.OptionID != e.optionID || now.option != e.option {
-		return syncErr("Project status change not confirmed; Jira status is %s", now.jira.Fields.Status.Name)
+		// A workflow that overwrote this write is undone next run, as agreed is recorded.
+		if echo, err := echoed(now); err != nil || !echo {
+			if err == nil {
+				err = syncErr("Project status change not confirmed; Jira status is %s", now.jira.Fields.Status.Name)
+			}
+
+			return err
+		}
 	}
 	setAgreedProjectStatus(s, e.GitHub, e.option)
 
