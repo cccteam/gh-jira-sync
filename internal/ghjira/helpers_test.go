@@ -140,6 +140,23 @@ func (f *fakeAPI) JiraIssue(id string) (*JiraIssue, error) {
 	return f.jiraCopy(), nil
 }
 
+func (f *fakeAPI) JiraIssues(ids []string) (map[string]*JiraIssue, error) {
+	return readJiraIssues(f.JiraIssue, ids)
+}
+
+// readJiraIssues is JiraIssues for the fakes: one read at a time, in order.
+func readJiraIssues(read func(string) (*JiraIssue, error), ids []string) (map[string]*JiraIssue, error) {
+	issues := map[string]*JiraIssue{}
+	for _, id := range ids {
+		issue, err := read(id)
+		if err != nil {
+			return nil, err
+		}
+		issues[id] = issue
+	}
+	return issues, nil
+}
+
 func (f *fakeAPI) CreateIssue(source *GitHubIssue, _ string) (*JiraIssue, error) {
 	if err := f.maybeRefuse(); err != nil {
 		return nil, err
