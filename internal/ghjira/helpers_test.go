@@ -66,6 +66,7 @@ type fakeAPI struct {
 	itemLate     bool             // like itemClosed, but landing after the next project write
 	lateDone     bool
 	timeline     StateChange // the issue's latest close or reopen, as LastStateChange reads it
+	jiraChanged  string      // when Jira's status last changed, as its changelog reads
 	nextID       int
 }
 
@@ -396,6 +397,8 @@ func (f *fakeAPI) workflowDone() {
 }
 
 func (f *fakeAPI) LastStateChange(int) (StateChange, error) { return f.timeline, nil }
+
+func (f *fakeAPI) JiraStatusChanged(string) (string, error) { return f.jiraChanged, nil }
 
 // fakeConfig has the binding every test config shares, so the fake can compute the
 // identity Jira would store on a created issue.

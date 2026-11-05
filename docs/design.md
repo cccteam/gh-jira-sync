@@ -280,9 +280,17 @@ account Edit All Comments avoids that.
 `project_status` generalizes status sync from two states to a configured mapping
 between a GitHub Project's single-select field and Jira workflow statuses. Each pair
 stores the last agreed option (`project_status` on the pair). Unlike open/closed,
-both sides can now change to different values, so that case blocks for review,
-alongside disagreement with nothing recorded. An empty project field is not a
-change and is filled from Jira, so newly added items converge without review.
+both sides can now change to different values. That case, and disagreement with
+nothing recorded, goes to whichever side changed later: the project field's
+`updatedAt` (read with the items) against the last status entry in the Jira issue's
+changelog, or its creation if it never changed. The changelog is read only for such
+conflicts. Changes less than a minute apart, or a time that cannot be read, still
+block for a person, since server clocks and run timing make the order uncertain. When
+Jira wins, its open/closed state wins too: GitHub's is recorded as agreed, so the next
+run carries Jira's to GitHub like any Jira move. Blocking every conflict for review
+left pairs stuck whenever both sides moved within one scheduled interval. An empty
+project field is not a change and is filled from Jira, so newly added items converge
+without review.
 
 The project drives Jira; Jira drives GitHub open/closed. GitHub close/reopen is not
 carried to Jira directly, because the project's own workflows already turn it into a
