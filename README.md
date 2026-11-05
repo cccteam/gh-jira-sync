@@ -227,7 +227,9 @@ creation only.
 Jira transition, and moving a Jira issue into or out of the Done category closes or
 reopens the GitHub issue. Whichever side changed wins. A pair whose sides disagree
 with no recorded agreement (for example, pairs that existed before status sync was
-turned on) is blocked until you align it by hand.
+turned on) is blocked until you align it by hand. With `project_status`, such pairs,
+and pairs where both sides changed between runs, follow whichever side changed later;
+changes less than a minute apart still block.
 
 **Project status.** `project_status` keeps a GitHub Project's single-select field and
 the Jira status in step, in both directions:

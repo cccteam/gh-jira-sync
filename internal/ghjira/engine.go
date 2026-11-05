@@ -54,6 +54,7 @@ type Entry struct {
 	option      string       // project option to apply or record
 	fieldID     int64        // project status field
 	optionID    string       // ID of option, for project writes
+	jiraWon     bool         // a project status conflict was settled for Jira
 	parent      int          // parent to apply or record (GitHub number, 0 for none)
 	ghParent    int          // GitHub parent as planned
 	jiraParent  int          // Jira parent as planned, as a GitHub number
@@ -690,8 +691,11 @@ func planProjectStatus(c *Config, api API, project *ProjectSnapshot, pair Pair, 
 	case current == "":
 		setProject()
 	case agreed == nil:
-		e.block("Project status " + strconv.Quote(current) + " and Jira status " + strconv.Quote(jiraStatus) +
-			" disagree, with no agreed status recorded; align them manually")
+		conflict := "Project status " + strconv.Quote(current) + " and Jira status " + strconv.Quote(jiraStatus) +
+			" disagree, with no agreed status recorded"
+		if err := planLatest(api, ps, e, current, setProject, conflict); err != nil {
+			return nil, err
+		}
 	case current == *agreed: // Jira moved
 		setProject()
 	case fromJira == *agreed: // the project moved
@@ -699,11 +703,48 @@ func planProjectStatus(c *Config, api API, project *ProjectSnapshot, pair Pair, 
 			return nil, err
 		}
 	default:
-		e.block("Both sides changed since the agreed status " + strconv.Quote(*agreed) + ": project is " +
-			strconv.Quote(current) + ", Jira is " + strconv.Quote(jiraStatus) + "; align them manually")
+		conflict := "Both sides changed since the agreed status " + strconv.Quote(*agreed) + ": project is " +
+			strconv.Quote(current) + ", Jira is " + strconv.Quote(jiraStatus)
+		if err := planLatest(api, ps, e, current, setProject, conflict); err != nil {
+			return nil, err
+		}
 	}
 
 	return e, nil
+}
+
+// statusTie is how close two status changes may be before neither counts as the later.
+const statusTie = time.Minute
+
+// planLatest settles a project status conflict for the side whose status changed
+// later: the project's field update against the last status change in Jira's
+// changelog (or the issue's creation, if it never changed). Changes too close to tell
+// apart, or times that cannot be read, still block for a person to align.
+func planLatest(api API, ps *ProjectStatus, e *Entry, current string, setProject func(), conflict string) error {
+	jiraAt, err := api.JiraStatusChanged(e.pair.JiraID)
+	if err != nil {
+		return err
+	}
+	jiraAt = cmp.Or(jiraAt, e.jira.Fields.Created)
+	jira, err1 := parseTimestamp(jiraAt)
+	project, err2 := parseTimestamp(e.item.Updated)
+	switch {
+	case err1 != nil || err2 != nil:
+		e.block(conflict + "; when each changed is unknown, so align them manually")
+	case jira.Sub(project).Abs() < statusTie:
+		e.block(conflict + "; both changed within a minute, so align them manually")
+	case jira.After(project):
+		setProject()
+		e.jiraWon = true
+		e.Reason = conflict + "; Jira changed last (" + jiraAt + "), so the project follows"
+	default:
+		if err := planJiraMove(api, ps, e, current); err != nil || e.Kind == KindBlocked {
+			return err
+		}
+		e.Reason = conflict + "; the project changed last (" + e.item.Updated + "), so Jira follows"
+	}
+
+	return nil
 }
 
 // planProjectMove plans a project move: the Jira transition to the project's option,
@@ -1295,8 +1336,21 @@ func applyProjectStatus(c *Config, s *State, api API, e *Entry, save func(*State
 		}
 	}
 	setAgreedProjectStatus(s, e.GitHub, e.option)
+	if e.jiraWon {
+		followJiraState(s, e, now.jira.done())
+	}
 
 	return save(s)
+}
+
+// followJiraState lets Jira's open/closed state win along with its status. Recording
+// GitHub's as agreed makes the next run carry Jira's to GitHub, as for any Jira move;
+// an agreed state equal to GitHub's already does.
+func followJiraState(s *State, e *Entry, jiraDone bool) {
+	pair := s.Pairs[strconv.Itoa(e.GitHub)]
+	if e.issue.closed() != jiraDone && (pair.Closed == nil || *pair.Closed == jiraDone) {
+		setAgreedStatus(s, e.GitHub, e.issue.closed())
+	}
 }
 
 // recheckFoundJira re-reads a Jira issue that recovery found; its identity property

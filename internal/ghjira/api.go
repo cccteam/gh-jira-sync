@@ -50,6 +50,8 @@ type API interface {
 	ProjectItem(itemID, fieldID int64) (ProjectItem, error)
 	AddProjectItem(number int) error
 	SetProjectStatus(itemID, fieldID int64, optionID string) error
+	// JiraStatusChanged returns when the issue's status last changed, or "" if never.
+	JiraStatusChanged(id string) (string, error)
 	// LastStateChange reads the issue's latest close or reopen from its timeline.
 	LastStateChange(number int) (StateChange, error)
 	// Parent sync. Parents are GitHub issue numbers in the synced repository; 0 means none.
@@ -539,7 +541,7 @@ func httpStatus(err error) (int, bool) {
 // JiraIssue reads the Jira fields the sync uses, or nil when the issue is gone or moved.
 func (a *Client) JiraIssue(id string) (*JiraIssue, error) {
 	issue := &JiraIssue{}
-	err := a.jira.Do("GET", "/rest/api/3/issue/"+id+"?fields=project,labels,updated,status,parent,summary,description,issuetype&properties=gh-jira-sync", nil, issue)
+	err := a.jira.Do("GET", "/rest/api/3/issue/"+id+"?fields=project,labels,updated,status,parent,summary,description,issuetype,created&properties=gh-jira-sync", nil, issue)
 	if status, ok := httpStatus(err); ok && status == 404 {
 		return nil, nil
 	}
@@ -873,7 +875,7 @@ const projectItemsQuery = `query($login: String!, $number: Int!, $field: String!
           fullDatabaseId
           isArchived
           content { __typename ... on Issue { fullDatabaseId } }
-          fieldValueByName(name: $field) { ... on ProjectV2ItemFieldSingleSelectValue { optionId } }
+          fieldValueByName(name: $field) { ... on ProjectV2ItemFieldSingleSelectValue { optionId updatedAt } }
         }
       }
     }
@@ -910,7 +912,8 @@ func (a *Client) projectItems() (map[int64]ProjectItem, error) {
 									ID       string `json:"fullDatabaseId"`
 								} `json:"content"`
 								Value *struct {
-									OptionID string `json:"optionId"`
+									OptionID  string `json:"optionId"`
+									UpdatedAt string `json:"updatedAt"`
 								} `json:"fieldValueByName"`
 							} `json:"nodes"`
 						} `json:"items"`
@@ -943,7 +946,7 @@ func (a *Client) projectItems() (map[int64]ProjectItem, error) {
 			}
 			item := ProjectItem{ID: itemID, Archived: n.IsArchived}
 			if n.Value != nil {
-				item.OptionID = n.Value.OptionID
+				item.OptionID, item.Updated = n.Value.OptionID, n.Value.UpdatedAt
 			}
 			items[issueID] = item
 		}
@@ -980,6 +983,51 @@ func (a *Client) SetProjectStatus(itemID, fieldID int64, optionID string) error 
 	body := map[string]any{"fields": []map[string]any{{"id": fieldID, "value": optionID}}}
 
 	return a.projects.Do("PATCH", a.projectPath()+"/items/"+strconv.FormatInt(itemID, 10), body, nil)
+}
+
+// JiraStatusChanged returns when the issue's status last changed, from its changelog,
+// or "" when it never has. Every page is read or the call fails.
+func (a *Client) JiraStatusChanged(id string) (string, error) {
+	type change struct {
+		Field string `json:"field"`
+	}
+	var latest string
+	var latestAt time.Time
+	start := 0
+	for range a.c.MaxPages {
+		var page struct {
+			Total  int `json:"total"`
+			Values []struct {
+				Created string   `json:"created"`
+				Items   []change `json:"items"`
+			} `json:"values"`
+		}
+		q := url.Values{"startAt": {strconv.Itoa(start)}, "maxResults": {"100"}}
+		if err := a.jira.Do("GET", "/rest/api/3/issue/"+id+"/changelog?"+q.Encode(), nil, &page); err != nil {
+			return "", err
+		}
+		for _, v := range page.Values {
+			if !slices.ContainsFunc(v.Items, func(c change) bool { return c.Field == "status" }) {
+				continue
+			}
+			at, err := parseTimestamp(v.Created)
+			if err != nil {
+				return "", syncErr("Invalid Jira changelog time %q", v.Created)
+			}
+			if latest == "" || at.After(latestAt) {
+				latest, latestAt = v.Created, at
+			}
+		}
+		start += len(page.Values)
+		if start >= page.Total {
+			return latest, nil
+		}
+		if len(page.Values) == 0 {
+			return "", syncErr("Incomplete Jira changelog pagination")
+		}
+	}
+
+	return "", syncErr("Jira changelog pagination limit exceeded")
 }
 
 // projectAutomation is the actor GitHub's built-in project workflows act as.
@@ -1190,7 +1238,7 @@ func (a *Client) SelectedJiraIssues() ([]JiraIssue, error) {
 	for range a.c.MaxPages {
 		query := url.Values{
 			"jql": {jql}, "maxResults": {"100"},
-			"fields": {"project,summary,description,issuetype,status,updated,parent"}, "properties": {identityKey},
+			"fields": {"project,summary,description,issuetype,status,created,updated,parent"}, "properties": {identityKey},
 		}
 		if next != "" {
 			query.Set("nextPageToken", next)
