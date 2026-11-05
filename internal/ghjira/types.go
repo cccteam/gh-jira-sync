@@ -219,6 +219,7 @@ type GitHubIssue struct {
 	Type *struct {
 		Name string `json:"name"`
 	} `json:"type"`
+	CreatedAt   string    `json:"created_at"`
 	UpdatedAt   string    `json:"updated_at"`
 	PullRequest *struct{} `json:"pull_request"` // present only on pull requests
 	// SubIssuesSummary counts sub-issues; only parents are asked for their children.

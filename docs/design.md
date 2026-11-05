@@ -386,16 +386,23 @@ Jira's current values to GitHub on the next run.
 original (the issue it started on: Jira when a `jira_issue` operation created the
 GitHub issue, otherwise GitHub) to its copy, rendered exactly as creation rendered
 them: Markdown to ADF with the "From GitHub" link, or ADF to text with the "From Jira"
-link and hidden marker. Nothing flows from copy to original, because ADF to Markdown
-is lossy (headings, emphasis, code blocks, tables), so a round trip would degrade
-GitHub bodies; titles follow descriptions for one consistent rule.
+link and hidden marker. No description flows from copy to original, because ADF to
+Markdown is lossy (headings, emphasis, code blocks, tables), so a round trip would
+degrade GitHub bodies. Titles are plain text on both sides, so they flow both ways.
+Titles once followed descriptions for one consistent rule, but that blocked every
+summary edit made in Jira on issues that started on GitHub.
 
 Each field is decided separately, like comments, and the pair records digests of both
 sides as last copied or found matching (`title`, `description`). A copy whose digest
-differs from its record was edited there, and is blocked rather than overwritten. It
-clears when the copy shows the original again, either because the same change was made
-on the original or because the copy edit was undone. A copy edit is not copied back
-either, so blocking until a person decides is the only way to lose nothing.
+differs from its record was edited there. An edited title is copied back to the
+original. If the original's title changed too, the later edit wins, by the issue
+timeline's last `RenamedTitleEvent` and the last `summary` entry in Jira's changelog
+(each issue's creation if there is none); edits under a minute apart, or times that
+cannot be read, block. Those times are read only for such conflicts. An edited
+description is blocked rather than overwritten. It clears when the copy shows the
+original again, either because the same change was made on the original or because the
+copy edit was undone. A description edit is not copied back either, so blocking until a
+person decides is the only way to lose nothing.
 "Shows" is a lenient comparison (surrounding spaces for text; ADF compared through
 its plain-text rendering), since Jira may store ADF differently from what was sent.
 Recording the read-back value after each write keeps that normalization from looking

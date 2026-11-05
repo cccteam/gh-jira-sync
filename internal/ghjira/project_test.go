@@ -705,7 +705,7 @@ func TestLastStateChangeReadsTimeline(t *testing.T) {
 	}
 }
 
-func TestJiraStatusChangedReadsEveryPage(t *testing.T) {
+func TestJiraFieldChangedReadsEveryPage(t *testing.T) {
 	t.Parallel()
 	entry := func(created string, fields ...string) Object {
 		items := make([]any, 0, len(fields))
@@ -724,7 +724,7 @@ func TestJiraStatusChangedReadsEveryPage(t *testing.T) {
 		return 200, nil, Object{"total": 3, "values": []any{entry("2026-11-04T11:00:00.000+0000", "assignee", "status")}}
 	})
 	api := srv.client(t)
-	got, err := api.JiraStatusChanged("200")
+	got, err := api.JiraFieldChanged("200", "status")
 	must(t, err)
 	eq(t, got, "2026-11-04T11:00:00.000+0000")
 	eq(t, len(srv.urls), 2)
