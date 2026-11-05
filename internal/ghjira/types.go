@@ -280,6 +280,7 @@ type JiraIssue struct {
 			// HierarchyLevel is 1 for an Epic, 0 for a standard issue, -1 for a sub-task.
 			HierarchyLevel int `json:"hierarchyLevel"`
 		} `json:"issuetype"`
+		Created string     `json:"created"`
 		Updated string     `json:"updated"`
 		Status  JiraStatus `json:"status"`
 		Parent  *struct {
@@ -426,6 +427,7 @@ type StateChange struct {
 type ProjectItem struct {
 	ID       int64
 	OptionID string // "" when the status field is unset
+	Updated  string // when the status field was last set, as the project listing reads it
 	Archived bool
 }
 
