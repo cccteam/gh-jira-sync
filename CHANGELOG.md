@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.2](https://github.com/cccteam/gh-jira-sync/compare/v0.2.1...v0.2.2) (2026-11-05)
+
+
+### Features
+
+* settle project status conflicts for the side that changed last ([#26](https://github.com/cccteam/gh-jira-sync/issues/26)) ([8464ad2](https://github.com/cccteam/gh-jira-sync/commit/8464ad2d85a28e9be853adf2564055518e1437d4))
+
 ## [0.2.1](https://github.com/cccteam/gh-jira-sync/compare/v0.2.0...v0.2.1) (2026-11-05)
 
 
