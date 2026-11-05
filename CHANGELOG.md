@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/cccteam/gh-jira-sync/compare/v0.2.0...v0.2.1) (2026-11-05)
+
+
+### Bug Fixes
+
+* confirm table descriptions, and ignore project workflow echoes ([#22](https://github.com/cccteam/gh-jira-sync/issues/22)) ([a651a2f](https://github.com/cccteam/gh-jira-sync/commit/a651a2f01200ef9875a37a3393dda87ee70990e5))
+
 ## [0.2.0](https://github.com/cccteam/gh-jira-sync/compare/v0.1.3...v0.2.0) (2026-11-05)
 
 
