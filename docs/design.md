@@ -302,6 +302,21 @@ issues and projects, each limited to one repository or owner), and API version `
 Projects REST endpoints are documented. Adding items and setting the field are
 idempotent and not journaled.
 
+Those project workflows also react to this tool. When Jira moves to a Done-category
+status that maps to an option other than the one "Item closed" sets (Won't Do beside
+Done), closing the GitHub issue makes the workflow overwrite the option, before or after
+the tool sets it, and the overwrite would look like a project move and transition Jira
+back. So after it closes or reopens an issue in this mode the tool records that event's
+ID on the pair (`state_event`). A project change is then taken as the workflow's echo,
+and the option is set back from Jira, when the issue's timeline shows that close or
+reopen as its latest and the project's last status change after it by
+`github-project-automation`. Any later close or reopen, or a person moving the card,
+makes it a project move again. The project REST API has no actor for a value (GraphQL's
+`creator` keeps whoever first set it), so this reads the timeline's
+`ProjectV2ItemStatusChangedEvent`; an issue the project token cannot see reads as no
+echo, as before. The same check lets apply finish a project write that the workflow
+changed around, instead of aborting the run.
+
 Board backlog membership is not tracked; a Backlog status maps like any other.
 Releases up to v0.1.3 had a backlog mode (`jira_board` plus one `jira_backlog`
 option) for team-managed boards, where backlog membership is independent of status.

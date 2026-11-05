@@ -57,11 +57,15 @@ type fakeAPI struct {
 	jiraGone     bool
 	reads        []string
 	listReads    []Side
-	refuse       []int // HTTP statuses for upcoming writes to reject without effect
+	refuse       []int         // HTTP statuses for upcoming writes to reject without effect
+	storeADF     func(any) any // how Jira stores a written description, if not as sent
 	transitions  []JiraTransition
 	project      *ProjectSnapshot // the GitHub Project, in project status mode
 	searches     []string         // started values passed to FindIssue
 	itemClosed   bool             // mimic the project workflow: closing the issue sets Done
+	itemLate     bool             // like itemClosed, but landing after the next project write
+	lateDone     bool
+	timeline     StateChange // the issue's latest close or reopen, as LastStateChange reads it
 	nextID       int
 }
 
@@ -327,11 +331,12 @@ func (f *fakeAPI) SetGitHubState(_ int, closed bool) error {
 		return err
 	}
 	f.source.State = statusName(closed)
+	f.nextID++
+	f.timeline = StateChange{Event: "E" + strconv.Itoa(f.nextID), Closed: closed}
 	if closed && f.itemClosed {
-		item := f.project.Items[f.source.ID]
-		item.OptionID = f.project.Options["Done"]
-		f.project.Items[f.source.ID] = item
+		f.workflowDone()
 	}
+	f.lateDone = closed && f.itemLate
 	f.writes = append(f.writes, write{"state", f.source.State})
 	return f.lost()
 }
@@ -373,9 +378,24 @@ func (f *fakeAPI) SetProjectStatus(itemID, _ int64, optionID string) error {
 			f.project.Items[issue] = item
 		}
 	}
+	f.timeline.Automated = false
 	f.writes = append(f.writes, write{"project", f.project.optionName(optionID)})
+	if f.lateDone {
+		f.lateDone = false
+		f.workflowDone()
+	}
 	return f.lost()
 }
+
+// workflowDone is the project's "Item closed" workflow setting the card to Done.
+func (f *fakeAPI) workflowDone() {
+	item := f.project.Items[f.source.ID]
+	item.OptionID = f.project.Options["Done"]
+	f.project.Items[f.source.ID] = item
+	f.timeline.Automated = true
+}
+
+func (f *fakeAPI) LastStateChange(int) (StateChange, error) { return f.timeline, nil }
 
 // fakeConfig has the binding every test config shares, so the fake can compute the
 // identity Jira would store on a created issue.
@@ -416,6 +436,9 @@ func (f *fakeAPI) EditJiraIssue(_ string, fields Object) error {
 			f.jira.Fields.Summary, _ = value.(string)
 		} else {
 			f.jira.Fields.Description = decodeJSON(canonical(value, false))
+			if f.storeADF != nil {
+				f.jira.Fields.Description = f.storeADF(f.jira.Fields.Description)
+			}
 		}
 		f.writes = append(f.writes, write{"jira_" + field, string(canonical(value, false))})
 	}

@@ -433,6 +433,85 @@ func TestProjectAutomationRaceRecordsAgreement(t *testing.T) {
 	}
 }
 
+// wontDoSyncer maps a second Done-category Jira status to its own option, so the
+// project's "Item closed" workflow, which sets Done, disagrees with Jira.
+func wontDoSyncer(t *testing.T) (*syncer, *State) {
+	t.Helper()
+	x := projectSyncer(t)
+	x.c.ProjectStatus.Map = append(x.c.ProjectStatus.Map, ProjectStatusMapping{Project: "Won't Do", Jira: []string{"Won't Do"}})
+	x.api.project.Options["Won't Do"] = "o-wont"
+	s := projectInSync(t, x)
+	x.api.jira.Fields.Status = jiraStatus("Won't Do", "done")
+	return x, s
+}
+
+// checkWontDoSettled runs once more and expects nothing to change.
+func checkWontDoSettled(t *testing.T, x *syncer, s *State) {
+	t.Helper()
+	writes := len(x.api.writes)
+	_, entries := x.ok(s)
+	eq(t, len(x.api.writes), writes)
+	if projectEntry(t, x, entries) != nil {
+		t.Fatal("project status planned again")
+	}
+	eq(t, x.api.jira.Fields.Status.Name, "Won't Do")
+}
+
+func TestProjectWorkflowBeforeWriteIsOverwritten(t *testing.T) {
+	t.Parallel()
+	x, s := wontDoSyncer(t)
+	x.api.itemClosed = true
+	s, entries := x.ok(s)
+	eq(t, projectEntry(t, x, entries).Outcome, Outcome(""))
+	eq(t, lastWrite(x.api), write{"project", "Won't Do"})
+	eq(t, agreedOption(s), "Won't Do")
+	checkWontDoSettled(t, x, s)
+}
+
+func TestProjectWorkflowAfterWriteIsRestored(t *testing.T) {
+	t.Parallel()
+	x, s := wontDoSyncer(t)
+	x.api.itemLate = true
+	s, _ = x.ok(s)
+	eq(t, x.api.project.optionName(x.api.project.Items[42].OptionID), "Done")
+	eq(t, agreedOption(s), "Won't Do")
+
+	// The workflow's Done is not a project move: the option is restored, Jira untouched.
+	s, entries := x.ok(s)
+	e := projectEntry(t, x, entries)
+	eq(t, []any{e.Kind, e.Destination, e.Status}, []any{KindSyncProjectStatus, SideProject, "Won't Do"})
+	eq(t, lastWrite(x.api), write{"project", "Won't Do"})
+	checkWontDoSettled(t, x, s)
+}
+
+func TestProjectMoveAfterSyncCloseStillMovesJira(t *testing.T) {
+	t.Parallel()
+	x, s := wontDoSyncer(t)
+	s, _ = x.ok(s)
+	eq(t, s.Pairs["1"].StateEvent, x.api.timeline.Event)
+
+	// A person moving the card is a project move, even after the tool closed the issue.
+	x.setOption("Done")
+	_, entries := x.ok(s)
+	e := projectEntry(t, x, entries)
+	eq(t, []any{e.Kind, e.Destination}, []any{KindSyncProjectStatus, SideJira})
+	eq(t, x.api.jira.Fields.Status.Name, "Done")
+}
+
+func TestProjectWorkflowAfterPersonCloseMovesJira(t *testing.T) {
+	t.Parallel()
+	x, s := wontDoSyncer(t)
+	s, _ = x.ok(s)
+
+	// A person reopens and closes the issue; the workflow's Done then follows them.
+	x.api.itemClosed = true
+	must(t, x.api.SetGitHubState(1, false))
+	must(t, x.api.SetGitHubState(1, true))
+	_, entries := x.ok(s)
+	eq(t, projectEntry(t, x, entries).Destination, SideJira)
+	eq(t, x.api.jira.Fields.Status.Name, "Done")
+}
+
 func TestRefusedProjectAddExplainsMissingRepositoryAccess(t *testing.T) {
 	t.Parallel()
 	x := projectSyncer(t)
@@ -463,6 +542,48 @@ func TestProjectGraphQLErrorsFailTheRun(t *testing.T) {
 	api.c.ProjectStatus = &ProjectStatus{Owner: "acme", OwnerType: "user", ProjectNumber: 3, Field: "Status"}
 	api.projects = srv.http()
 	if _, err := api.Project(); err == nil || !strings.Contains(err.Error(), "Could not resolve") {
+		t.Fatalf("got %v", err)
+	}
+}
+
+func TestLastStateChangeReadsTimeline(t *testing.T) {
+	t.Parallel()
+	status := func(login string, number int) Object {
+		return Object{
+			"__typename": "ProjectV2ItemStatusChangedEvent", "actor": Object{"login": login},
+			"project": Object{"number": number, "owner": Object{"login": "Acme"}},
+		}
+	}
+	var reply Object
+	srv := newServer(t, func(*http.Request) (int, http.Header, any) { return 200, nil, reply })
+	api := srv.client(t)
+	api.c.ProjectStatus = &ProjectStatus{Owner: "acme", OwnerType: "org", ProjectNumber: 3, Field: "Status"}
+	api.projects = srv.http()
+	timeline := func(nodes ...any) Object {
+		return Object{"data": Object{"repository": Object{"issue": Object{"timelineItems": Object{"nodes": nodes}}}}}
+	}
+
+	reply = timeline(
+		Object{"__typename": "ReopenedEvent", "id": "R1"}, status(projectAutomation, 3),
+		Object{"__typename": "ClosedEvent", "id": "C2"}, status("sync-app", 3), status(projectAutomation, 3),
+		status("someone", 4), // another project
+	)
+	got, err := api.LastStateChange(1)
+	must(t, err)
+	eq(t, got, StateChange{Event: "C2", Closed: true, Automated: true})
+
+	reply = timeline(Object{"__typename": "ClosedEvent", "id": "C2"}, status(projectAutomation, 3), status("someone", 3))
+	got, err = api.LastStateChange(1)
+	must(t, err)
+	eq(t, got.Automated, false)
+
+	// An issue the project token cannot see reads as no change; other errors fail.
+	reply = Object{"data": Object{"repository": nil}, "errors": []any{Object{"type": "NOT_FOUND", "message": "no"}}}
+	got, err = api.LastStateChange(1)
+	must(t, err)
+	eq(t, got, StateChange{})
+	reply = Object{"data": Object{"repository": nil}, "errors": []any{Object{"type": "RATE_LIMITED", "message": "slow down"}}}
+	if _, err = api.LastStateChange(1); err == nil || !strings.Contains(err.Error(), "slow down") {
 		t.Fatalf("got %v", err)
 	}
 }

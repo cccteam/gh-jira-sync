@@ -259,6 +259,10 @@ into the Backlog status, then change the configuration; the other order makes ev
 backlog issue look moved to the option for its old status.
 Turn on the project's **Item closed** and **Item reopened** workflows so GitHub
 close/reopen reaches Jira through the project.
+When the sync itself closes or reopens an issue to follow Jira and a workflow then sets
+another option, such as Done for Jira's Won't Do, the sync sets Jira's option back
+instead of moving Jira. It recognizes the workflow by its actor in the issue's
+timeline, which the project token reads.
 
 **Epics and parents.** With `sync_parents`, GitHub sub-issue parents and Jira parents
 are mirrored between linked issues. Add an Epic issue type in GitHub and map it in

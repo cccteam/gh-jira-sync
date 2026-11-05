@@ -105,6 +105,35 @@ func TestContentFirstSyncReplacesDifferingCopy(t *testing.T) {
 	eq(t, x.api.writes[len(x.api.writes)-1].kind, "jira_description")
 }
 
+// withTableAttrs adds the attributes Jira stores on tables it was sent without them.
+func withTableAttrs(doc any) any {
+	for _, block := range list(asObject(doc)["content"]) {
+		if b := asObject(block); b["type"] == "table" {
+			b["attrs"] = Object{"isNumberColumnEnabled": false, "layout": "default", "localId": "a1b2"}
+		}
+	}
+	return doc
+}
+
+func TestContentTableDescriptionConfirmed(t *testing.T) {
+	t.Parallel()
+	x, s := contentSyncer(t)
+	x.api.storeADF = withTableAttrs
+	s, _ = x.ok(s)
+
+	// Jira stores the table differently from what was sent; it still shows the original.
+	x.api.source.Body = "| A | B |\n| --- | --- |\n| 1 | 2 |"
+	s, entries := x.ok(s)
+	eq(t, contentKinds(entries), []Kind{KindSyncContent})
+	if asObject(list(asObject(x.api.jira.Fields.Description)["content"])[1])["attrs"] == nil {
+		t.Fatal("fake Jira did not add table attributes")
+	}
+	x.api.writes = nil
+	_, entries = x.ok(s)
+	eq(t, len(contentEntries(entries)), 0)
+	eq(t, len(x.api.writes), 0)
+}
+
 func TestContentRefusedEditRetries(t *testing.T) {
 	t.Parallel()
 	x, s := contentSyncer(t)
