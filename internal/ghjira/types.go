@@ -415,7 +415,6 @@ type ProjectSnapshot struct {
 	Items   map[int64]ProjectItem // keyed by GitHub issue ID
 }
 
-// ProjectItem is one issue's entry in the project.
 // StateChange is what an issue's timeline shows about its latest close or reopen.
 type StateChange struct {
 	Event     string // the close or reopen event's ID; "" when none is visible
@@ -423,6 +422,7 @@ type StateChange struct {
 	Automated bool   // the project's status last changed after it, by the project's own workflows
 }
 
+// ProjectItem is one issue's entry in the project.
 type ProjectItem struct {
 	ID       int64
 	OptionID string // "" when the status field is unset

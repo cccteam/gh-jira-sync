@@ -987,9 +987,9 @@ const projectAutomation = "github-project-automation"
 
 // stateEventsQuery reads an issue's latest close, reopen, and project status events,
 // oldest first. Status events carry their actor, which the project REST API does not.
-const stateEventsQuery = `query($owner: String!, $repo: String!, $number: Int!) {
-  repository(owner: $owner, name: $repo) {
-    issue(number: $number) {
+const stateEventsQuery = `query($repoOwner: String!, $repoName: String!, $issue: Int!) {
+  repository(owner: $repoOwner, name: $repoName) {
+    issue(number: $issue) {
       timelineItems(last: 50, itemTypes: [CLOSED_EVENT, REOPENED_EVENT, PROJECT_V2_ITEM_STATUS_CHANGED_EVENT]) {
         nodes {
           __typename
@@ -1011,7 +1011,7 @@ const stateEventsQuery = `query($owner: String!, $repo: String!, $number: Int!) 
 func (a *Client) LastStateChange(number int) (StateChange, error) {
 	owner, repo, _ := strings.Cut(a.c.Repository, "/")
 	body := map[string]any{"query": stateEventsQuery, "variables": map[string]any{
-		"owner": owner, "repo": repo, "number": number,
+		"repoOwner": owner, "repoName": repo, "issue": number,
 	}}
 	var resp struct {
 		Data struct {

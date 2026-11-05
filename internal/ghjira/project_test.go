@@ -549,8 +549,10 @@ func TestProjectGraphQLErrorsFailTheRun(t *testing.T) {
 func TestLastStateChangeReadsTimeline(t *testing.T) {
 	t.Parallel()
 	status := func(login string, number int) Object {
-		return Object{"__typename": "ProjectV2ItemStatusChangedEvent", "actor": Object{"login": login},
-			"project": Object{"number": number, "owner": Object{"login": "Acme"}}}
+		return Object{
+			"__typename": "ProjectV2ItemStatusChangedEvent", "actor": Object{"login": login},
+			"project": Object{"number": number, "owner": Object{"login": "Acme"}},
+		}
 	}
 	var reply Object
 	srv := newServer(t, func(*http.Request) (int, http.Header, any) { return 200, nil, reply })

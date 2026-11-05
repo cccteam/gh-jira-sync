@@ -695,19 +695,7 @@ func planProjectStatus(c *Config, api API, project *ProjectSnapshot, pair Pair, 
 	case current == *agreed: // Jira moved
 		setProject()
 	case fromJira == *agreed: // the project moved
-		echo, err := workflowEcho(api, pair.GitHub, pair.StateEvent)
-		if err != nil {
-			return nil, err
-		}
-		if echo {
-			// A project workflow reacted to this tool carrying Jira's move to the issue's
-			// open/closed state; Jira still decides the option.
-			setProject()
-			e.Reason = "Project workflow changed the status after the issue was closed or reopened for Jira; restoring it"
-
-			return e, nil
-		}
-		if err := planJiraMove(api, ps, e, current); err != nil {
+		if err := planProjectMove(api, ps, e, current, setProject); err != nil {
 			return nil, err
 		}
 	default:
@@ -716,6 +704,24 @@ func planProjectStatus(c *Config, api API, project *ProjectSnapshot, pair Pair, 
 	}
 
 	return e, nil
+}
+
+// planProjectMove plans a project move: the Jira transition to the project's option,
+// unless the move is a project workflow reacting to this tool carrying Jira's move to
+// the issue's open/closed state. Jira still decides the option then, so it is restored.
+func planProjectMove(api API, ps *ProjectStatus, e *Entry, current string, setProject func()) error {
+	echo, err := workflowEcho(api, e.pair.GitHub, e.pair.StateEvent)
+	if err != nil || !echo {
+		if err == nil {
+			err = planJiraMove(api, ps, e, current)
+		}
+
+		return err
+	}
+	setProject()
+	e.Reason = "Project workflow changed the status after the issue was closed or reopened for Jira; restoring it"
+
+	return nil
 }
 
 // planJiraMove plans the Jira transition to the project's option. Each Jira status
@@ -1249,19 +1255,19 @@ func applyProjectStatus(c *Config, s *State, api API, e *Entry, save func(*State
 	}
 	// A project workflow reacting to this run closing or reopening the issue may change
 	// the project around this write; Jira's status still decides it.
-	echoed := func(now snapshot) (bool, error) {
-		if e.Destination != SideProject || now.jira.Fields.Status.Name != e.jira.Fields.Status.Name {
-			return false, nil
+	unlessEcho := func(jiraStatus string, problem error) error {
+		if e.Destination != SideProject || jiraStatus != e.jira.Fields.Status.Name {
+			return problem
+		}
+		echo, err := workflowEcho(api, e.GitHub, s.Pairs[strconv.Itoa(e.GitHub)].StateEvent)
+		if err != nil || !echo {
+			return cmp.Or(err, problem)
 		}
 
-		return workflowEcho(api, e.GitHub, s.Pairs[strconv.Itoa(e.GitHub)].StateEvent)
+		return nil
 	}
 	if now.item.OptionID != e.item.OptionID || now.jira.Fields.Status.Name != e.jira.Fields.Status.Name {
-		if echo, err := echoed(now); err != nil || !echo {
-			if err == nil {
-				err = syncErr("Project or Jira status changed after plan; rerun")
-			}
-
+		if err := unlessEcho(now.jira.Fields.Status.Name, syncErr("Project or Jira status changed after plan; rerun")); err != nil {
 			return err
 		}
 	}
@@ -1283,11 +1289,8 @@ func applyProjectStatus(c *Config, s *State, api API, e *Entry, save func(*State
 	}
 	if e.Destination == SideProject && now.item.OptionID != e.optionID || now.option != e.option {
 		// A workflow that overwrote this write is undone next run, as agreed is recorded.
-		if echo, err := echoed(now); err != nil || !echo {
-			if err == nil {
-				err = syncErr("Project status change not confirmed; Jira status is %s", now.jira.Fields.Status.Name)
-			}
-
+		problem := syncErr("Project status change not confirmed; Jira status is %s", now.jira.Fields.Status.Name)
+		if err := unlessEcho(now.jira.Fields.Status.Name, problem); err != nil {
 			return err
 		}
 	}
