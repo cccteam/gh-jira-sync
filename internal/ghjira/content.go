@@ -96,11 +96,11 @@ func (v fieldValues) shown() bool {
 
 		return strings.TrimSpace(normalized(text)) == strings.TrimSpace(want)
 	}
-	got, err := adfText(v.copy)
+	got, err := descriptionText(v.copy)
 	if err != nil {
 		return false
 	}
-	want, err := adfText(v.want)
+	want, err := descriptionText(v.want)
 
 	return err == nil && got == want
 }

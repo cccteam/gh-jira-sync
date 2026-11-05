@@ -57,7 +57,8 @@ type fakeAPI struct {
 	jiraGone     bool
 	reads        []string
 	listReads    []Side
-	refuse       []int // HTTP statuses for upcoming writes to reject without effect
+	refuse       []int         // HTTP statuses for upcoming writes to reject without effect
+	storeADF     func(any) any // how Jira stores a written description, if not as sent
 	transitions  []JiraTransition
 	project      *ProjectSnapshot // the GitHub Project, in project status mode
 	searches     []string         // started values passed to FindIssue
@@ -416,6 +417,9 @@ func (f *fakeAPI) EditJiraIssue(_ string, fields Object) error {
 			f.jira.Fields.Summary, _ = value.(string)
 		} else {
 			f.jira.Fields.Description = decodeJSON(canonical(value, false))
+			if f.storeADF != nil {
+				f.jira.Fields.Description = f.storeADF(f.jira.Fields.Description)
+			}
 		}
 		f.writes = append(f.writes, write{"jira_" + field, string(canonical(value, false))})
 	}

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/url"
 	"regexp"
 	"slices"
@@ -641,17 +642,35 @@ var blockSeparators = map[string]string{
 	"codeBlock": "", "bulletList": "\n", "orderedList": "\n", "listItem": "\n",
 }
 
+// tableSeparators add the table nodes markdownADF writes into descriptions. Comments
+// still block tables, since a table's text alone would lose its layout in a copy.
+var tableSeparators = func() map[string]string {
+	m := maps.Clone(blockSeparators)
+	maps.Copy(m, map[string]string{"table": "\n", "tableRow": " | ", "tableHeader": "\n", "tableCell": "\n"})
+
+	return m
+}()
+
 // adfText renders readable plain text and never silently discards unsupported nodes or marks.
 func adfText(doc any) (string, error) {
+	return renderDoc(doc, blockSeparators)
+}
+
+// descriptionText is adfText for comparing descriptions, which may hold tables.
+func descriptionText(doc any) (string, error) {
+	return renderDoc(doc, tableSeparators)
+}
+
+func renderDoc(doc any, separators map[string]string) (string, error) {
 	d, ok := doc.(Object)
 	if !ok || d["type"] != "doc" || !isOne(d["version"]) {
 		return "", syncErr("Unsupported Jira comment document")
 	}
 
-	return renderADF(d)
+	return renderADF(d, separators)
 }
 
-func renderADF(node Object) (string, error) {
+func renderADF(node Object, separators map[string]string) (string, error) {
 	t, _ := node["type"].(string)
 	switch t {
 	case "text":
@@ -694,7 +713,7 @@ func renderADF(node Object) (string, error) {
 
 		return "[emoji]", nil
 	}
-	separator, block := blockSeparators[t]
+	separator, block := separators[t]
 	if !block {
 		return "", syncErr("Unsupported Jira comment content; copy manually")
 	}
@@ -704,7 +723,7 @@ func renderADF(node Object) (string, error) {
 		if !ok {
 			return "", syncErr("Unsupported Jira comment content; copy manually")
 		}
-		part, err := renderADF(c)
+		part, err := renderADF(c, separators)
 		if err != nil {
 			return "", err
 		}
