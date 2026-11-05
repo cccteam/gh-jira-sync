@@ -31,6 +31,8 @@ type API interface {
 	FindIssue(source *GitHubIssue, started string) (*JiraIssue, error)
 	// JiraIssue returns nil when the issue was deleted, hidden, or moved out of the project.
 	JiraIssue(id string) (*JiraIssue, error)
+	// JiraIssues reads each ID as JiraIssue does, keyed by ID.
+	JiraIssues(ids []string) (map[string]*JiraIssue, error)
 	CreateIssue(source *GitHubIssue, parentKey string) (*JiraIssue, error)
 	Comments(side Side, pair Pair) ([]Comment, error)
 	Comment(side Side, pair Pair, id string) (Comment, error)
@@ -552,6 +554,38 @@ func (a *Client) JiraIssue(id string) (*JiraIssue, error) {
 	}
 
 	return issue, nil
+}
+
+// jiraReadConcurrency bounds JiraIssues' parallel reads, well under Jira's rate limits;
+// a 429 is retried like any other GET.
+const jiraReadConcurrency = 8
+
+// JiraIssues reads issues a few at a time. Planning reads every linked issue, and one
+// at a time each run spent most of its time waiting on round trips. Each issue is its
+// own GET rather than one JQL search, because search results lag writes.
+func (a *Client) JiraIssues(ids []string) (map[string]*JiraIssue, error) {
+	issues := make([]*JiraIssue, len(ids))
+	errs := make([]error, len(ids))
+	slots := make(chan struct{}, jiraReadConcurrency)
+	var wg sync.WaitGroup
+	for i, id := range ids {
+		slots <- struct{}{}
+		wg.Go(func() {
+			defer func() { <-slots }()
+			issues[i], errs[i] = a.JiraIssue(id)
+		})
+	}
+	wg.Wait()
+	result := make(map[string]*JiraIssue, len(ids))
+	for i, id := range ids {
+		// The first failure in ID order, so a run reports the same error each time.
+		if errs[i] != nil {
+			return nil, errs[i]
+		}
+		result[id] = issues[i]
+	}
+
+	return result, nil
 }
 
 // FindIssue looks for the Jira issue a pending creation may have made, by its

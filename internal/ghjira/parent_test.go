@@ -79,6 +79,10 @@ func (w *parentWorld) JiraIssue(id string) (*JiraIssue, error) {
 	return &issue, nil
 }
 
+func (w *parentWorld) JiraIssues(ids []string) (map[string]*JiraIssue, error) {
+	return readJiraIssues(w.JiraIssue, ids)
+}
+
 func (w *parentWorld) SubIssues(n int) ([]GitHubIssue, error) {
 	var children []GitHubIssue
 	for child, parent := range w.ghParent {

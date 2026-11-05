@@ -263,7 +263,14 @@ func Plan(c *Config, s *State, api API, now time.Time) ([]*Entry, error) {
 			return nil, err
 		}
 	}
-	p := &pairPlanner{c: c, s: s, api: api, project: project, ghParents: ghParents, visited: map[string]bool{}, now: now}
+	linked, err := linkedJiraIssues(s, api, order, issues)
+	if err != nil {
+		return nil, err
+	}
+	p := &pairPlanner{
+		c: c, s: s, api: api, project: project, ghParents: ghParents, linked: linked,
+		visited: map[string]bool{}, now: now,
+	}
 	var entries []*Entry
 	for _, n := range order {
 		source := issues[n]
@@ -381,8 +388,23 @@ type pairPlanner struct {
 	api       API
 	project   *ProjectSnapshot
 	ghParents map[int]int
-	visited   map[string]bool // operations planned this run
+	linked    map[string]*JiraIssue // linked Jira issues by ID, read before planning
+	visited   map[string]bool       // operations planned this run
 	now       time.Time
+}
+
+// linkedJiraIssues reads, in one batch, the Jira issue of each pair whose GitHub issue
+// is still the one it was linked to; planPair reads no other.
+func linkedJiraIssues(s *State, api API, order []string, issues map[string]*GitHubIssue) (map[string]*JiraIssue, error) {
+	var ids []string
+	for _, n := range order {
+		pair, tracked := s.Pairs[n]
+		if source := issues[n]; tracked && source != nil && source.PullRequest == nil && source.idString() == pair.GitHubID {
+			ids = append(ids, pair.JiraID)
+		}
+	}
+
+	return api.JiraIssues(ids)
 }
 
 // planUntracked plans creating (or recovering) the Jira issue for an issue not yet
@@ -417,10 +439,7 @@ func (p *pairPlanner) planPair(n string, pair Pair, source *GitHubIssue) ([]*Ent
 	// One vanished pair is reported for review; it must not stall every other pair.
 	var jira *JiraIssue
 	if source != nil && source.idString() == pair.GitHubID {
-		var err error
-		if jira, err = p.api.JiraIssue(pair.JiraID); err != nil {
-			return nil, err
-		}
+		jira = p.linked[pair.JiraID]
 	}
 	if jira == nil || jira.ID != pair.JiraID {
 		return []*Entry{{

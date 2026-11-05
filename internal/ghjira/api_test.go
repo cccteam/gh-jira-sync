@@ -6,6 +6,7 @@ import (
 	"maps"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -464,4 +465,50 @@ func TestClientsNameTheirService(t *testing.T) {
 		t.Fatal(err)
 	}
 	eq(t, []string{client.github.service, client.jira.service, client.projects.service}, []string{"GitHub", "Jira", "GitHub Projects"})
+}
+
+func TestJiraIssuesReadsConcurrently(t *testing.T) {
+	t.Parallel()
+	var mu sync.Mutex
+	inFlight, peak := 0, 0
+	srv := newServer(t, func(r *http.Request) (int, http.Header, any) {
+		mu.Lock()
+		inFlight++
+		peak = max(peak, inFlight)
+		mu.Unlock()
+		time.Sleep(20 * time.Millisecond)
+		mu.Lock()
+		inFlight--
+		mu.Unlock()
+		id := strings.TrimPrefix(r.URL.Path, "/rest/api/3/issue/")
+		switch id {
+		case "13":
+			return 404, nil, nil
+		case "14":
+			return 200, nil, Object{"id": id, "key": "OPS-14", "fields": Object{"project": Object{"key": "OPS"}}}
+		case "99":
+			return 403, nil, nil
+		}
+		return 200, nil, Object{"id": id, "key": "ENG-" + id, "fields": Object{"project": Object{"key": "ENG"}}}
+	})
+	api := srv.client(t)
+	var ids []string
+	for i := 1; i <= 20; i++ {
+		ids = append(ids, strconv.Itoa(i))
+	}
+	issues, err := api.JiraIssues(ids)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eq(t, len(issues), 20)
+	eq(t, issues["7"].Key, "ENG-7")
+	// Deleted and moved issues read as nil, as JiraIssue reads them.
+	eq(t, []any{issues["13"] == nil, issues["14"] == nil}, []any{true, true})
+	if peak < 2 || peak > jiraReadConcurrency {
+		t.Fatalf("peak concurrency %d, want 2..%d", peak, jiraReadConcurrency)
+	}
+
+	if _, err := api.JiraIssues([]string{"1", "99", "2"}); err == nil || !strings.Contains(err.Error(), "HTTP 403") {
+		t.Fatalf("expected the refused read's error, got %v", err)
+	}
 }
