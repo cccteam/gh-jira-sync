@@ -27,8 +27,8 @@ Jira site, project key, and issue type. Then set credentials:
 
 The Jira account needs Browse Projects, Create Issues, Add Comments, Edit Own
 Comments, and access to issue properties. Add Transition Issues for `status_sync` or
-`project_status`, Edit Issues for `sync_parents` or `sync_content`, and board browse and rank
-permissions for backlog mode. Jira Service Management projects are not supported.
+`project_status`, and Edit Issues for `sync_parents` or `sync_content`. Jira Service
+Management projects are not supported.
 
 ### Jira account
 
@@ -39,9 +39,7 @@ Enterprise.
 1. Create the service account in Atlassian Administration, give it Jira access, and
    grant it the project permissions above.
 2. Create one credential for it, with the scopes `read:jira-work` and
-   `write:jira-work`. Backlog mode also needs `read:board-scope:jira-software`,
-   `read:issue-details:jira`, and `write:board-scope:jira-software`. Scopes cannot be
-   changed later. Either:
+   `write:jira-work`. Scopes cannot be changed later. Either:
    * an [OAuth 2.0 credential](https://support.atlassian.com/user-management/docs/create-oauth-2-0-credential-for-service-accounts/):
      set `JIRA_CLIENT_ID` and `JIRA_CLIENT_SECRET`. Each run trades them for an access
      token, which lasts an hour, and renews it before it runs out; or
@@ -250,9 +248,15 @@ the Jira status in step, in both directions:
 Statuses and transitions are matched by name, exactly as Jira shows them. A Backlog
 status maps like any other, as above. Other keys: `owner_type` (`org` or `user`),
 `field` (default `Status`), `add_to_project` (default `true`), `map[].transition` to
-pick among several transitions, and `jira_board` with one `map[].jira_backlog` option
-for a board whose backlog is kept apart from status (team-managed boards with the
-backlog turned on). A status or option missing from `map` blocks that issue.
+pick among several transitions. A status or option missing from `map` blocks that
+issue.
+
+Board backlogs are not tracked: on a team-managed board with the backlog turned on,
+add a Backlog status to the workflow and map it, as above. Releases up to v0.1.3 had
+a `jira_board` and `map[].jira_backlog` mode for this, and configurations that still
+use it now fail validation. To switch, first move the issues in the board's backlog
+into the Backlog status, then change the configuration; the other order makes every
+backlog issue look moved to the option for its old status.
 Turn on the project's **Item closed** and **Item reopened** workflows so GitHub
 close/reopen reaches Jira through the project.
 
