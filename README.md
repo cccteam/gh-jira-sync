@@ -6,7 +6,8 @@ open/closed status, a GitHub Project's Status field, parent links (Epics and
 sub-issues), and later title and description edits, and creates GitHub issues from
 labeled Jira issues. It is a single Go binary with a reusable GitHub Actions workflow.
 
-* Title and description are copied at creation, and later edits only with `sync_content`.
+* Title and description are copied at creation, and later edits only with `sync_content`
+  (titles both ways, descriptions from the issue a pair started on).
 * Nothing is ever deleted, and attachments are not copied.
 * Edits to copies are reported for review; originals are never modified.
 * Dry-run by default; `--apply` is required for remote writes.
@@ -196,7 +197,7 @@ Unknown keys fail validation.
 | `status_sync` | `null`; `{"close_transition": "Done", "reopen_transition": "Reopen"}` mirrors open/closed |
 | `project_status` | `null`; mirrors a GitHub Project field instead of `status_sync` |
 | `sync_parents` | `false`; mirror GitHub sub-issue parents and Jira parents |
-| `sync_content` | `false`; copy later title and description edits from the issue a pair started on |
+| `sync_content` | `false`; copy later title edits both ways, and description edits from the issue a pair started on |
 | `jira_subtask_type` | `null`; sub-task type name or ID for issues nested under a standard Jira issue |
 | `jira_selection_label` | `null`; Jira issues with this label are created in GitHub |
 | `jira_create_fields` | Extra Jira create fields, such as required custom fields or `labels` |
@@ -227,7 +228,9 @@ creation only.
 Jira transition, and moving a Jira issue into or out of the Done category closes or
 reopens the GitHub issue. Whichever side changed wins. A pair whose sides disagree
 with no recorded agreement (for example, pairs that existed before status sync was
-turned on) is blocked until you align it by hand.
+turned on) is blocked until you align it by hand. With `project_status`, such pairs,
+and pairs where both sides changed between runs, follow whichever side changed later;
+changes less than a minute apart still block.
 
 **Project status.** `project_status` keeps a GitHub Project's single-select field and
 the Jira status in step, in both directions:
@@ -274,9 +277,11 @@ Jira sub-task; it waits until its parent is in Jira.
 lists, task lists, quotes, code, tables, links, and inline formatting carry over, and
 anything else stays as literal text. With `sync_content`, later edits to the title or
 description of the issue a pair started on are copied to the other issue, in the same
-form as at creation. Edits made to the copy are never copied back or overwritten: the
-field is `blocked` until the same change is made on the original or the copy edit is
-undone. The first run after turning it on records copies that already match and
+form as at creation. A title edited on the copy is copied back; if both titles were
+edited, the later edit wins (edits under a minute apart are `blocked`). A description
+edited on the copy is never copied back or overwritten, since Jira's rich text does not
+convert back to Markdown without losing formatting: it is `blocked` until the same change
+is made on the original or the copy edit is undone. The first run after turning it on records copies that already match and
 replaces any that differ from the original; run without `--apply` first to see which.
 
 **Jira → GitHub creation.** With `jira_selection_label`, each labeled Jira issue gets

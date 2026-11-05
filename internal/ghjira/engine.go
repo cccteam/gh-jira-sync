@@ -54,6 +54,7 @@ type Entry struct {
 	option      string       // project option to apply or record
 	fieldID     int64        // project status field
 	optionID    string       // ID of option, for project writes
+	jiraWon     bool         // a project status conflict was settled for Jira
 	parent      int          // parent to apply or record (GitHub number, 0 for none)
 	ghParent    int          // GitHub parent as planned
 	jiraParent  int          // Jira parent as planned, as a GitHub number
@@ -464,7 +465,11 @@ func (p *pairPlanner) planPair(n string, pair Pair, source *GitHubIssue) ([]*Ent
 		}
 	}
 	if p.c.SyncContent {
-		entries = append(entries, planContent(p.c, p.s, pair, source, jira)...)
+		content, err := planContent(p.c, p.s, p.api, pair, source, jira)
+		if err != nil {
+			return nil, err
+		}
+		entries = append(entries, content...)
 	}
 	if !p.c.Comments {
 		return entries, nil
@@ -690,8 +695,11 @@ func planProjectStatus(c *Config, api API, project *ProjectSnapshot, pair Pair, 
 	case current == "":
 		setProject()
 	case agreed == nil:
-		e.block("Project status " + strconv.Quote(current) + " and Jira status " + strconv.Quote(jiraStatus) +
-			" disagree, with no agreed status recorded; align them manually")
+		conflict := "Project status " + strconv.Quote(current) + " and Jira status " + strconv.Quote(jiraStatus) +
+			" disagree, with no agreed status recorded"
+		if err := planLatest(api, ps, e, current, setProject, conflict); err != nil {
+			return nil, err
+		}
 	case current == *agreed: // Jira moved
 		setProject()
 	case fromJira == *agreed: // the project moved
@@ -699,11 +707,63 @@ func planProjectStatus(c *Config, api API, project *ProjectSnapshot, pair Pair, 
 			return nil, err
 		}
 	default:
-		e.block("Both sides changed since the agreed status " + strconv.Quote(*agreed) + ": project is " +
-			strconv.Quote(current) + ", Jira is " + strconv.Quote(jiraStatus) + "; align them manually")
+		conflict := "Both sides changed since the agreed status " + strconv.Quote(*agreed) + ": project is " +
+			strconv.Quote(current) + ", Jira is " + strconv.Quote(jiraStatus)
+		if err := planLatest(api, ps, e, current, setProject, conflict); err != nil {
+			return nil, err
+		}
 	}
 
 	return e, nil
+}
+
+// statusTie is how close two changes may be before neither counts as the later.
+const statusTie = time.Minute
+
+// laterSide names the side whose change, at the given times, came later; or, with no
+// side, why none can be named: an unreadable time, or changes under statusTie apart.
+func laterSide(githubAt, jiraAt string) (later Side, why string) {
+	github, err1 := parseTimestamp(githubAt)
+	jira, err2 := parseTimestamp(jiraAt)
+	switch {
+	case err1 != nil || err2 != nil:
+		return "", "when each changed is unknown"
+	case jira.Sub(github).Abs() < statusTie:
+		return "", "both changed within a minute"
+	case jira.After(github):
+		return SideJira, ""
+	}
+
+	return SideGitHub, ""
+}
+
+// planLatest settles a project status conflict for the side whose status changed
+// later: the project's field update against the last status change in Jira's
+// changelog (or the issue's creation, if it never changed). Changes too close to tell
+// apart, or times that cannot be read, still block for a person to align.
+func planLatest(api API, ps *ProjectStatus, e *Entry, current string, setProject func(), conflict string) error {
+	jiraAt, err := api.JiraFieldChanged(e.pair.JiraID, "status")
+	if err != nil {
+		return err
+	}
+	jiraAt = cmp.Or(jiraAt, e.jira.Fields.Created)
+	// The project stands in for GitHub here.
+	later, why := laterSide(e.item.Updated, jiraAt)
+	switch later {
+	case "":
+		e.block(conflict + "; " + why + ", so align them manually")
+	case SideJira:
+		setProject()
+		e.jiraWon = true
+		e.Reason = conflict + "; Jira changed last (" + jiraAt + "), so the project follows"
+	default:
+		if err := planJiraMove(api, ps, e, current); err != nil || e.Kind == KindBlocked {
+			return err
+		}
+		e.Reason = conflict + "; the project changed last (" + e.item.Updated + "), so Jira follows"
+	}
+
+	return nil
 }
 
 // planProjectMove plans a project move: the Jira transition to the project's option,
@@ -1295,8 +1355,21 @@ func applyProjectStatus(c *Config, s *State, api API, e *Entry, save func(*State
 		}
 	}
 	setAgreedProjectStatus(s, e.GitHub, e.option)
+	if e.jiraWon {
+		followJiraState(s, e, now.jira.done())
+	}
 
 	return save(s)
+}
+
+// followJiraState lets Jira's open/closed state win along with its status. Recording
+// GitHub's as agreed makes the next run carry Jira's to GitHub, as for any Jira move;
+// an agreed state equal to GitHub's already does.
+func followJiraState(s *State, e *Entry, jiraDone bool) {
+	pair := s.Pairs[strconv.Itoa(e.GitHub)]
+	if e.issue.closed() != jiraDone && (pair.Closed == nil || *pair.Closed == jiraDone) {
+		setAgreedStatus(s, e.GitHub, e.issue.closed())
+	}
 }
 
 // recheckFoundJira re-reads a Jira issue that recovery found; its identity property

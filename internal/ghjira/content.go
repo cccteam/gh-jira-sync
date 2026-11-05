@@ -3,12 +3,15 @@ package ghjira
 // Content sync (sync_content) copies later title and description edits from the issue
 // a pair started on, its original, to the other issue, its copy. Each pair records
 // digests of both sides as they stood when a field was last copied or found matching.
-// A copy that no longer matches its record was edited there: that is reported and
-// never copied back or overwritten. The first time a field is synced, a copy that
-// already shows the original's text is recorded as matching; any other copy is
-// replaced from the original.
+// A copy that no longer matches its record was edited there. A title edit there is
+// copied back, since titles are plain text on both sides; a description edit is
+// reported and never copied back or overwritten, since converting Jira's rich text to
+// Markdown loses formatting. The first time a field is synced, a copy that already
+// shows the original's text is recorded as matching; any other copy is replaced from
+// the original.
 
 import (
+	"cmp"
 	"fmt"
 	"strconv"
 	"strings"
@@ -45,17 +48,10 @@ func readValues(c *Config, origin Side, field string, pair Pair, source *GitHubI
 	switch {
 	case field == fieldTitle && origin == SideGitHub:
 		v.original, v.copy, v.want = source.Title, jira.Fields.Summary, source.Title
-		if runeLen(source.Title) > 255 {
-			v.problem = "GitHub title exceeds Jira summary limit"
-		}
+		v.problem = titleProblem(SideJira, source.Title)
 	case field == fieldTitle:
 		v.original, v.copy, v.want = jira.Fields.Summary, source.Title, jira.Fields.Summary
-		switch {
-		case strings.TrimSpace(jira.Fields.Summary) == "":
-			v.problem = "Jira summary is empty"
-		case runeLen(jira.Fields.Summary) > 256:
-			v.problem = "Jira summary exceeds GitHub's 256 character title limit"
-		}
+		v.problem = titleProblem(SideGitHub, jira.Fields.Summary)
 	case origin == SideGitHub:
 		text := issueDescription(source)
 		v.original, v.copy, v.want = normalized(source.Body), jira.Fields.Description, markdownADF(text)
@@ -74,6 +70,22 @@ func readValues(c *Config, origin Side, field string, pair Pair, source *GitHubI
 	}
 
 	return v
+}
+
+// titleProblem says why a title cannot be written to dest, or "".
+func titleProblem(dest Side, title string) string {
+	switch {
+	case dest == SideJira && runeLen(title) > 255:
+		return "GitHub title exceeds Jira summary limit"
+	case dest == SideJira:
+		return ""
+	case strings.TrimSpace(title) == "":
+		return "Jira summary is empty"
+	case runeLen(title) > 256:
+		return "Jira summary exceeds GitHub's 256 character title limit"
+	}
+
+	return ""
 }
 
 // exact reports a copy that already holds exactly what would be written.
@@ -106,7 +118,7 @@ func (v fieldValues) shown() bool {
 }
 
 // planContent plans the title and description of a linked pair.
-func planContent(c *Config, s *State, pair Pair, source *GitHubIssue, jira *JiraIssue) []*Entry {
+func planContent(c *Config, s *State, api API, pair Pair, source *GitHubIssue, jira *JiraIssue) ([]*Entry, error) {
 	origin := originSide(c, s, pair)
 	entries := make([]*Entry, 0, 2)
 	for _, f := range []struct {
@@ -120,13 +132,18 @@ func planContent(c *Config, s *State, pair Pair, source *GitHubIssue, jira *Jira
 			pair: pair, issue: source, jira: jira, content: v,
 		}
 		edited := f.record != nil && digest(v.copy) != f.record.Copy
+		changed := f.record == nil || digest(v.original) != f.record.Original
 		switch {
-		case f.record != nil && !edited && digest(v.original) == f.record.Original:
+		case !edited && !changed:
 			continue
 		// An edited copy that shows the original again, for example after the same change
 		// was made there, is recorded; so is a first look at a copy that matches.
 		case v.exact() || ((f.record == nil || edited) && v.shown()):
 			e.Kind = KindContentAgreed
+		case edited && f.name == fieldTitle:
+			if err := planTitleEdit(api, e, changed); err != nil {
+				return nil, err
+			}
 		case edited:
 			e.block(editedReason(origin, f.name))
 		case v.problem != "":
@@ -137,7 +154,46 @@ func planContent(c *Config, s *State, pair Pair, source *GitHubIssue, jira *Jira
 		entries = append(entries, e)
 	}
 
-	return entries
+	return entries, nil
+}
+
+// planTitleEdit plans a title edited on the copy: it is copied back to the original.
+// If the original's title was edited too, the later edit wins, by GitHub's last rename
+// and the last summary change in Jira's changelog (each issue's creation if none).
+func planTitleEdit(api API, e *Entry, changed bool) error {
+	v := e.content
+	from := v.origin.Other() // the side whose title is copied
+	if changed {
+		githubAt, err := api.GitHubTitleChanged(e.GitHub)
+		if err != nil {
+			return err
+		}
+		jiraAt, err := api.JiraFieldChanged(e.pair.JiraID, "summary")
+		if err != nil {
+			return err
+		}
+		later, why := laterSide(cmp.Or(githubAt, e.issue.CreatedAt), cmp.Or(jiraAt, e.jira.Fields.Created))
+		if later == "" {
+			e.block("Title edited on both GitHub and Jira; " + why + ", so make them match by hand")
+
+			return nil
+		}
+		from = later
+	}
+	title, _ := v.copy.(string)
+	if from == v.origin {
+		title, _ = v.original.(string)
+	}
+	if problem := titleProblem(from.Other(), title); problem != "" {
+		e.block(problem)
+
+		return nil
+	}
+	e.content.want = title
+	e.Kind, e.Destination = KindSyncContent, from.Other()
+	e.Reason = serviceName(from) + " " + fieldName(from, fieldTitle) + " was edited last; copied to " + serviceName(from.Other())
+
+	return nil
 }
 
 // fieldName is a content field as the given side calls it.

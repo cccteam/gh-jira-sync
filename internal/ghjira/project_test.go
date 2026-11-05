@@ -174,6 +174,123 @@ func TestProjectStatusBlocksForReview(t *testing.T) {
 	}
 }
 
+// conflictSyncer has both sides changed since agreeing on Todo: the project to In
+// Progress at projectAt, Jira to Done at jiraAt.
+func conflictSyncer(t *testing.T, projectAt, jiraAt string) (*syncer, *State) {
+	t.Helper()
+	x := projectSyncer(t)
+	s := projectInSync(t, x)
+	x.setOption("In Progress")
+	x.setUpdated(projectAt)
+	x.api.jira.Fields.Status = jiraStatus("Done", "done")
+	x.api.jiraChanged = jiraAt
+	return x, s
+}
+
+func (x *syncer) setUpdated(at string) {
+	item := x.api.project.Items[42]
+	item.Updated = at
+	x.api.project.Items[42] = item
+}
+
+func TestProjectConflictJiraChangedLast(t *testing.T) {
+	t.Parallel()
+	x, s := conflictSyncer(t, "2026-11-04T10:00:00Z", "2026-11-04T10:05:00.000+0000")
+	s, entries := x.ok(s)
+	e := projectEntry(t, x, entries)
+	eq(t, []any{e.Kind, e.Destination, e.Status}, []any{KindSyncProjectStatus, SideProject, "Done"})
+	if !strings.Contains(e.Reason, "Both sides changed") || !strings.Contains(e.Reason, "Jira changed last") {
+		t.Fatalf("reason: %s", e.Reason)
+	}
+	eq(t, x.api.project.optionName(x.api.project.Items[42].OptionID), "Done")
+	eq(t, x.api.jira.Fields.Status.Name, "Done")
+	eq(t, agreedOption(s), "Done")
+	_, entries = x.ok(s)
+	if projectEntry(t, x, entries) != nil {
+		t.Fatal("conflict planned again")
+	}
+}
+
+func TestProjectConflictProjectChangedLast(t *testing.T) {
+	t.Parallel()
+	x, s := conflictSyncer(t, "2026-11-04T10:05:00Z", "2026-11-04T10:00:00.000+0000")
+	s, entries := x.ok(s)
+	e := projectEntry(t, x, entries)
+	eq(t, []any{e.Kind, e.Destination, e.Status}, []any{KindSyncProjectStatus, SideJira, "In Progress"})
+	if !strings.Contains(e.Reason, "the project changed last") {
+		t.Fatalf("reason: %s", e.Reason)
+	}
+	eq(t, x.api.jira.Fields.Status.Name, "In Progress")
+	eq(t, agreedOption(s), "In Progress")
+
+	// Open/closed settles on the project's side too: Jira left Done, so GitHub reopens.
+	s, _ = x.ok(s)
+	_, entries = x.ok(s)
+	eq(t, x.api.source.State, "open")
+	if projectEntry(t, x, entries) != nil {
+		t.Fatal("conflict planned again")
+	}
+}
+
+func TestProjectConflictTooCloseBlocks(t *testing.T) {
+	t.Parallel()
+	for name, times := range map[string][2]string{
+		"within a minute": {"2026-11-04T10:00:00Z", "2026-11-04T10:00:30.000+0000"},
+		"is unknown":      {"", "2026-11-04T10:00:00.000+0000"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			x, s := conflictSyncer(t, times[0], times[1])
+			_, entries := x.ok(s)
+			e := projectEntry(t, x, entries)
+			eq(t, e.Kind, KindBlocked)
+			if !strings.Contains(e.Reason, name) || !strings.Contains(e.Reason, "align them manually") {
+				t.Fatalf("reason: %s", e.Reason)
+			}
+			eq(t, x.api.jira.Fields.Status.Name, "Done")
+		})
+	}
+}
+
+func TestProjectDisagreementWithoutAgreementUsesLatest(t *testing.T) {
+	t.Parallel()
+	x := projectSyncer(t)
+	s := projectInSync(t, x)
+	pair := s.Pairs["1"]
+	pair.ProjectStatus = nil
+	s.Pairs["1"] = pair
+	x.setOption("In Progress")
+	x.setUpdated("2026-11-04T10:00:00Z")
+	// Jira's status never changed, so its creation time stands in.
+	x.api.jira.Fields.Created = "2026-11-01T09:00:00.000+0000"
+	s, entries := x.ok(s)
+	e := projectEntry(t, x, entries)
+	if !strings.Contains(e.Reason, "no agreed status recorded; the project changed last") {
+		t.Fatalf("reason: %s", e.Reason)
+	}
+	eq(t, x.api.jira.Fields.Status.Name, "In Progress")
+	eq(t, agreedOption(s), "In Progress")
+}
+
+func TestProjectConflictJiraWinsReopensGitHub(t *testing.T) {
+	t.Parallel()
+	x := projectSyncer(t)
+	s := projectInSync(t, x)
+	// A person closes the issue (the workflow sets Done), and later Jira starts work.
+	x.api.itemClosed = true
+	must(t, x.api.SetGitHubState(1, true))
+	x.setUpdated("2026-11-04T10:00:00Z")
+	x.api.jira.Fields.Status = jiraStatus("In Progress", "indeterminate")
+	x.api.jiraChanged = "2026-11-04T10:05:00.000+0000"
+
+	s, _ = x.ok(s)
+	eq(t, x.api.project.optionName(x.api.project.Items[42].OptionID), "In Progress")
+	s, _ = x.ok(s)
+	eq(t, x.api.source.State, "open")
+	eq(t, x.api.jira.Fields.Status.Name, "In Progress")
+	eq(t, []string{agreed(t, s), agreedOption(s)}, []string{"open", "In Progress"})
+}
+
 func TestNamedTransitionOverridesDestinationMatch(t *testing.T) {
 	t.Parallel()
 	x := projectSyncer(t)
@@ -585,5 +702,33 @@ func TestLastStateChangeReadsTimeline(t *testing.T) {
 	reply = Object{"data": Object{"repository": nil}, "errors": []any{Object{"type": "RATE_LIMITED", "message": "slow down"}}}
 	if _, err = api.LastStateChange(1); err == nil || !strings.Contains(err.Error(), "slow down") {
 		t.Fatalf("got %v", err)
+	}
+}
+
+func TestJiraFieldChangedReadsEveryPage(t *testing.T) {
+	t.Parallel()
+	entry := func(created string, fields ...string) Object {
+		items := make([]any, 0, len(fields))
+		for _, f := range fields {
+			items = append(items, Object{"field": f})
+		}
+		return Object{"created": created, "items": items}
+	}
+	srv := newServer(t, func(r *http.Request) (int, http.Header, any) {
+		if r.URL.Query().Get("startAt") == "0" {
+			return 200, nil, Object{"total": 3, "values": []any{
+				entry("2026-11-04T10:00:00.000+0000", "status"),
+				entry("2026-11-04T12:00:00.000+0000", "summary"),
+			}}
+		}
+		return 200, nil, Object{"total": 3, "values": []any{entry("2026-11-04T11:00:00.000+0000", "assignee", "status")}}
+	})
+	api := srv.client(t)
+	got, err := api.JiraFieldChanged("200", "status")
+	must(t, err)
+	eq(t, got, "2026-11-04T11:00:00.000+0000")
+	eq(t, len(srv.urls), 2)
+	if !strings.Contains(srv.urls[0], "/rest/api/3/issue/200/changelog?") {
+		t.Fatalf("url: %s", srv.urls[0])
 	}
 }

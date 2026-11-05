@@ -1,6 +1,7 @@
 package ghjira
 
 import (
+	"net/http"
 	"strings"
 	"testing"
 )
@@ -68,7 +69,24 @@ func TestContentCopiesOriginalEdits(t *testing.T) {
 	eq(t, len(x.api.writes), 0)
 }
 
-func TestContentNeverOverwritesEditedCopy(t *testing.T) {
+func TestContentNeverOverwritesEditedDescription(t *testing.T) {
+	t.Parallel()
+	x, s := contentSyncer(t)
+	s, _ = x.ok(s)
+
+	x.api.jira.Fields.Description = toADF("Edited in Jira")
+	x.api.source.Body = "Edited on GitHub"
+	x.api.writes = nil
+	_, entries := x.ok(s)
+	got := contentEntries(entries)
+	eq(t, kinds(got), []Kind{KindBlocked})
+	if !strings.Contains(got[0].Reason, "Jira description was edited") {
+		t.Errorf("reason = %q", got[0].Reason)
+	}
+	eq(t, len(x.api.writes), 0)
+}
+
+func TestContentTitleEditedOnBothSidesWithoutTimesBlocks(t *testing.T) {
 	t.Parallel()
 	x, s := contentSyncer(t)
 	s, _ = x.ok(s)
@@ -79,7 +97,7 @@ func TestContentNeverOverwritesEditedCopy(t *testing.T) {
 	s, entries := x.ok(s)
 	got := contentEntries(entries)
 	eq(t, kinds(got), []Kind{KindBlocked})
-	if !strings.Contains(got[0].Reason, "Jira summary was edited") {
+	if !strings.Contains(got[0].Reason, "Title edited on both GitHub and Jira; when each changed is unknown") {
 		t.Errorf("reason = %q", got[0].Reason)
 	}
 	eq(t, len(x.api.writes), 0)
@@ -172,11 +190,86 @@ func TestContentFromJiraOriginal(t *testing.T) {
 		t.Errorf("GitHub body = %q", x.api.source.Body)
 	}
 
+	// A title edited on the GitHub copy is copied back to Jira.
 	x.api.source.Title = "Renamed on GitHub"
 	_, entries = x.ok(s)
 	got := contentEntries(entries)
-	eq(t, kinds(got), []Kind{KindBlocked})
-	if !strings.Contains(got[0].Reason, "GitHub title was edited") {
+	eq(t, []any{got[0].Kind, got[0].Destination}, []any{KindSyncContent, SideJira})
+	eq(t, x.api.jira.Fields.Summary, "Renamed on GitHub")
+}
+
+func TestContentTitleEditedOnCopyIsCopiedBack(t *testing.T) {
+	t.Parallel()
+	x, s := contentSyncer(t)
+	s, _ = x.ok(s)
+
+	x.api.jira.Fields.Summary = "Renamed in Jira"
+	s, entries := x.ok(s)
+	got := contentEntries(entries)
+	eq(t, []any{got[0].Kind, got[0].Destination}, []any{KindSyncContent, SideGitHub})
+	if got[0].Reason != "Jira summary was edited last; copied to GitHub" {
 		t.Errorf("reason = %q", got[0].Reason)
+	}
+	eq(t, x.api.source.Title, "Renamed in Jira")
+
+	// Recorded as matching, so nothing is written again.
+	x.api.writes = nil
+	_, entries = x.ok(s)
+	eq(t, len(contentEntries(entries)), 0)
+	eq(t, len(x.api.writes), 0)
+}
+
+func TestContentTitleEditedOnBothSidesLaterWins(t *testing.T) {
+	t.Parallel()
+	for name, tc := range map[string]struct {
+		github, jira, want string
+		dest               Side
+	}{
+		"Jira later":   {"2026-11-04T10:00:00Z", "2026-11-04T10:05:00.000+0000", "Edited in Jira", SideGitHub},
+		"GitHub later": {"2026-11-04T10:05:00Z", "2026-11-04T10:00:00.000+0000", "Edited on GitHub", SideJira},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			x, s := contentSyncer(t)
+			s, _ = x.ok(s)
+			x.api.jira.Fields.Summary, x.api.summaryChanged = "Edited in Jira", tc.jira
+			x.api.source.Title, x.api.titleChanged = "Edited on GitHub", tc.github
+			s, entries := x.ok(s)
+			eq(t, contentEntries(entries)[0].Destination, tc.dest)
+			eq(t, []string{x.api.source.Title, x.api.jira.Fields.Summary}, []string{tc.want, tc.want})
+			_, entries = x.ok(s)
+			eq(t, len(contentEntries(entries)), 0)
+		})
+	}
+}
+
+func TestContentTitleCopiedBackChecksLimits(t *testing.T) {
+	t.Parallel()
+	x, s := contentSyncer(t)
+	s, _ = x.ok(s)
+	x.api.source.Title = "Original title"
+	x.api.jira.Fields.Summary = "   "
+	_, entries := x.ok(s)
+	got := contentEntries(entries)
+	eq(t, kinds(got), []Kind{KindBlocked})
+	eq(t, got[0].Reason, "Jira summary is empty")
+}
+
+func TestGitHubTitleChangedReadsLastRename(t *testing.T) {
+	t.Parallel()
+	var nodes []any
+	srv := newServer(t, func(*http.Request) (int, http.Header, any) {
+		return 200, nil, Object{"data": Object{"repository": Object{"issue": Object{"timelineItems": Object{"nodes": nodes}}}}}
+	})
+	api := srv.client(t)
+	got, err := api.GitHubTitleChanged(3)
+	must(t, err)
+	eq(t, got, "")
+	nodes = []any{Object{"createdAt": "2026-11-04T10:00:00Z"}}
+	got, err = api.GitHubTitleChanged(3)
+	must(t, err)
+	eq(t, got, "2026-11-04T10:00:00Z")
+	if !strings.HasSuffix(srv.urls[0], "/graphql") {
+		t.Fatalf("url: %s", srv.urls[0])
 	}
 }
