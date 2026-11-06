@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"encoding/json"
 	"maps"
+	"os"
 	"reflect"
 	"slices"
 	"strings"
@@ -640,6 +641,7 @@ func TestBindingAndBadConfigFailClosed(t *testing.T) {
 		{"jira_url": "http://unsafe"},
 		{"selection_label": ""},
 		{"jira_create_fields": Object{"project": Object{}}},
+		{"jira_create_fields": Object{"parent": Object{"key": "ENG-1"}}},
 		{"max_operations": true},
 		{"full_rescan_hours": 0},
 		{"max_pages": 1.5},
@@ -658,6 +660,32 @@ func TestBindingAndBadConfigFailClosed(t *testing.T) {
 	valid := canonical(base, false)
 	if _, err := ParseConfig(append(valid, valid...)); err == nil {
 		t.Error("config with trailing data accepted")
+	}
+	typo := Object{"sync_comments": true}
+	maps.Copy(typo, base)
+	if _, err := ParseConfig(canonical(typo, false)); err == nil || !strings.Contains(err.Error(), `"sync_comments"`) {
+		t.Errorf("unknown key error should name the key, got %v", err)
+	}
+}
+
+// TestExampleConfigListsEveryOption keeps sync.example.json valid and complete.
+func TestExampleConfigListsEveryOption(t *testing.T) {
+	t.Parallel()
+	data, err := os.ReadFile("../../sync.example.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ParseConfig(data); err != nil {
+		t.Fatalf("example config: %v", err)
+	}
+	var example Object
+	if err := json.Unmarshal(data, &example); err != nil {
+		t.Fatal(err)
+	}
+	for key := range configKeys {
+		if _, present := example[key]; !present {
+			t.Errorf("sync.example.json is missing %q", key)
+		}
 	}
 }
 

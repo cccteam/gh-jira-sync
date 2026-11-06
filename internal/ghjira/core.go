@@ -78,7 +78,8 @@ type Config struct {
 	// linked issues, such as an Epic and its stories.
 	SyncParents bool
 	// SyncContent copies later title and description edits from the issue a pair
-	// started on to its copy; edits made in the copy are reported, never copied back.
+	// started on to its copy. Title edits on the copy are copied back too; description
+	// edits on the copy are blocked for review, never copied back.
 	SyncContent bool
 	// JiraSubtaskType is the Jira sub-task issue type for new issues whose GitHub
 	// parent is a standard Jira issue (such as a Task under a Task); "" turns this off.
@@ -300,11 +301,11 @@ func ParseConfig(data []byte) (*Config, error) {
 	}
 	raw, ok := top.(Object)
 	if !ok {
-		return nil, syncErr("Unknown configuration keys or invalid configuration")
+		return nil, syncErr("Configuration must be a JSON object")
 	}
-	for k := range raw {
+	for _, k := range slices.Sorted(maps.Keys(raw)) {
 		if !configKeys[k] {
-			return nil, syncErr("Unknown configuration keys or invalid configuration")
+			return nil, syncErr("Unknown configuration key %q", k)
 		}
 	}
 	c := &Config{}
@@ -497,11 +498,13 @@ func parseToggles(in configInput, c *Config) error {
 func parseCreateFields(in configInput, c *Config) error {
 	extra, ok := in.value("jira_create_fields", Object{}).(Object)
 	if !ok {
-		return syncErr("jira_create_fields cannot override project, issue type, summary, or description")
+		return syncErr("jira_create_fields must be an object of Jira fields")
 	}
-	for _, k := range []string{"summary", "description", "project", "issuetype"} {
+	// parent is set per issue for sub-tasks and kept by parent sync, so a fixed one
+	// would put every new issue under the same parent.
+	for _, k := range []string{"summary", "description", "project", "issuetype", "parent"} {
 		if _, present := extra[k]; present {
-			return syncErr("jira_create_fields cannot override project, issue type, summary, or description")
+			return syncErr("jira_create_fields cannot override project, issue type, summary, description, or parent")
 		}
 	}
 	c.JiraCreateFields = extra

@@ -180,34 +180,60 @@ project pair: they would keep separate journals and could duplicate issues.
 
 ## Configuration
 
-Unknown keys fail validation.
+`sync.json` is one JSON object. Only the first four options are required; leave out
+any other option to get its default. Unknown keys and wrong types fail validation.
+[`sync.example.json`](sync.example.json) lists every option at its default.
 
-| Option | Default / meaning |
-| --- | --- |
-| `repository` | Required `owner/name` |
-| `jira_url` | Required Jira Cloud HTTPS site URL |
-| `jira_cloud_id` | `null`; the site's cloud ID, to call Jira through Atlassian's API gateway as a [service account](#jira-account) does |
-| `jira_project` | Required project key, e.g. `ENG` |
-| `jira_issue_type` | Required issue type name or ID, e.g. `"Task"` or `"10001"` |
-| `jira_issue_types` | `{}`; GitHub issue type name → Jira issue type name or ID, e.g. `{"Bug": "Bug"}` |
-| `selection_label` | `sync-jira`; `null` selects all issues |
-| `issue_state` | `open`; or `closed` or `all` |
-| `comments` | `true`; copy new comments and edits to originals |
-| `comments_since` | `null` backfills; an ISO timestamp limits which existing comments are copied |
-| `status_sync` | `null`; `{"close_transition": "Done", "reopen_transition": "Reopen"}` mirrors open/closed |
-| `project_status` | `null`; mirrors a GitHub Project field instead of `status_sync` |
-| `sync_parents` | `false`; mirror GitHub sub-issue parents and Jira parents |
-| `sync_content` | `false`; copy later title edits both ways, and description edits from the issue a pair started on |
-| `jira_subtask_type` | `null`; sub-task type name or ID for issues nested under a standard Jira issue |
-| `jira_selection_label` | `null`; Jira issues with this label are created in GitHub |
-| `jira_create_fields` | Extra Jira create fields, such as required custom fields or `labels` |
-| `max_operations` | `20` writes per run; the rest are `deferred` to the next run |
-| `max_pages` | `100` pages per listing; an incomplete scan fails the run |
-| `full_rescan_hours` | `24`; longest an unchanged pair goes without a full comment scan |
-| `github_url` | `https://api.github.com`; other API bases work for CLI runs only |
+A **pair** is a GitHub issue and the Jira issue linked to it. The issue a pair
+**started on** is the original; the other is its **copy**.
 
-The label and state filters choose which issues are **created**. Once a pair is
-linked, it keeps syncing even if the issue closes or loses its label.
+### Where to sync
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `repository` | required | The GitHub repository, as `owner/name`. |
+| `jira_url` | required | Your Jira Cloud site, such as `https://your-company.atlassian.net`. Links in copies point here. |
+| `jira_project` | required | Key of the Jira project issues are created in, such as `ENG`. |
+| `jira_issue_type` | required | Jira issue type for issues created from GitHub, by name (`"Task"`) or ID (`"10001"`). |
+| `jira_cloud_id` | `null` | The site's cloud ID. Required with a [service account](#jira-account)'s OAuth credential, which can only call Jira through Atlassian's API gateway; leave `null` with an email and API token. |
+| `github_url` | `https://api.github.com` | GitHub API base URL. Change it only for GitHub Enterprise Server, from the CLI; the Actions workflow supports github.com only. |
+
+Changing `repository`, `jira_url`, `jira_project`, or `github_url` makes existing
+state invalid, since every pair and copy is tied to them. Start a new state branch
+for a new destination.
+
+### Which issues are created
+
+These options decide which issues get a copy. Once a pair is linked it keeps
+syncing, even if the issue later closes or loses its label.
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `selection_label` | `"sync-jira"` | Only GitHub issues with this label are created in Jira. **`null` selects every issue in the repository.** GitHub issues created from Jira get this label too. |
+| `issue_state` | `"open"` | Which issues are created: `"open"`, `"closed"`, or `"all"`. On the Jira side (`jira_selection_label`), open means not in the Done category. |
+| `jira_issue_types` | `{}` | Picks the Jira type from the GitHub issue type, such as `{"Bug": "Bug", "Feature": "Story"}`. GitHub names ignore case; unmapped and untyped issues use `jira_issue_type`. |
+| `jira_create_fields` | `{}` | Extra fields set on every Jira issue created, such as required custom fields or `{"labels": ["from-github"]}`. They may not set `project`, `issuetype`, `summary`, `description`, or `parent`. |
+| `jira_selection_label` | `null` | Creates a GitHub issue for each Jira issue in the project with this label. **`null` turns Jira → GitHub creation off** (unlike `selection_label`, where `null` means all issues). |
+
+### What is kept in sync
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `comments` | `true` | Copy each new comment to the other side, and copy later edits of the original comment to its copy. `false` copies no comments. |
+| `comments_since` | `null` | Copy only comments created at or after this ISO timestamp with timezone, such as `"2026-01-01T00:00:00Z"`. `null` also copies comments that existed before the pair was linked. |
+| `sync_content` | `false` | Copy later title and description edits. Titles sync both ways; descriptions only from the original to the copy. See [Titles and descriptions](#features). |
+| `sync_parents` | `false` | Mirror parent links: GitHub sub-issues and Jira parents, such as an Epic and its stories. |
+| `jira_subtask_type` | `null` | Jira sub-task type, by name or ID. When set, a GitHub sub-issue of an issue that is a standard Jira issue (such as a Task) is created as a Jira sub-task. Needs `sync_parents`. |
+| `status_sync` | `null` | Mirror open/closed: `{"close_transition": "Done", "reopen_transition": "Reopen"}` names the Jira transitions applied when the GitHub issue closes or reopens. Jira's Done category closes the GitHub issue. |
+| `project_status` | `null` | Mirror a GitHub Project's Status field and the Jira status instead; see [Project status](#features). Use either this or `status_sync`, not both. |
+
+### Run limits
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `max_operations` | `20` | Most remote writes in one run. Later writes are reported as `deferred` and done on the next run, which limits the damage a bad configuration can do. |
+| `max_pages` | `100` | Most pages (of 100 items) read from any one listing. A listing longer than this fails the run, since a partial scan could look like deletions. |
+| `full_rescan_hours` | `24` | Pairs with no new activity are skipped, but each is fully rescanned at least this often, since comment edits don't always update an issue's activity time. |
 
 Jira issue types can be given by name (ignoring case) or by ID; a value of only
 digits is always an ID. Names are looked up in the project at the start of each run,
