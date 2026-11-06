@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.3](https://github.com/cccteam/gh-jira-sync/compare/v0.2.2...v0.2.3) (2026-11-06)
+
+
+### Features
+
+* rename jira_issue_type to jira_default_issue_type, and explain every sync.json option ([#28](https://github.com/cccteam/gh-jira-sync/issues/28)) ([e0ca543](https://github.com/cccteam/gh-jira-sync/commit/e0ca54300bed53ca36ae2ae76fa4d7900d184139))
+
 ## [0.2.2](https://github.com/cccteam/gh-jira-sync/compare/v0.2.1...v0.2.2) (2026-11-05)
 
 
