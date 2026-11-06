@@ -275,6 +275,9 @@ var configKeys = map[string]bool{
 	"sync_parents": true, "sync_content": true, "jira_selection_label": true, "jira_subtask_type": true, "jira_cloud_id": true,
 }
 
+// jiraParentField is the Jira issue field that holds an issue's parent.
+const jiraParentField = "parent"
+
 // jiraGateway is Atlassian's API gateway; a site's API lives at jiraGateway + cloud ID.
 const jiraGateway = "https://api.atlassian.com/ex/jira/"
 
@@ -502,7 +505,7 @@ func parseCreateFields(in configInput, c *Config) error {
 	}
 	// parent is set per issue for sub-tasks and kept by parent sync, so a fixed one
 	// would put every new issue under the same parent.
-	for _, k := range []string{"summary", "description", "project", "issuetype", "parent"} {
+	for _, k := range []string{"summary", "description", "project", "issuetype", jiraParentField} {
 		if _, present := extra[k]; present {
 			return syncErr("jira_create_fields cannot override project, issue type, summary, description, or parent")
 		}
