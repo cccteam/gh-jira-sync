@@ -264,7 +264,7 @@ func TestReverseCreationOffAndBaselines(t *testing.T) {
 
 	for _, bad := range []string{`""`, `"two words"`, `"q\"uote"`, `5`} {
 		if _, err := ParseConfig([]byte(`{"repository": "acme/test", "jira_url": "https://acme.atlassian.net",
-			"jira_project": "ENG", "jira_issue_type": "10001", "jira_selection_label": ` + bad + `}`)); err == nil {
+			"jira_project": "ENG", "jira_default_issue_type": "10001", "jira_selection_label": ` + bad + `}`)); err == nil {
 			t.Errorf("jira_selection_label %s accepted", bad)
 		}
 	}

@@ -398,7 +398,7 @@ func (a *Client) CheckProject() error {
 	}
 	// A wrong type would fail every creation, or create issues of an unintended type.
 	var err error
-	if a.c.JiraIssueType, err = resolveIssueType(project.IssueTypes, a.c.JiraIssueType, false, a.c.JiraProject); err != nil {
+	if a.c.JiraDefaultIssueType, err = resolveIssueType(project.IssueTypes, a.c.JiraDefaultIssueType, false, a.c.JiraProject); err != nil {
 		return err
 	}
 	for name, ref := range a.c.JiraIssueTypes {
@@ -666,7 +666,7 @@ func (a *Client) CreateIssue(source *GitHubIssue, parentKey string) (*JiraIssue,
 	fields["issuetype"] = Object{"id": a.c.issueTypeFor(source)}
 	if parentKey != "" {
 		fields["issuetype"] = Object{"id": a.c.JiraSubtaskType}
-		fields["parent"] = Object{"key": parentKey}
+		fields[jiraParentField] = Object{"key": parentKey}
 	}
 	fields["summary"] = source.Title
 	fields["description"] = markdownADF(issueDescription(source))
@@ -1267,10 +1267,10 @@ func (a *Client) SetGitHubParent(childID int64, parent, oldParent int) error {
 
 // SetJiraParent sets the Jira issue's parent by key, or removes it when key is empty.
 func (a *Client) SetJiraParent(id, key string) error {
-	body := map[string]any{"fields": map[string]any{"parent": map[string]string{"key": key}}}
+	body := map[string]any{"fields": map[string]any{jiraParentField: map[string]string{"key": key}}}
 	if key == "" {
 		// Jira documents removing a parent with update.parent.set.none = true.
-		body = map[string]any{"update": map[string]any{"parent": []any{map[string]any{"set": map[string]bool{"none": true}}}}}
+		body = map[string]any{"update": map[string]any{jiraParentField: []any{map[string]any{"set": map[string]bool{"none": true}}}}}
 	}
 
 	return a.jira.Do("PUT", "/rest/api/3/issue/"+id, body, nil)

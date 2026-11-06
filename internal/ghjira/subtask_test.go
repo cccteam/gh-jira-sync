@@ -174,7 +174,7 @@ func TestSubtaskConfig(t *testing.T) {
 	} {
 		raw := Object{
 			"repository": "acme/test", "jira_url": "https://acme.atlassian.net",
-			"jira_project": "ENG", "jira_issue_type": "10001",
+			"jira_project": "ENG", "jira_default_issue_type": "10001",
 		}
 		for k, v := range extra {
 			raw[k] = v

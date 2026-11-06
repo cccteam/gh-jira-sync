@@ -58,12 +58,12 @@ type Config struct {
 	// in copies and the deployment binding always use JiraURL.
 	JiraCloudID string
 	JiraProject string
-	// JiraIssueType, the values of JiraIssueTypes, and JiraSubtaskType name a Jira
-	// issue type by ID (digits) or by name (ignoring case); CheckProject replaces
+	// JiraDefaultIssueType, the values of JiraIssueTypes, and JiraSubtaskType name a
+	// Jira issue type by ID (digits) or by name (ignoring case); CheckProject replaces
 	// names with IDs.
-	JiraIssueType string
+	JiraDefaultIssueType string
 	// JiraIssueTypes maps GitHub issue type names (matched ignoring case) to Jira
-	// issue types for new issues; others use JiraIssueType.
+	// issue types for new issues; others use JiraDefaultIssueType.
 	JiraIssueTypes   map[string]string
 	SelectionLabel   *string // nil explicitly opts into all issues
 	IssueState       string
@@ -78,7 +78,8 @@ type Config struct {
 	// linked issues, such as an Epic and its stories.
 	SyncParents bool
 	// SyncContent copies later title and description edits from the issue a pair
-	// started on to its copy; edits made in the copy are reported, never copied back.
+	// started on to its copy. Title edits on the copy are copied back too; description
+	// edits on the copy are blocked for review, never copied back.
 	SyncContent bool
 	// JiraSubtaskType is the Jira sub-task issue type for new issues whose GitHub
 	// parent is a standard Jira issue (such as a Task under a Task); "" turns this off.
@@ -266,13 +267,21 @@ var (
 	hiddenMarkerPattern = regexp.MustCompile(`^<!--\s*gh-jira-sync:([a-f0-9]{64})\s*-->$`)
 )
 
+// legacyIssueTypeKey is jira_default_issue_type's name in earlier releases, still
+// accepted so existing configurations keep working. It is not in configKeys, which
+// lists the current options.
+const legacyIssueTypeKey = "jira_issue_type"
+
 var configKeys = map[string]bool{
 	"repository": true, "github_url": true, "jira_url": true, "jira_project": true,
-	"jira_issue_type": true, "selection_label": true, "issue_state": true, "max_operations": true,
+	"jira_default_issue_type": true, "selection_label": true, "issue_state": true, "max_operations": true,
 	"max_pages": true, "comments": true, "comments_since": true, "jira_create_fields": true,
 	"full_rescan_hours": true, "status_sync": true, "project_status": true, "jira_issue_types": true,
 	"sync_parents": true, "sync_content": true, "jira_selection_label": true, "jira_subtask_type": true, "jira_cloud_id": true,
 }
+
+// jiraParentField is the Jira issue field that holds an issue's parent.
+const jiraParentField = "parent"
 
 // jiraGateway is Atlassian's API gateway; a site's API lives at jiraGateway + cloud ID.
 const jiraGateway = "https://api.atlassian.com/ex/jira/"
@@ -300,11 +309,11 @@ func ParseConfig(data []byte) (*Config, error) {
 	}
 	raw, ok := top.(Object)
 	if !ok {
-		return nil, syncErr("Unknown configuration keys or invalid configuration")
+		return nil, syncErr("Configuration must be a JSON object")
 	}
-	for k := range raw {
-		if !configKeys[k] {
-			return nil, syncErr("Unknown configuration keys or invalid configuration")
+	for _, k := range slices.Sorted(maps.Keys(raw)) {
+		if !configKeys[k] && k != legacyIssueTypeKey {
+			return nil, syncErr("Unknown configuration key %q", k)
 		}
 	}
 	c := &Config{}
@@ -374,9 +383,16 @@ func parseEndpoints(in configInput, c *Config) error {
 
 // parseIssueTypes reads the default Jira issue type and the per-GitHub-type mapping.
 func parseIssueTypes(in configInput, c *Config) error {
+	key := "jira_default_issue_type"
+	if _, legacy := in[legacyIssueTypeKey]; legacy {
+		if _, current := in[key]; current {
+			return syncErr("Set jira_default_issue_type only; jira_issue_type is its old name")
+		}
+		key = legacyIssueTypeKey
+	}
 	var str bool
-	if c.JiraIssueType, str = in["jira_issue_type"].(string); !str || strings.TrimSpace(c.JiraIssueType) == "" {
-		return syncErr("jira_issue_type must be an issue type ID or name")
+	if c.JiraDefaultIssueType, str = in[key].(string); !str || strings.TrimSpace(c.JiraDefaultIssueType) == "" {
+		return syncErr("jira_default_issue_type must be an issue type ID or name")
 	}
 	c.JiraIssueTypes = map[string]string{}
 	raw, present := in["jira_issue_types"]
@@ -497,11 +513,13 @@ func parseToggles(in configInput, c *Config) error {
 func parseCreateFields(in configInput, c *Config) error {
 	extra, ok := in.value("jira_create_fields", Object{}).(Object)
 	if !ok {
-		return syncErr("jira_create_fields cannot override project, issue type, summary, or description")
+		return syncErr("jira_create_fields must be an object of Jira fields")
 	}
-	for _, k := range []string{"summary", "description", "project", "issuetype"} {
+	// parent is set per issue for sub-tasks and kept by parent sync, so a fixed one
+	// would put every new issue under the same parent.
+	for _, k := range []string{"summary", "description", "project", "issuetype", jiraParentField} {
 		if _, present := extra[k]; present {
-			return syncErr("jira_create_fields cannot override project, issue type, summary, or description")
+			return syncErr("jira_create_fields cannot override project, issue type, summary, description, or parent")
 		}
 	}
 	c.JiraCreateFields = extra
@@ -868,7 +886,7 @@ func isOne(v any) bool {
 func runeLen(s string) int { return len([]rune(s)) }
 
 // issueTypeFor returns the Jira issue type for a new issue: the one mapped to its
-// GitHub issue type, or jira_issue_type when it has no type or an unmapped one.
+// GitHub issue type, or jira_default_issue_type when it has no type or an unmapped one.
 func (c *Config) issueTypeFor(source *GitHubIssue) string {
 	if source.Type != nil {
 		for name, id := range c.JiraIssueTypes {
@@ -878,5 +896,5 @@ func (c *Config) issueTypeFor(source *GitHubIssue) string {
 		}
 	}
 
-	return c.JiraIssueType
+	return c.JiraDefaultIssueType
 }

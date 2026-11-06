@@ -47,7 +47,7 @@ func TestCloudIDMustBeAUUID(t *testing.T) {
 	for _, bad := range []any{"acme", "https://api.atlassian.com/ex/jira/" + testCloudID, testCloudID + "0", 5, true} {
 		raw := Object{
 			"repository": "acme/test", "jira_url": "https://acme.atlassian.net",
-			"jira_project": "ENG", "jira_issue_type": "10001", "jira_cloud_id": bad,
+			"jira_project": "ENG", "jira_default_issue_type": "10001", "jira_cloud_id": bad,
 		}
 		if _, err := ParseConfig(canonical(raw, false)); err == nil {
 			t.Errorf("jira_cloud_id %v accepted", bad)
