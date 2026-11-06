@@ -374,7 +374,7 @@ func TestProjectStatusConfig(t *testing.T) {
 	option, _ := c.ProjectStatus.forJira("In Review")
 	eq(t, option, "In Progress")
 
-	base := Object{"repository": "acme/test", "jira_url": "https://acme.atlassian.net", "jira_project": "ENG", "jira_issue_type": "10001"}
+	base := Object{"repository": "acme/test", "jira_url": "https://acme.atlassian.net", "jira_project": "ENG", "jira_default_issue_type": "10001"}
 	withPS := func(change func(Object)) Object {
 		raw := Object{"project_status": decodeJSON(canonical(ps, false))}
 		for k, v := range base {

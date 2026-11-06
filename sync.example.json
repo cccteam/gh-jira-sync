@@ -2,7 +2,7 @@
   "repository": "your-org/your-repository",
   "jira_url": "https://your-company.atlassian.net",
   "jira_project": "ENG",
-  "jira_issue_type": "Task",
+  "jira_default_issue_type": "Task",
   "jira_cloud_id": null,
   "github_url": "https://api.github.com",
   "selection_label": "sync-jira",

@@ -249,7 +249,7 @@ func TestStatusSyncConfig(t *testing.T) {
 	c := testConfig(t, Object{"status_sync": Object{"close_transition": "Done", "reopen_transition": "Reopen"}})
 	eq(t, *c.StatusSync, StatusSync{CloseTransition: "Done", ReopenTransition: "Reopen"})
 	eq(t, testConfig(t, Object{"status_sync": nil}).StatusSync, (*StatusSync)(nil))
-	base := Object{"repository": "acme/test", "jira_url": "https://acme.atlassian.net", "jira_project": "ENG", "jira_issue_type": "10001"}
+	base := Object{"repository": "acme/test", "jira_url": "https://acme.atlassian.net", "jira_project": "ENG", "jira_default_issue_type": "10001"}
 	for _, bad := range []any{
 		"Done",
 		Object{"close_transition": "Done"},

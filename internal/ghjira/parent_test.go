@@ -269,7 +269,7 @@ func TestParentSyncOffAndCreationBaseline(t *testing.T) {
 	eq(t, agreedParent(y.linked(), 1), "none") // new issues start with no parent agreed
 	eq(t, testConfig(t, Object{"sync_parents": true}).SyncParents, true)
 	if _, err := ParseConfig([]byte(`{"repository": "acme/test", "jira_url": "https://acme.atlassian.net",
-		"jira_project": "ENG", "jira_issue_type": "10001", "sync_parents": "yes"}`)); err == nil {
+		"jira_project": "ENG", "jira_default_issue_type": "10001", "sync_parents": "yes"}`)); err == nil {
 		t.Fatal("non-boolean sync_parents accepted")
 	}
 }

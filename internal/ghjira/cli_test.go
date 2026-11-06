@@ -25,7 +25,7 @@ func newCLI(t *testing.T) *cliRun {
 	}
 	raw := Object{
 		"repository": "acme/test", "jira_url": "https://acme.atlassian.net",
-		"jira_project": "ENG", "jira_issue_type": "10001",
+		"jira_project": "ENG", "jira_default_issue_type": "10001",
 	}
 	if err := atomicJSON(r.config, raw); err != nil {
 		t.Fatal(err)

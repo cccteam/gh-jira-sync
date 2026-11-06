@@ -12,7 +12,7 @@ func testConfig(t *testing.T, extra Object) *Config {
 	t.Helper()
 	raw := Object{
 		"repository": "acme/test", "jira_url": "https://acme.atlassian.net",
-		"jira_project": "ENG", "jira_issue_type": "10001",
+		"jira_project": "ENG", "jira_default_issue_type": "10001",
 	}
 	maps.Copy(raw, extra)
 	c, err := ParseConfig(canonical(raw, false))
@@ -413,7 +413,7 @@ func (f *fakeAPI) GitHubTitleChanged(int) (string, error) { return f.titleChange
 // identity Jira would store on a created issue.
 var fakeConfig = func() *Config {
 	c, err := ParseConfig([]byte(`{"repository": "acme/test", "jira_url": "https://acme.atlassian.net",
-		"jira_project": "ENG", "jira_issue_type": "10001"}`))
+		"jira_project": "ENG", "jira_default_issue_type": "10001"}`))
 	if err != nil {
 		panic(err)
 	}

@@ -194,7 +194,7 @@ A **pair** is a GitHub issue and the Jira issue linked to it. The issue a pair
 | `repository` | required | The GitHub repository, as `owner/name`. |
 | `jira_url` | required | Your Jira Cloud site, such as `https://your-company.atlassian.net`. Links in copies point here. |
 | `jira_project` | required | Key of the Jira project issues are created in, such as `ENG`. |
-| `jira_issue_type` | required | Jira issue type for issues created from GitHub, by name (`"Task"`) or ID (`"10001"`). |
+| `jira_default_issue_type` | required | Jira issue type for issues created from GitHub, by name (`"Task"`) or ID (`"10001"`), unless `jira_issue_types` picks another. Earlier releases called it `jira_issue_type`, which still works. |
 | `jira_cloud_id` | `null` | The site's cloud ID. Required with a [service account](#jira-account)'s OAuth credential, which can only call Jira through Atlassian's API gateway; leave `null` with an email and API token. |
 | `github_url` | `https://api.github.com` | GitHub API base URL. Change it only for GitHub Enterprise Server, from the CLI; the Actions workflow supports github.com only. |
 
@@ -211,7 +211,7 @@ syncing, even if the issue later closes or loses its label.
 | --- | --- | --- |
 | `selection_label` | `"sync-jira"` | Only GitHub issues with this label are created in Jira. **`null` selects every issue in the repository.** GitHub issues created from Jira get this label too. |
 | `issue_state` | `"open"` | Which issues are created: `"open"`, `"closed"`, or `"all"`. On the Jira side (`jira_selection_label`), open means not in the Done category. |
-| `jira_issue_types` | `{}` | Picks the Jira type from the GitHub issue type, such as `{"Bug": "Bug", "Feature": "Story"}`. GitHub names ignore case; unmapped and untyped issues use `jira_issue_type`. |
+| `jira_issue_types` | `{}` | Picks the Jira type from the GitHub issue type, such as `{"Bug": "Bug", "Feature": "Story"}`. GitHub names ignore case; unmapped and untyped issues use `jira_default_issue_type`. Also used in reverse to set the GitHub type of issues created from Jira. |
 | `jira_create_fields` | `{}` | Extra fields set on every Jira issue created, such as required custom fields or `{"labels": ["from-github"]}`. They may not set `project`, `issuetype`, `summary`, `description`, or `parent`. |
 | `jira_selection_label` | `null` | Creates a GitHub issue for each Jira issue in the project with this label. **`null` turns Jira → GitHub creation off** (unlike `selection_label`, where `null` means all issues). |
 
@@ -247,8 +247,8 @@ curl -s -u "$JIRA_EMAIL:$JIRA_API_TOKEN" "$JIRA_SITE/rest/api/3/project/<KEY>" |
 ## Features
 
 **Issue types.** `jira_issue_types` picks the Jira type from the GitHub issue type
-(names ignore case); anything unmapped uses `jira_issue_type`. The type is set at
-creation only.
+(names ignore case); anything unmapped uses `jira_default_issue_type`. The type is set
+at creation only.
 
 **Issue status.** With `status_sync`, closing or reopening on GitHub applies the named
 Jira transition, and moving a Jira issue into or out of the Done category closes or

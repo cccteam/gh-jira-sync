@@ -635,7 +635,7 @@ func TestBindingAndBadConfigFailClosed(t *testing.T) {
 	if validateState(NewState(c), other) == nil {
 		t.Fatal("state bound to another project must be rejected")
 	}
-	base := Object{"repository": "acme/test", "jira_url": "https://acme.atlassian.net", "jira_project": "ENG", "jira_issue_type": "10001"}
+	base := Object{"repository": "acme/test", "jira_url": "https://acme.atlassian.net", "jira_project": "ENG", "jira_default_issue_type": "10001"}
 	for _, bad := range []Object{
 		{"unknown": true},
 		{"jira_url": "http://unsafe"},

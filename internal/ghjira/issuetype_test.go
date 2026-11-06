@@ -27,7 +27,7 @@ func TestIssueTypeMapping(t *testing.T) {
 	}
 	eq(t, len(testConfig(t, Object{"jira_issue_types": nil}).JiraIssueTypes), 0)
 
-	base := Object{"repository": "acme/test", "jira_url": "https://acme.atlassian.net", "jira_project": "ENG", "jira_issue_type": "10001"}
+	base := Object{"repository": "acme/test", "jira_url": "https://acme.atlassian.net", "jira_project": "ENG", "jira_default_issue_type": "10001"}
 	for _, bad := range []any{
 		"10300",
 		Object{"Feature": 10300},
@@ -42,6 +42,27 @@ func TestIssueTypeMapping(t *testing.T) {
 		if _, err := ParseConfig(canonical(raw, false)); err == nil {
 			t.Errorf("jira_issue_types %v accepted", bad)
 		}
+	}
+}
+
+// TestLegacyIssueTypeKey keeps configurations written before jira_default_issue_type
+// working, and rejects setting both names.
+func TestLegacyIssueTypeKey(t *testing.T) {
+	t.Parallel()
+	legacy := Object{"repository": "acme/test", "jira_url": "https://acme.atlassian.net", "jira_project": "ENG", "jira_issue_type": "Task"}
+	c, err := ParseConfig(canonical(legacy, false))
+	if err != nil {
+		t.Fatalf("legacy jira_issue_type rejected: %v", err)
+	}
+	eq(t, c.JiraDefaultIssueType, "Task")
+	legacy["jira_default_issue_type"] = "Story"
+	if _, err := ParseConfig(canonical(legacy, false)); err == nil || !strings.Contains(err.Error(), "old name") {
+		t.Errorf("both names accepted, got %v", err)
+	}
+	delete(legacy, "jira_issue_type")
+	delete(legacy, "jira_default_issue_type")
+	if _, err := ParseConfig(canonical(legacy, false)); err == nil {
+		t.Error("config without a default issue type accepted")
 	}
 }
 
@@ -107,7 +128,7 @@ func TestCheckProjectValidatesIssueTypes(t *testing.T) {
 		}
 	}
 	if err := project(story).client(t).CheckProject(); err == nil {
-		t.Error("missing default jira_issue_type accepted")
+		t.Error("missing jira_default_issue_type accepted")
 	}
 }
 
@@ -127,12 +148,12 @@ func TestCheckProjectResolvesIssueTypeNames(t *testing.T) {
 	subtask := Object{"id": "10302", "name": "Subtask", "subtask": true}
 
 	api := project(task, story, subtask).client(t)
-	api.c.JiraIssueType, api.c.JiraSubtaskType = "task", "Subtask"
+	api.c.JiraDefaultIssueType, api.c.JiraSubtaskType = "task", "Subtask"
 	api.c.JiraIssueTypes = map[string]string{"Feature": "STORY", "Bug": "10001"}
 	if err := api.CheckProject(); err != nil {
 		t.Fatalf("valid names rejected: %v", err)
 	}
-	eq(t, []any{api.c.JiraIssueType, api.c.JiraSubtaskType, api.c.JiraIssueTypes["Feature"], api.c.JiraIssueTypes["Bug"]},
+	eq(t, []any{api.c.JiraDefaultIssueType, api.c.JiraSubtaskType, api.c.JiraIssueTypes["Feature"], api.c.JiraIssueTypes["Bug"]},
 		[]any{"10001", "10302", "10300", "10001"})
 	eq(t, api.c.githubTypeFor("10300"), "Feature")
 
@@ -142,16 +163,16 @@ func TestCheckProjectResolvesIssueTypeNames(t *testing.T) {
 		want  string
 	}{
 		"unknown name":         {[]Object{task}, func(c *Config) { c.JiraIssueTypes = map[string]string{"Feature": "Epic"} }, `Epic is not a standard`},
-		"sub-task as standard": {[]Object{task, subtask}, func(c *Config) { c.JiraIssueType = "Subtask" }, `Subtask is not a standard`},
+		"sub-task as standard": {[]Object{task, subtask}, func(c *Config) { c.JiraDefaultIssueType = "Subtask" }, `Subtask is not a standard`},
 		"standard as sub-task": {[]Object{task}, func(c *Config) { c.JiraSubtaskType = "Task" }, `jira_subtask_type Task`},
 		"ambiguous name": {
 			[]Object{task, {"id": "10400", "name": "TASK", "subtask": false}},
-			func(c *Config) { c.JiraIssueType = "Task" }, `matches 2 issue types`,
+			func(c *Config) { c.JiraDefaultIssueType = "Task" }, `matches 2 issue types`,
 		},
 		// Digits are IDs only, so a type named like another's ID is never picked.
 		"digits match IDs only": {
 			[]Object{task, {"id": "10500", "name": "10001", "subtask": true}},
-			func(c *Config) { c.JiraIssueType = "10001" }, "",
+			func(c *Config) { c.JiraDefaultIssueType = "10001" }, "",
 		},
 	} {
 		api := project(tc.types...).client(t)

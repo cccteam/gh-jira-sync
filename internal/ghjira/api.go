@@ -398,7 +398,7 @@ func (a *Client) CheckProject() error {
 	}
 	// A wrong type would fail every creation, or create issues of an unintended type.
 	var err error
-	if a.c.JiraIssueType, err = resolveIssueType(project.IssueTypes, a.c.JiraIssueType, false, a.c.JiraProject); err != nil {
+	if a.c.JiraDefaultIssueType, err = resolveIssueType(project.IssueTypes, a.c.JiraDefaultIssueType, false, a.c.JiraProject); err != nil {
 		return err
 	}
 	for name, ref := range a.c.JiraIssueTypes {

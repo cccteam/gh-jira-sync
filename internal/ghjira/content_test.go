@@ -36,7 +36,7 @@ func TestContentConfig(t *testing.T) {
 	eq(t, testConfig(t, Object{"sync_content": true}).SyncContent, true)
 	raw := Object{
 		"repository": "acme/test", "jira_url": "https://acme.atlassian.net",
-		"jira_project": "ENG", "jira_issue_type": "10001", "sync_content": "yes",
+		"jira_project": "ENG", "jira_default_issue_type": "10001", "sync_content": "yes",
 	}
 	if _, err := ParseConfig(canonical(raw, false)); err == nil {
 		t.Error("non-boolean sync_content accepted")
