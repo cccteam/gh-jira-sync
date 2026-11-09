@@ -88,6 +88,14 @@ type Config struct {
 	// disables Jira → GitHub creation.
 	JiraSelectionLabel *string
 	ProjectStatus      *ProjectStatus // nil disables project status mode
+	// JiraOwnedIssueTypes lists Jira issue types (IDs after CheckProject) that Jira
+	// alone decides: their open/closed state, project status, and parent only flow
+	// Jira → GitHub, GitHub-side changes are set back to Jira's, and GitHub issues of
+	// these types are never created in Jira.
+	JiraOwnedIssueTypes []string
+	// IgnoredJiraParents lists Jira issue keys, such as an initiative in another
+	// project, whose children skip parent sync instead of blocking for review.
+	IgnoredJiraParents []string
 }
 
 // ProjectStatus mirrors a GitHub Project's single-select field (normally Status)
@@ -278,6 +286,7 @@ var configKeys = map[string]bool{
 	"max_pages": true, "comments": true, "comments_since": true, "jira_create_fields": true,
 	"full_rescan_hours": true, "status_sync": true, "project_status": true, "jira_issue_types": true,
 	"sync_parents": true, "sync_content": true, "jira_selection_label": true, "jira_subtask_type": true, "jira_cloud_id": true,
+	"jira_owned_issue_types": true, "ignored_jira_parents": true,
 }
 
 // jiraParentField is the Jira issue field that holds an issue's parent.
@@ -318,7 +327,7 @@ func ParseConfig(data []byte) (*Config, error) {
 	}
 	c := &Config{}
 	for _, step := range []func(configInput, *Config) error{
-		parseEndpoints, parseIssueTypes, parseSelection, parseLimits, parseToggles, parseCreateFields, parseStatusModes,
+		parseEndpoints, parseIssueTypes, parseSelection, parseLimits, parseToggles, parseCreateFields, parseStatusModes, parseOwnership,
 	} {
 		if err := step(configInput(raw), c); err != nil {
 			return nil, err
@@ -551,6 +560,58 @@ func parseStatusModes(in configInput, c *Config) error {
 	}
 
 	return nil
+}
+
+// jiraKeyPattern matches a Jira issue key such as ENG-12.
+var jiraKeyPattern = regexp.MustCompile(`^[A-Z][A-Z0-9_]*-[1-9]\d*$`)
+
+// distinctStrings reads an optional JSON list of distinct non-empty strings.
+func distinctStrings(in configInput, key string, valid func(string) bool, fold bool) ([]string, bool) {
+	raw := in.value(key, nil)
+	if raw == nil {
+		return nil, true
+	}
+	items, ok := raw.([]any)
+	if !ok {
+		return nil, false
+	}
+	list := make([]string, 0, len(items))
+	for _, item := range items {
+		s, isString := item.(string)
+		if !isString || !valid(s) || slices.ContainsFunc(list, func(other string) bool {
+			return other == s || (fold && strings.EqualFold(other, s))
+		}) {
+			return nil, false
+		}
+		list = append(list, s)
+	}
+
+	return list, true
+}
+
+// parseOwnership reads the Jira-owned issue types and the ignored Jira parents.
+func parseOwnership(in configInput, c *Config) error {
+	var ok bool
+	nonEmpty := func(s string) bool { return strings.TrimSpace(s) != "" }
+	if c.JiraOwnedIssueTypes, ok = distinctStrings(in, "jira_owned_issue_types", nonEmpty, true); !ok {
+		return syncErr("jira_owned_issue_types must be a list of distinct Jira issue type IDs or names")
+	}
+	if len(c.JiraOwnedIssueTypes) > 0 && c.StatusSync == nil && c.ProjectStatus == nil && !c.SyncParents {
+		return syncErr("jira_owned_issue_types needs status_sync, project_status, or sync_parents")
+	}
+	if c.IgnoredJiraParents, ok = distinctStrings(in, "ignored_jira_parents", jiraKeyPattern.MatchString, false); !ok {
+		return syncErr("ignored_jira_parents must be a list of distinct Jira issue keys, such as ENG-12")
+	}
+	if len(c.IgnoredJiraParents) > 0 && !c.SyncParents {
+		return syncErr("ignored_jira_parents needs sync_parents")
+	}
+
+	return nil
+}
+
+// jiraOwned reports whether Jira alone decides this Jira issue's status and parent.
+func (c *Config) jiraOwned(j *JiraIssue) bool {
+	return j != nil && slices.Contains(c.JiraOwnedIssueTypes, j.Fields.IssueType.ID)
 }
 
 // strictInt accepts only JSON integers, as Python's `type(x) is int` does.

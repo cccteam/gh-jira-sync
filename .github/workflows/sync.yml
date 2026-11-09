@@ -12,6 +12,10 @@ on:
         description: Allow first-run state initialization
         type: boolean
         default: false
+      acknowledge:
+        description: Report operation IDs to acknowledge (space or comma separated)
+        type: string
+        default: ''
   schedule:
     - cron: '17 * * * *'
 
@@ -29,6 +33,7 @@ jobs:
     with:
       apply: ${{ inputs.apply || github.event_name == 'schedule' }}
       initialize: ${{ inputs.initialize || false }}
+      acknowledge: ${{ inputs.acknowledge || '' }}
       # Build the tool from this exact commit.
       tool-ref: ${{ github.sha }}
     secrets:

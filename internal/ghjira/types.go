@@ -277,7 +277,8 @@ type JiraIssue struct {
 		Summary     string `json:"summary"`
 		Description any    `json:"description"`
 		IssueType   struct {
-			ID string `json:"id"`
+			ID   string `json:"id"`
+			Name string `json:"name"`
 			// HierarchyLevel is 1 for an Epic, 0 for a standard issue, -1 for a sub-task.
 			HierarchyLevel int `json:"hierarchyLevel"`
 		} `json:"issuetype"`

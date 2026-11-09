@@ -411,6 +411,15 @@ func (a *Client) CheckProject() error {
 			return err
 		}
 	}
+	for i, ref := range a.c.JiraOwnedIssueTypes {
+		// An owned type may be a standard type or a sub-task type.
+		subtask := slices.ContainsFunc(project.IssueTypes, func(t jiraIssueType) bool {
+			return t.Subtask && (t.ID == ref || (!isDigits(ref) && strings.EqualFold(t.Name, ref)))
+		})
+		if a.c.JiraOwnedIssueTypes[i], err = resolveIssueType(project.IssueTypes, ref, subtask, a.c.JiraProject); err != nil {
+			return err
+		}
+	}
 
 	return nil
 }

@@ -525,6 +525,8 @@ func planIssue(c *Config, s *State, api API, source *GitHubIssue, issues map[str
 		e.Kind, e.pair = KindLinkIssue, issuePair(source, existing)
 	case journaled && old.Status != StatusRejected:
 		e.block("Issue creation outcome unknown or destination missing; never retry automatically")
+	case slices.Contains(c.JiraOwnedIssueTypes, c.issueTypeFor(source)):
+		e.Kind, e.Reason = KindExcluded, "Jira owns this issue type (jira_owned_issue_types); create it in Jira instead"
 	case runeLen(source.Title) > 255:
 		e.block("GitHub title exceeds Jira summary limit")
 	case runeLen(issueDescription(source)) > textLimit:
@@ -543,6 +545,14 @@ func planIssue(c *Config, s *State, api API, source *GitHubIssue, issues map[str
 	}
 
 	return e, nil
+}
+
+// jiraOwnedReason explains a write that sets GitHub back to Jira for an issue type
+// listed in jira_owned_issue_types.
+func jiraOwnedReason(jira *JiraIssue) string {
+	name := cmp.Or(jira.Fields.IssueType.Name, "This issue type")
+
+	return name + " issues are owned by Jira (jira_owned_issue_types); GitHub follows Jira"
 }
 
 // planSubtask makes a new issue a Jira sub-task when its GitHub parent's Jira issue
@@ -596,12 +606,22 @@ func statusName(closed bool) string {
 // In project status mode the project drives Jira, so only Jira's side is mirrored
 // here: a GitHub close or reopen waits until the project's own automation moves
 // its status and project sync carries that to Jira.
+//
+// For a Jira-owned issue type GitHub always follows Jira, so a GitHub close or
+// reopen is undone instead of carried to Jira.
 func planStatus(c *Config, api API, pair Pair, source *GitHubIssue, jira *JiraIssue) (*Entry, error) {
 	if c.StatusSync == nil && c.ProjectStatus == nil {
 		return nil, nil
 	}
 	gh, jr := source.closed(), jira.done()
 	e := &Entry{GitHub: pair.GitHub, Operation: token(c, OpStatus, pair.GitHubID), pair: pair, issue: source, jira: jira}
+	if gh != jr && c.jiraOwned(jira) {
+		// Whichever side moved, Jira decides; a GitHub close or reopen is set back.
+		e.Kind, e.Destination, e.closed, e.Status = KindSyncStatus, SideGitHub, jr, statusName(jr)
+		e.Reason = jiraOwnedReason(jira)
+
+		return e, nil
+	}
 	switch {
 	case gh == jr:
 		if pair.Closed != nil && *pair.Closed == gh {
@@ -652,19 +672,8 @@ func planProjectStatus(c *Config, api API, project *ProjectSnapshot, pair Pair, 
 		GitHub: pair.GitHub, Operation: token(c, OpProjectStatus, pair.GitHubID), pair: pair,
 		issue: source, jira: jira, fieldID: project.FieldID,
 	}
-	item, inProject := project.Items[source.ID]
-	switch {
-	case !inProject && ps.AddToProject:
-		e.Kind, e.Destination = KindAddToProject, SideProject
-
-		return e, nil
-	case !inProject:
-		e.Kind, e.Reason = KindExcluded, "Issue is not in the project"
-
-		return e, nil
-	case item.Archived:
-		e.Kind, e.Reason = KindExcluded, "Project item is archived"
-
+	item, inProject := projectMembership(ps, project, source, e)
+	if !inProject {
 		return e, nil
 	}
 	e.item = item
@@ -676,14 +685,23 @@ func planProjectStatus(c *Config, api API, project *ProjectSnapshot, pair Pair, 
 
 		return e, nil
 	}
+	setProject := func() {
+		e.Kind, e.Destination, e.option, e.Status = KindSyncProjectStatus, SideProject, fromJira, fromJira
+		e.optionID = project.Options[fromJira]
+	}
+	if c.jiraOwned(jira) && current != fromJira {
+		// Jira decides, so any other option, mapped or not, is set back to Jira's.
+		setProject()
+		if current != "" {
+			e.Reason = jiraOwnedReason(jira)
+		}
+
+		return e, nil
+	}
 	if _, ok := ps.mapping(current); current != "" && !ok {
 		e.block("Project status " + strconv.Quote(current) + " is not mapped in project_status")
 
 		return e, nil
-	}
-	setProject := func() {
-		e.Kind, e.Destination, e.option, e.Status = KindSyncProjectStatus, SideProject, fromJira, fromJira
-		e.optionID = project.Options[fromJira]
 	}
 	agreed := pair.ProjectStatus
 	switch {
@@ -715,6 +733,24 @@ func planProjectStatus(c *Config, api API, project *ProjectSnapshot, pair Pair, 
 	}
 
 	return e, nil
+}
+
+// projectMembership returns the issue's project item when it is in the project and
+// not archived. Otherwise it plans adding the issue, or excludes it, on e.
+func projectMembership(ps *ProjectStatus, project *ProjectSnapshot, source *GitHubIssue, e *Entry) (ProjectItem, bool) {
+	item, inProject := project.Items[source.ID]
+	switch {
+	case !inProject && ps.AddToProject:
+		e.Kind, e.Destination = KindAddToProject, SideProject
+	case !inProject:
+		e.Kind, e.Reason = KindExcluded, "Issue is not in the project"
+	case item.Archived:
+		e.Kind, e.Reason = KindExcluded, "Project item is archived"
+	default:
+		return item, true
+	}
+
+	return item, false
 }
 
 // statusTie is how close two changes may be before neither counts as the later.
@@ -1621,11 +1657,18 @@ func linkedNumber(s *State, key string) (int, bool) {
 // and the Jira issue's parent (for example an Epic above a Story). Like status, the
 // pair records the parent both sides last agreed on; the side that differs from it
 // changed. Conflicting changes, disagreement with nothing recorded, and Jira parents
-// that are not linked to a GitHub issue block for review.
+// that are not linked to a GitHub issue block for review. A Jira parent listed in
+// ignored_jira_parents skips parent sync for the issue, and a Jira-owned issue type
+// always takes Jira's parent.
 func planParent(c *Config, s *State, pair Pair, source *GitHubIssue, jira *JiraIssue, ghParents map[int]int) *Entry {
 	e := &Entry{GitHub: pair.GitHub, Operation: token(c, OpParent, pair.GitHubID), pair: pair, issue: source, jira: jira}
 	gh, jr := ghParents[pair.GitHub], 0
 	if p := jira.Fields.Parent; p != nil {
+		if slices.Contains(c.IgnoredJiraParents, p.Key) {
+			e.Kind, e.Reason = KindExcluded, "Jira parent "+p.Key+" is in ignored_jira_parents; parent sync skipped"
+
+			return e
+		}
 		number, linked := linkedNumber(s, p.Key)
 		if !linked {
 			e.block("Jira parent " + p.Key + " is not linked to a GitHub issue; parent sync paused for this issue")
@@ -1637,6 +1680,9 @@ func planParent(c *Config, s *State, pair Pair, source *GitHubIssue, jira *JiraI
 	e.ghParent, e.jiraParent = gh, jr
 	agreed := pair.Parent
 	switch {
+	case gh != jr && c.jiraOwned(jira):
+		e.Kind, e.Destination, e.parent = KindSyncParent, SideGitHub, jr
+		e.Reason = jiraOwnedReason(jira)
 	case gh == jr:
 		if agreed != nil && *agreed == gh {
 			return nil

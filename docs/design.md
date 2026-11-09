@@ -360,6 +360,24 @@ be irreversible; an unselected parent never will be linked, so it does not. The
 parent is re-read before the create request, since it decides an issue type that
 cannot change afterwards. CheckProject verifies the ID is a sub-task type.
 
+`ignored_jira_parents` names Jira parents that will never be linked, such as an
+initiative in another project. A child whose Jira parent is listed gets an `excluded`
+parent entry instead of a block, and nothing about its parent is recorded or written.
+
+## Jira-owned issue types
+
+`jira_owned_issue_types` makes Jira the only source for some issue types, typically
+Epics planned in Jira. The check uses the linked Jira issue's type ID (CheckProject
+resolves names, standard or sub-task), read with the fields every run already fetches.
+For an owned issue each status, project status, and parent decision that would write
+Jira instead writes GitHub with Jira's value, whatever the agreed value says: a side
+that differs from Jira is set back, and conflicts that would compare change times
+follow Jira. An unmapped project option is set back too, since Jira's mapped status
+decides it. Jira's own moves still reach GitHub through the usual agreed-value logic,
+and the GitHub write records the new agreement, so the next run is quiet. GitHub
+issues whose type maps to an owned Jira type are excluded from creation. Content and
+comments are unaffected.
+
 ## Jira → GitHub creation
 
 `jira_selection_label` mirrors GitHub → Jira creation in the other direction. Each run

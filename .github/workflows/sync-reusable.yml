@@ -25,6 +25,13 @@ on:
         description: Allow first-run state initialization
         type: boolean
         default: false
+      acknowledge:
+        description: >-
+          Operation IDs of reviewed blocked or unavailable report entries to silence until
+          their reason changes, separated by spaces, commas, or new lines. Saved only with
+          apply; other planned writes run too.
+        type: string
+        default: ''
       version:
         description: >-
           Release of gh-jira-sync to run. Defaults to the release this workflow file
@@ -203,6 +210,7 @@ jobs:
           JIRA_CLIENT_SECRET: ${{ secrets.jira-client-secret }}
           APPLY: ${{ inputs.apply }}
           INITIALIZE: ${{ inputs.initialize }}
+          ACKNOWLEDGE: ${{ inputs.acknowledge }}
           CONFIG: ${{ inputs.config }}
           BRANCH: ${{ inputs.state-branch }}
         run: |
@@ -210,6 +218,15 @@ jobs:
                 --state "$RUNNER_TEMP/state/state.json" --report "$RUNNER_TEMP/sync-report.json")
           if [ "$APPLY" = true ]; then args+=(--apply); fi
           if [ "$INITIALIZE" = true ]; then args+=(--init-state); fi
+          set -f # IDs are split on whitespace, never expanded as file patterns
+          for op in ${ACKNOWLEDGE//,/ }; do
+            if [[ ! "$op" =~ ^[0-9a-f]{64}$ ]]; then
+              echo "::error::acknowledge takes report operation IDs (64 hex characters), not $op"
+              exit 1
+            fi
+            args+=(--acknowledge "$op")
+          done
+          set +f
           "$RUNNER_TEMP/gh-jira-sync" "${args[@]}"
       - name: Show report
         if: always()
