@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.4](https://github.com/cccteam/gh-jira-sync/compare/v0.2.3...v0.2.4) (2026-11-09)
+
+
+### Features
+
+* add Jira-owned issue types, ignored Jira parents, and an acknowledge workflow input ([#30](https://github.com/cccteam/gh-jira-sync/issues/30)) ([69c561d](https://github.com/cccteam/gh-jira-sync/commit/69c561dd5ef860003733604eda3173b50d5f2e4c))
+
 ## [0.2.3](https://github.com/cccteam/gh-jira-sync/compare/v0.2.2...v0.2.3) (2026-11-06)
 
 
