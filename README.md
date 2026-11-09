@@ -99,6 +99,7 @@ on:
     inputs:
       apply: { type: boolean, default: false }
       initialize: { type: boolean, default: false }
+      acknowledge: { type: string, default: '' }
   schedule:
     - cron: '17 * * * *'
 permissions:
@@ -110,6 +111,7 @@ jobs:
       app-client-id: Iv23liExampleClientId
       apply: ${{ inputs.apply || (github.event_name == 'schedule' && vars.SYNC_APPLY == 'true') }}
       initialize: ${{ inputs.initialize || false }}
+      acknowledge: ${{ inputs.acknowledge || '' }}
     secrets:
       jira-email: ${{ secrets.JIRA_EMAIL }}
       jira-api-token: ${{ secrets.JIRA_API_TOKEN }}
@@ -127,6 +129,7 @@ pin current. Releases v0.1.1 and later carry binaries; v0.1.0 does not.
 | `state-branch` | `sync-state` | State branch: `sync-state` or `sync-state-<name>` |
 | `apply` | `false` | Perform writes |
 | `initialize` | `false` | Allow creating new state (first run only) |
+| `acknowledge` | empty | Report operation IDs to [acknowledge](#the-report), separated by spaces or commas; saved only with `apply` |
 | `version` | the pinned release | Release to run; leave unset |
 | `tool-ref` | empty | Build from this ref instead, to test unreleased commits |
 | `app-client-id` | empty | GitHub App that supplies the GitHub tokens |
@@ -226,6 +229,8 @@ syncing, even if the issue later closes or loses its label.
 | `jira_subtask_type` | `null` | Jira sub-task type, by name or ID. When set, a GitHub sub-issue of an issue that is a standard Jira issue (such as a Task) is created as a Jira sub-task. Needs `sync_parents`. |
 | `status_sync` | `null` | Mirror open/closed: `{"close_transition": "Done", "reopen_transition": "Reopen"}` names the Jira transitions applied when the GitHub issue closes or reopens. Jira's Done category closes the GitHub issue. |
 | `project_status` | `null` | Mirror a GitHub Project's Status field and the Jira status instead; see [Project status](#features). Use either this or `status_sync`, not both. |
+| `jira_owned_issue_types` | `[]` | Jira issue types, by name or ID, that only Jira decides, such as `["Epic"]`. Their open/closed state, project status, and parent flow from Jira to GitHub only; see [Jira-owned issue types](#features). Needs `status_sync`, `project_status`, or `sync_parents`. |
+| `ignored_jira_parents` | `[]` | Jira issue keys, such as `["ITP-2019"]`, whose children skip parent sync instead of blocking for review. Use it for a parent that will never be in GitHub, such as an initiative in another project. Needs `sync_parents`. |
 
 ### Run limits
 
@@ -299,6 +304,21 @@ are mirrored between linked issues. Add an Epic issue type in GitHub and map it 
 `rejected`. Set `jira_subtask_type` so an issue nested under a Task is created as a
 Jira sub-task; it waits until its parent is in Jira.
 
+**Jira-owned issue types.** List issue types in `jira_owned_issue_types` when Jira is
+where they are planned, for example Epics. For those issues GitHub always follows Jira:
+a GitHub close or reopen, a project status change (even to an unmapped option), or a
+sub-issue parent change is set back to Jira's value instead of being copied to Jira,
+and conflicts follow Jira rather than the later change. Jira's own changes still reach
+GitHub as usual. A GitHub issue whose type maps to an owned Jira type is `excluded`
+from creation in Jira; create it in Jira and let `jira_selection_label` bring it to
+GitHub. Titles and descriptions follow `sync_content` as for any issue. The type is
+read from the linked Jira issue, so a story under an owned Epic is not owned.
+
+**Ignored Jira parents.** A Jira parent that is not linked to a GitHub issue normally
+blocks parent sync for its children, every run. List it in `ignored_jira_parents` when
+it never will be, such as an initiative in another project: its children's parent
+sync is reported as `excluded` and needs no review. Their other syncing is unchanged.
+
 **Titles and descriptions.** A GitHub description becomes Jira rich text: headings,
 lists, task lists, quotes, code, tables, links, and inline formatting carry over, and
 anything else stays as literal text. With `sync_content`, later edits to the title or
@@ -360,9 +380,10 @@ no action. To acknowledge an entry after reviewing it:
 gh-jira-sync --config sync.json --apply --acknowledge <operation>
 ```
 
-That run also performs any other planned writes. For an Actions deployment, run it
-from a clone of the calling repository with `--git-state-branch <branch>` and the same
-credentials.
+That run also performs any other planned writes. In Actions, dispatch the workflow
+with **apply** and the operation IDs in **acknowledge** (pass the reusable workflow's
+`acknowledge` input through, as in the example above). An ID that no longer matches a
+blocked or unavailable entry fails the run without writing.
 
 Exit codes: `0` success (including deferred writes), `2` something needs review,
 `1` configuration, API, or persistence error.
