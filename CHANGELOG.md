@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.6](https://github.com/cccteam/gh-jira-sync/compare/v0.2.5...v0.2.6) (2026-11-10)
+
+
+### Bug Fixes
+
+* keep the project status when a new Jira issue is created from GitHub ([#34](https://github.com/cccteam/gh-jira-sync/issues/34)) ([63f521f](https://github.com/cccteam/gh-jira-sync/commit/63f521f1132dc6099ce27e869a19cc0117bc941a))
+
 ## [0.2.5](https://github.com/cccteam/gh-jira-sync/compare/v0.2.4...v0.2.5) (2026-11-10)
 
 
