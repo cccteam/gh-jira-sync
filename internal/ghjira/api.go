@@ -1310,6 +1310,11 @@ func (a *Client) SetJiraParent(id, key string) error {
 // SetGitHubAssignees replaces a GitHub issue's assignees. GitHub silently drops
 // logins that cannot be assigned, so callers confirm by reading the issue back.
 func (a *Client) SetGitHubAssignees(number int, logins []string) error {
+	// An empty list unassigns everyone; GitHub refuses null with 422.
+	if logins == nil {
+		logins = []string{}
+	}
+
 	return a.github.Do("PATCH", a.ghPath(number), map[string][]string{"assignees": logins}, nil)
 }
 

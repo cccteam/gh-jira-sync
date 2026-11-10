@@ -322,12 +322,15 @@ func TestAssigneeAPIRequests(t *testing.T) {
 	eq(t, string(canonical(srv.bodies[1], false)), `{"accountId":"acct-alice"}`)
 	eq(t, string(canonical(srv.bodies[2], false)), `{"accountId":null}`)
 	eq(t, string(canonical(srv.bodies[3], false)), `{"assignees":["carol","alice"]}`)
+	// Unassigning everyone sends an empty list: GitHub refuses null with 422.
+	must(t, api.SetGitHubAssignees(1, nil))
+	eq(t, string(canonical(srv.bodies[4], false)), `{"assignees":[]}`)
 
 	// Without assignee_map a new issue gets no assignee field.
 	api.c = testConfig(t, nil)
 	_, err = api.CreateIssue(&source, "")
 	must(t, err)
-	if _, set := asObject(srv.bodies[4]["fields"])["assignee"]; set {
+	if _, set := asObject(srv.bodies[5]["fields"])["assignee"]; set {
 		t.Fatal("assignee set with assignee sync off")
 	}
 }

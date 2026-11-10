@@ -167,8 +167,11 @@ func applyAssignee(c *Config, s *State, api API, e *Entry, save func(*State) err
 		err = api.SetJiraAssignee(e.pair.JiraID, e.assignee)
 	}
 	if status, refused := refusedStatus(err); refused && itemRejections[status] {
-		e.Outcome, e.Reason = OutcomeRejected, "Assignee change rejected with HTTP "+strconv.Itoa(status)+
-			"; check that "+e.Assignee+" can be assigned issues there. Retried next run"
+		hint := "; check that " + e.Assignee + " can be assigned issues there"
+		if e.assignee == "" {
+			hint = "; check that the issue can be left unassigned"
+		}
+		e.Outcome, e.Reason = OutcomeRejected, "Assignee change rejected with HTTP "+strconv.Itoa(status)+hint+". Retried next run"
 
 		return nil
 	}
