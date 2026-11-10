@@ -600,20 +600,32 @@ func TestTrailingMarkerIdentifiesOnlyRealCopies(t *testing.T) {
 	eq(t, hasMarker(Comment{Side: SideJira, Body: doc}, strings.Repeat("b", 64)), false)
 }
 
-func TestPrewriteSourceChangeAborts(t *testing.T) {
+func TestPrewriteSourceChangeRetries(t *testing.T) {
 	t.Parallel()
 	x := newSyncer(t)
 	s := x.linked()
 	x.api.rows["github"] = []Comment{ghComment(11, "original")}
 	entries, _ := Plan(x.c, s, x.api, time.Now())
 	x.api.rows["github"][0].Body = "changed"
-	if _, err := Apply(x.c, s, x.api, entries, func(*State) error { return nil }); err == nil {
-		t.Fatal("expected abort")
-	}
+	_, err := Apply(x.c, s, x.api, entries, func(*State) error { return nil })
+	wantRetry(t, entries, err, "Source comment changed")
 	eq(t, len(x.api.writes), 1)
 }
 
-func TestPrewriteCopyChangeAbortsEdit(t *testing.T) {
+// Regression: one stale entry stopped every entry after it, failing the whole run.
+func TestStaleEntryDoesNotStopLaterEntries(t *testing.T) {
+	t.Parallel()
+	x := newSyncer(t)
+	s := x.linked()
+	x.api.rows["github"] = []Comment{ghComment(11, "first"), ghComment(12, "second")}
+	entries, _ := Plan(x.c, s, x.api, time.Now())
+	x.api.rows["github"][0].Body = "changed"
+	_, err := Apply(x.c, s, x.api, entries, func(*State) error { return nil })
+	wantRetry(t, entries, err, "Source comment changed")
+	eq(t, len(x.api.writes), 2)
+}
+
+func TestPrewriteCopyChangeRetriesEdit(t *testing.T) {
 	t.Parallel()
 	x := newSyncer(t)
 	s := x.linked()
@@ -622,9 +634,8 @@ func TestPrewriteCopyChangeAbortsEdit(t *testing.T) {
 	x.api.rows["github"][0].Body = "changed"
 	entries, _ := Plan(x.c, s, x.api, time.Now())
 	x.api.rows["jira"][0].Body = toADF("human changed copy")
-	if _, err := Apply(x.c, s, x.api, entries, func(*State) error { return nil }); err == nil {
-		t.Fatal("expected abort")
-	}
+	_, err := Apply(x.c, s, x.api, entries, func(*State) error { return nil })
+	wantRetry(t, entries, err, "Comment changed")
 	eq(t, len(x.api.writes), 2)
 }
 

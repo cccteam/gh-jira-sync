@@ -166,3 +166,42 @@ func TestMarkdownOutputIsValidADF(t *testing.T) {
 		validADF(t, d, "")
 	}
 }
+
+func TestADFTextRendersJiraOnlyNodes(t *testing.T) {
+	t.Parallel()
+	para := func(content ...any) Object { return Object{"type": "paragraph", "content": content} }
+	text := func(s string) Object { return Object{"type": "text", "text": s} }
+	tests := []struct {
+		name string
+		node Object
+		want string
+	}{
+		{"smart link", para(Object{"type": "inlineCard", "attrs": Object{"url": "https://acme.atlassian.net/browse/ENG-1"}}), "https://acme.atlassian.net/browse/ENG-1"},
+		{"block card", Object{"type": "blockCard", "attrs": Object{"url": "https://example.com/doc"}}, "https://example.com/doc"},
+		{"status", para(text("State: "), Object{"type": "status", "attrs": Object{"text": "IN REVIEW"}}), "State: [IN REVIEW]"},
+		{"date", para(Object{"type": "date", "attrs": Object{"timestamp": "1762732800000"}}), "2025-11-10"},
+		{"panel", Object{"type": "panel", "content": []any{para(text("Heads up"))}}, "Heads up"},
+		{"expand", Object{"type": "expand", "attrs": Object{"title": "Details"}, "content": []any{para(text("More"))}}, "Details\nMore"},
+		{"task list", Object{"type": "taskList", "content": []any{
+			Object{"type": "taskItem", "attrs": Object{"state": "DONE"}, "content": []any{text("Ship")}},
+			Object{"type": "taskItem", "attrs": Object{"state": "TODO"}, "content": []any{text("Test")}},
+		}}, "[x] Ship\n[ ] Test"},
+		{"decision", Object{"type": "decisionList", "content": []any{
+			Object{"type": "decisionItem", "content": []any{text("Use Go")}},
+		}}, "- Use Go"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := adfText(Object{"type": "doc", "version": 1, "content": []any{tt.node}})
+			must(t, err)
+			eq(t, got, tt.want)
+		})
+	}
+}
+
+func TestADFTextNamesUnsupportedNode(t *testing.T) {
+	t.Parallel()
+	_, err := adfText(Object{"type": "doc", "version": 1, "content": []any{Object{"type": "mediaSingle"}}})
+	eq(t, err.Error(), "Unsupported Jira comment content (mediaSingle); copy manually")
+}

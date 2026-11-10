@@ -460,7 +460,11 @@ func (p *pairPlanner) planPair(n string, pair Pair, source *GitHubIssue) ([]*Ent
 		}
 	}
 	if p.c.SyncParents {
-		if parentEntry := planParent(p.c, p.s, pair, source, jira, p.ghParents); parentEntry != nil {
+		parentEntry := planParent(p.c, p.s, pair, source, jira, p.ghParents)
+		if err := pauseForUnlinkedGitHubParent(p.api, parentEntry); err != nil {
+			return nil, err
+		}
+		if parentEntry != nil {
 			entries = append(entries, parentEntry)
 		}
 	}
@@ -1113,7 +1117,13 @@ func Apply(c *Config, state *State, api API, entries []*Entry, save func(*State)
 		if e.Kind.passive() {
 			continue
 		}
-		if err := applyEntry(c, s, api, e, save); err != nil {
+		err := applyEntry(c, s, api, e, save)
+		if isRerun(err) {
+			e.Outcome, e.Reason = OutcomeRetry, err.Error()
+
+			continue
+		}
+		if err != nil {
 			return s, fmt.Errorf("%s: %w", e.subject(), err)
 		}
 	}
@@ -1222,7 +1232,7 @@ func applyStatus(c *Config, s *State, api API, e *Entry, save func(*State) error
 		jira, err := api.JiraIssue(e.pair.JiraID)
 		if err != nil || source == nil || jira == nil {
 			if err == nil {
-				err = syncErr("Linked issue vanished after plan; rerun")
+				err = rerunErr("Linked issue vanished after plan; retried next run")
 			}
 
 			return nil, nil, err
@@ -1239,7 +1249,7 @@ func applyStatus(c *Config, s *State, api API, e *Entry, save func(*State) error
 		return alreadyDone(s, e, save, func() { setAgreedStatus(s, e.GitHub, e.closed) })
 	}
 	if source.closed() != e.issue.closed() || jira.done() != e.jira.done() {
-		return syncErr("Issue status changed after plan; rerun")
+		return rerunErr("Issue status changed after plan; retried next run")
 	}
 	if e.Destination == SideGitHub {
 		err = api.SetGitHubState(e.GitHub, e.closed)
@@ -1331,7 +1341,7 @@ func applyProjectStatus(c *Config, s *State, api API, e *Entry, save func(*State
 		}
 		jira, err := api.JiraIssue(e.pair.JiraID)
 		if err == nil && jira == nil {
-			err = syncErr("Linked Jira issue vanished after plan; rerun")
+			err = rerunErr("Linked Jira issue vanished after plan; retried next run")
 		}
 		if err != nil {
 			return now, err
@@ -1363,7 +1373,7 @@ func applyProjectStatus(c *Config, s *State, api API, e *Entry, save func(*State
 		return nil
 	}
 	if now.item.OptionID != e.item.OptionID || now.jira.Fields.Status.Name != e.jira.Fields.Status.Name {
-		if err := unlessEcho(now.jira.Fields.Status.Name, syncErr("Project or Jira status changed after plan; rerun")); err != nil {
+		if err := unlessEcho(now.jira.Fields.Status.Name, rerunErr("Project or Jira status changed after plan; retried next run")); err != nil {
 			return err
 		}
 	}
@@ -1433,7 +1443,7 @@ func createJira(s *State, api API, e *Entry, source *GitHubIssue, record Operati
 			return nil, false, err
 		}
 		if parent != e.ghParent {
-			return nil, false, syncErr("GitHub parent changed after plan; rerun")
+			return nil, false, rerunErr("GitHub parent changed after plan; retried next run")
 		}
 	}
 	s.Operations[e.Operation] = record
@@ -1457,7 +1467,7 @@ func applyIssue(s *State, api API, e *Entry, save func(*State) error) error {
 		return err
 	}
 	if !source.sameContent(e.issue) {
-		return syncErr("GitHub issue changed after plan; rerun")
+		return rerunErr("GitHub issue changed after plan; retried next run")
 	}
 	record := Operation{
 		Kind: OpIssue, SourceID: source.idString(), GitHub: e.GitHub, Status: StatusPending,
@@ -1503,14 +1513,14 @@ func applyNewComment(s *State, api API, e *Entry, save func(*State) error) error
 		return save(s)
 	}
 	if len(copies) > 0 {
-		return syncErr("Comment copy appeared after plan; rerun")
+		return rerunErr("Comment copy appeared after plan; retried next run")
 	}
 	source, err := api.Comment(e.Source, e.pair, e.CommentID)
 	if err != nil {
 		return err
 	}
 	if !source.sameAs(e.comment) {
-		return syncErr("Source comment changed after plan; rerun")
+		return rerunErr("Source comment changed after plan; retried next run")
 	}
 	record := Operation{
 		Kind: commentOp(e.Source), SourceID: e.CommentID, GitHub: e.GitHub, Status: StatusPending,
@@ -1562,7 +1572,7 @@ func applyLinked(s *State, api API, e *Entry, save func(*State) error) error {
 	}
 	for _, side := range sides {
 		if !raw[side].sameAs(e.raw[side]) {
-			return syncErr("Comment changed after plan; rerun")
+			return rerunErr("Comment changed after plan; retried next run")
 		}
 	}
 	if e.Kind == KindEditComment {
@@ -1611,8 +1621,9 @@ func isSyncError(err error) bool {
 }
 
 // gitHubParents maps each linked issue to its linked GitHub parent. Only linked
-// issues with sub-issues are asked for their children, one request each. A parent
-// that is not linked counts as no parent: it has no Jira issue to point at yet.
+// issues with sub-issues are asked for their children, one request each, so a parent
+// that is not linked is missing here; pauseForUnlinkedGitHubParent checks for one
+// before a missing parent is copied to Jira.
 func gitHubParents(s *State, api API, issues map[string]*GitHubIssue) (map[int]int, error) {
 	parents := map[int]int{}
 	for _, n := range sortedKeys(s.Pairs) {
@@ -1632,6 +1643,24 @@ func gitHubParents(s *State, api API, issues map[string]*GitHubIssue) (map[int]i
 	}
 
 	return parents, nil
+}
+
+// pauseForUnlinkedGitHubParent defers a planned removal of the Jira parent when the
+// GitHub issue does have a parent, just not a linked one yet. Removing it would drop
+// the Jira hierarchy for an issue that was only moved under a parent not synced yet;
+// once that parent is linked, the move is planned like any other.
+func pauseForUnlinkedGitHubParent(api API, e *Entry) error {
+	if e == nil || e.Kind != KindSyncParent || e.Destination != SideJira || e.parent != 0 {
+		return nil
+	}
+	parent, err := api.GitHubParent(e.GitHub)
+	if err != nil || parent == 0 {
+		return err
+	}
+	e.Kind, e.Destination, e.Parent = KindDeferred, "", ""
+	e.Reason = "Waiting for GitHub parent #" + strconv.Itoa(parent) + " to be linked to Jira before moving the Jira parent"
+
+	return nil
 }
 
 func parentName(number int) string {
@@ -1731,13 +1760,13 @@ func applyParent(s *State, api API, e *Entry, save func(*State) error) error {
 			return 0, 0, err
 		}
 		if jira == nil {
-			return 0, 0, syncErr("Linked Jira issue vanished after plan; rerun")
+			return 0, 0, rerunErr("Linked Jira issue vanished after plan; retried next run")
 		}
 		jr := 0
 		if p := jira.Fields.Parent; p != nil {
 			number, linked := linkedNumber(s, p.Key)
 			if !linked {
-				return 0, 0, syncErr("Jira parent changed to an unlinked issue after plan; rerun")
+				return 0, 0, rerunErr("Jira parent changed to an unlinked issue after plan; retried next run")
 			}
 			jr = number
 		}
@@ -1752,7 +1781,7 @@ func applyParent(s *State, api API, e *Entry, save func(*State) error) error {
 		return alreadyDone(s, e, save, func() { setAgreedParent(s, e.GitHub, e.parent) })
 	}
 	if gh != e.ghParent || jr != e.jiraParent {
-		return syncErr("Parent changed after plan; rerun")
+		return rerunErr("Parent changed after plan; retried next run")
 	}
 	if e.Destination == SideGitHub {
 		err = api.SetGitHubParent(e.issue.ID, e.parent, gh)
@@ -1777,7 +1806,7 @@ func applyParent(s *State, api API, e *Entry, save func(*State) error) error {
 		return err
 	}
 	if gh != e.parent || jr != e.parent {
-		return syncErr("Parent change not confirmed; GitHub has %s, Jira has %s", parentName(gh), parentName(jr))
+		return rerunErr("Parent change not confirmed; GitHub has %s, Jira has %s; retried next run", parentName(gh), parentName(jr))
 	}
 	setAgreedParent(s, e.GitHub, e.parent)
 
@@ -1905,7 +1934,7 @@ func createGitHub(s *State, api API, e *Entry, record Operation, save func(*Stat
 	}
 	if current == nil || current.Fields.Summary != e.jira.Fields.Summary ||
 		!sameJSON(current.Fields.Description, e.jira.Fields.Description) {
-		return nil, false, syncErr("Jira issue changed after plan; rerun")
+		return nil, false, rerunErr("Jira issue changed after plan; retried next run")
 	}
 	s.Operations[e.Operation] = record
 	if err := save(s); err != nil { // Never dispatch creation without a durable intent.

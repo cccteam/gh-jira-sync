@@ -4,6 +4,7 @@ import (
 	"maps"
 	"slices"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -297,6 +298,20 @@ func kinds(entries []*Entry) []Kind {
 		out[i] = e.Kind
 	}
 	return out
+}
+
+// wantRetry checks that apply skipped a stale entry for the next run instead of failing.
+func wantRetry(t *testing.T, entries []*Entry, err error, reason string) {
+	t.Helper()
+	if err != nil {
+		t.Fatalf("stale entry failed the run: %v", err)
+	}
+	for _, e := range entries {
+		if e.Outcome == OutcomeRetry && strings.Contains(e.Reason, reason) {
+			return
+		}
+	}
+	t.Fatalf("no entry retried for %q", reason)
 }
 
 // must fails the test on an unexpected error.

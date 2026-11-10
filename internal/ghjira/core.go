@@ -5,6 +5,7 @@ package ghjira
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,12 +21,29 @@ import (
 )
 
 // SyncError is an expected, reportable failure; its message is shown verbatim.
-type SyncError struct{ Msg string }
+type SyncError struct {
+	Msg string
+	// rerun marks an entry that went stale between plan and apply before anything was
+	// recorded for it: apply skips the entry, and the next run plans it again.
+	rerun bool
+}
 
 func (e *SyncError) Error() string { return e.Msg }
 
 func syncErr(format string, args ...any) error {
 	return &SyncError{Msg: fmt.Sprintf(format, args...)}
+}
+
+// rerunErr is a SyncError that fails only its own entry; see SyncError.rerun.
+func rerunErr(format string, args ...any) error {
+	return &SyncError{Msg: fmt.Sprintf(format, args...), rerun: true}
+}
+
+// isRerun reports an error that should skip its entry rather than stop the run.
+func isRerun(err error) bool {
+	var s *SyncError
+
+	return errors.As(err, &s) && s.rerun
 }
 
 // HTTPStatusError is a non-2xx answer. Response bodies can contain issue text or
@@ -719,6 +737,8 @@ var plainMarks = map[string]bool{
 var blockSeparators = map[string]string{
 	"doc": "\n", "paragraph": "", "heading": "", "blockquote": "\n",
 	"codeBlock": "", "bulletList": "\n", "orderedList": "\n", "listItem": "\n",
+	"panel": "\n", "expand": "\n", "nestedExpand": "\n",
+	"taskList": "\n", "taskItem": "", "decisionList": "\n", "decisionItem": "",
 }
 
 // tableSeparators add the table nodes markdownADF writes into descriptions. Comments
@@ -791,16 +811,18 @@ func renderADF(node Object, separators map[string]string) (string, error) {
 		}
 
 		return "[emoji]", nil
+	case "inlineCard", "blockCard", "embedCard", "status", "date":
+		return renderInlineNode(t, asObject(node["attrs"]))
 	}
 	separator, block := separators[t]
 	if !block {
-		return "", syncErr("Unsupported Jira comment content; copy manually")
+		return "", unsupportedContent(t)
 	}
 	var parts []string
 	for _, child := range list(node["content"]) {
 		c, ok := child.(Object)
 		if !ok {
-			return "", syncErr("Unsupported Jira comment content; copy manually")
+			return "", unsupportedContent("")
 		}
 		part, err := renderADF(c, separators)
 		if err != nil {
@@ -808,12 +830,56 @@ func renderADF(node Object, separators map[string]string) (string, error) {
 		}
 		parts = append(parts, part)
 	}
-	text := strings.Join(parts, separator)
-	if t == "listItem" {
-		return "- " + text, nil
+
+	return decorateBlock(t, asObject(node["attrs"]), strings.Join(parts, separator)), nil
+}
+
+// decorateBlock adds the marker a block shows in plain text: a list bullet, a task
+// checkbox, or an expand's title.
+func decorateBlock(t string, attrs Object, text string) string {
+	switch t {
+	case "listItem", "decisionItem":
+		return "- " + text
+	case "taskItem":
+		if attrs["state"] == "DONE" {
+			return "[x] " + text
+		}
+
+		return "[ ] " + text
+	case "expand", "nestedExpand":
+		if title, _ := attrs["title"].(string); title != "" {
+			return title + "\n" + text
+		}
 	}
 
-	return text, nil
+	return text
+}
+
+// renderInlineNode renders Jira smart links, status lozenges, and dates as text.
+// Media stays unsupported: an attachment cannot be copied without losing it.
+func renderInlineNode(t string, attrs Object) (string, error) {
+	switch t {
+	case "inlineCard", "blockCard", "embedCard":
+		if link, ok := attrs["url"].(string); ok && link != "" {
+			return link, nil
+		}
+	case "status":
+		if text, ok := attrs["text"].(string); ok {
+			return "[" + text + "]", nil
+		}
+	case "date":
+		stamp, _ := attrs["timestamp"].(string)
+		if ms, err := strconv.ParseInt(stamp, 10, 64); err == nil {
+			return time.UnixMilli(ms).UTC().Format(time.DateOnly), nil
+		}
+	}
+
+	return "", unsupportedContent(t)
+}
+
+// unsupportedContent names the ADF node type, so the report says what to support next.
+func unsupportedContent(t string) error {
+	return syncErr("Unsupported Jira comment content (%s); copy manually", cmp.Or(t, "unknown"))
 }
 
 // issueDescription is the Jira description: a link back, then the GitHub body as written.

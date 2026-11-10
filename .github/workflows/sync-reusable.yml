@@ -32,6 +32,12 @@ on:
           apply; other planned writes run too.
         type: string
         default: ''
+      fail-on-review:
+        description: >-
+          Fail the run when report entries need review (exit code 2). Set false to pass
+          such runs with a warning; the job summary still lists every entry to review.
+        type: boolean
+        default: true
       version:
         description: >-
           Release of gh-jira-sync to run. Defaults to the release this workflow file
@@ -210,6 +216,7 @@ jobs:
           JIRA_CLIENT_SECRET: ${{ secrets.jira-client-secret }}
           APPLY: ${{ inputs.apply }}
           INITIALIZE: ${{ inputs.initialize }}
+          FAIL_ON_REVIEW: ${{ inputs.fail-on-review }}
           ACKNOWLEDGE: ${{ inputs.acknowledge }}
           CONFIG: ${{ inputs.config }}
           BRANCH: ${{ inputs.state-branch }}
@@ -227,17 +234,31 @@ jobs:
             args+=(--acknowledge "$op")
           done
           set +f
-          "$RUNNER_TEMP/gh-jira-sync" "${args[@]}"
+          code=0
+          "$RUNNER_TEMP/gh-jira-sync" "${args[@]}" || code=$?
+          if [ "$code" = 2 ] && [ "$FAIL_ON_REVIEW" != true ]; then
+            echo "::warning::Some sync entries need review; see the job summary"
+            exit 0
+          fi
+          exit "$code"
       - name: Show report
         if: always()
         env:
           BRANCH: ${{ inputs.state-branch }}
+          CONFIG: ${{ inputs.config }}
         run: |
-          if [ -f "$RUNNER_TEMP/sync-report.json" ]; then
+          report="$RUNNER_TEMP/sync-report.json"
+          if [ -f "$report" ]; then
             {
-              echo "### gh-jira-sync: $BRANCH"
+              "$RUNNER_TEMP/gh-jira-sync" -config "$CONFIG" -summarize "$report" ||
+                echo "### gh-jira-sync: could not summarize the report"
+              echo
+              echo "<details><summary>Full report ($BRANCH)</summary>"
+              echo
               echo '```json'
-              cat "$RUNNER_TEMP/sync-report.json"
+              cat "$report"
               echo '```'
+              echo
+              echo '</details>'
             } >> "$GITHUB_STEP_SUMMARY"
           fi

@@ -250,7 +250,7 @@ func applyContent(c *Config, s *State, api API, e *Entry, save func(*State) erro
 			return fieldValues{}, err
 		}
 		if source == nil || jira == nil || source.idString() != e.pair.GitHubID {
-			return fieldValues{}, syncErr("Linked issue vanished after plan; rerun")
+			return fieldValues{}, rerunErr("Linked issue vanished after plan; retried next run")
 		}
 
 		return readValues(c, e.content.origin, e.Field, e.pair, source, jira), nil
@@ -260,7 +260,7 @@ func applyContent(c *Config, s *State, api API, e *Entry, save func(*State) erro
 		return err
 	}
 	if !sameJSON(now.original, e.content.original) || !sameJSON(now.copy, e.content.copy) {
-		return syncErr("Issue %s changed after plan; rerun", e.Field)
+		return rerunErr("Issue %s changed after plan; retried next run", e.Field)
 	}
 	name := fieldName(e.Destination, e.Field)
 	if e.Destination == SideGitHub {

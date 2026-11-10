@@ -172,6 +172,35 @@ func TestParentsAgreeThenGitHubSubIssueMovesJira(t *testing.T) {
 	}
 }
 
+// Regression: moving a sub-issue under a GitHub parent that is not linked read as
+// "no parent", so the run tried to remove the Jira parent.
+func TestUnlinkedGitHubParentWaitsInsteadOfRemovingJiraParent(t *testing.T) {
+	t.Parallel()
+	x, w, s := newParentWorld(t)
+	w.ghParent[2] = 1
+	w.setJiraParent(2, "ENG-1")
+	s, _ = w.ok(t, x, s)
+	eq(t, agreedParent(s, 2), "#1")
+
+	w.ghParent[2] = 9 // #9 exists on GitHub but is not linked to Jira
+	writes := len(w.writes)
+	s, entries := w.ok(t, x, s)
+	e := parentEntry(entries, 2)
+	eq(t, []any{e.Kind, e.Reason}, []any{KindDeferred, "Waiting for GitHub parent #9 to be linked to Jira before moving the Jira parent"})
+	eq(t, len(w.writes), writes)
+	eq(t, agreedParent(s, 2), "#1")
+
+	// Once #9 is linked, the move reaches Jira like any other.
+	w.issues[9] = &GitHubIssue{ID: 109, Number: 9, Title: "issue", State: "open", RepositoryURL: "https://api.github.com/repos/acme/test"}
+	j := &JiraIssue{ID: "309", Key: "ENG-9"}
+	j.Fields.Project.Key = "ENG"
+	w.jira[j.ID] = j
+	s.Pairs["9"] = Pair{GitHub: 9, GitHubID: "109", JiraID: j.ID, JiraKey: j.Key}
+	s, _ = w.ok(t, x, s)
+	eq(t, lastWrite(w.fakeAPI), write{"jira parent", "ENG-9"})
+	eq(t, agreedParent(s, 2), "#9")
+}
+
 func TestJiraParentChangesMoveGitHub(t *testing.T) {
 	t.Parallel()
 	x, w, s := newParentWorld(t)

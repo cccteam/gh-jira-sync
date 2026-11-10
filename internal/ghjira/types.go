@@ -205,6 +205,9 @@ const (
 	// OutcomeAlreadyDone means the planned status change was already in place when apply
 	// re-checked, so nothing was written and the agreement was recorded.
 	OutcomeAlreadyDone Outcome = "already_done"
+	// OutcomeRetry means the entry went stale before apply wrote it; Reason says why,
+	// and the next run plans it again.
+	OutcomeRetry Outcome = "retry"
 )
 
 // GitHubIssue is the part of a GitHub issue the sync reads.

@@ -84,6 +84,7 @@ Run again after creating issues to copy their comments. Linux and macOS only.
 | `--state` | `.sync-state/state.json` | Local state file |
 | `--report` | `sync-report.json` | Report file |
 | `--acknowledge OPERATION` | none | Silence a reviewed `blocked` or `unavailable` entry (repeatable; saved only with `--apply`) |
+| `--summarize FILE` | none | Print a Markdown summary of a report file, linking issues from `--config`, and exit |
 | `--version` | | Print the release and exit |
 
 ## GitHub Actions
@@ -130,6 +131,7 @@ pin current. Releases v0.1.1 and later carry binaries; v0.1.0 does not.
 | `apply` | `false` | Perform writes |
 | `initialize` | `false` | Allow creating new state (first run only) |
 | `acknowledge` | empty | Report operation IDs to [acknowledge](#the-report), separated by spaces or commas; saved only with `apply` |
+| `fail-on-review` | `true` | Fail the run when entries need review (exit code 2); `false` passes it with a warning |
 | `version` | the pinned release | Release to run; leave unset |
 | `tool-ref` | empty | Build from this ref instead, to test unreleased commits |
 | `app-client-id` | empty | GitHub App that supplies the GitHub tokens |
@@ -364,7 +366,9 @@ Each entry has a `kind`. Writes are `create_issue`, `create_github_issue`,
 `create_comment`, `edit_comment`, `sync_status`, `add_to_project`,
 `sync_project_status`, `sync_parent`, and `sync_content` (with `field` set to `title`
 or `description`); an `outcome` of `rejected` means the service
-refused it and it is retried next run. The kinds that need a person are:
+refused it and it is retried next run, and an `outcome` of `retry` means one side
+changed while the run was writing, so the entry was skipped and is planned again next
+run. The kinds that need a person are:
 
 | Kind | Meaning |
 | --- | --- |
@@ -385,8 +389,12 @@ with **apply** and the operation IDs in **acknowledge** (pass the reusable workf
 `acknowledge` input through, as in the example above). An ID that no longer matches a
 blocked or unavailable entry fails the run without writing.
 
-Exit codes: `0` success (including deferred writes), `2` something needs review,
-`1` configuration, API, or persistence error.
+Exit codes: `0` success (including deferred writes and `retry` outcomes), `2`
+something needs review, `1` configuration, API, or persistence error.
+
+In Actions, the job summary shows the report as tables: what needs review (with the
+operation IDs to acknowledge), what will be retried or was rejected, the changes made,
+and what was deferred, with the full JSON report collapsed below.
 
 ## Safety and recovery
 

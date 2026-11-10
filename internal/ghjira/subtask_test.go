@@ -145,7 +145,7 @@ func TestSubtaskModeOffKeepsStandardType(t *testing.T) {
 	eq(t, []any{w.created[4], w.types[4], agreedParent(s, 4)}, []any{"", "10001", "none"})
 }
 
-func TestParentChangedBeforeCreationAborts(t *testing.T) {
+func TestParentChangedBeforeCreationRetries(t *testing.T) {
 	t.Parallel()
 	x, w, s := newSubtaskWorld(t)
 	x.c.Comments = false
@@ -156,9 +156,8 @@ func TestParentChangedBeforeCreationAborts(t *testing.T) {
 		t.Fatal(err)
 	}
 	w.ghParent[4] = 1
-	if _, err := Apply(x.c, s, w, entries, x.save); err == nil || !strings.Contains(err.Error(), "parent changed") {
-		t.Fatalf("expected abort, got %v", err)
-	}
+	_, err = Apply(x.c, s, w, entries, x.save)
+	wantRetry(t, entries, err, "parent changed")
 	_, created := w.created[4]
 	eq(t, created, false)
 }

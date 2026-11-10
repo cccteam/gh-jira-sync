@@ -326,7 +326,7 @@ func TestMappedOptionMissingFromProjectFailsRun(t *testing.T) {
 	}
 }
 
-func TestProjectStatusChangedAfterPlanAborts(t *testing.T) {
+func TestProjectStatusChangedAfterPlanRetries(t *testing.T) {
 	t.Parallel()
 	x := projectSyncer(t)
 	s := projectInSync(t, x)
@@ -337,9 +337,8 @@ func TestProjectStatusChangedAfterPlanAborts(t *testing.T) {
 	}
 	x.setOption("Done")
 	writes := len(x.api.writes)
-	if _, err := Apply(x.c, s, x.api, entries, x.save); err == nil {
-		t.Fatal("expected abort")
-	}
+	_, err = Apply(x.c, s, x.api, entries, x.save)
+	wantRetry(t, entries, err, "status changed")
 	eq(t, len(x.api.writes), writes)
 }
 
