@@ -261,8 +261,7 @@ func TestProjectDisagreementWithoutAgreementUsesLatest(t *testing.T) {
 	s.Pairs["1"] = pair
 	x.setOption("In Progress")
 	x.setUpdated("2026-11-04T10:00:00Z")
-	// Jira's status never changed, so its creation time stands in.
-	x.api.jira.Fields.Created = "2026-11-01T09:00:00.000+0000"
+	x.api.jiraChanged = "2026-11-01T09:00:00.000+0000"
 	s, entries := x.ok(s)
 	e := projectEntry(t, x, entries)
 	if !strings.Contains(e.Reason, "no agreed status recorded; the project changed last") {
@@ -270,6 +269,49 @@ func TestProjectDisagreementWithoutAgreementUsesLatest(t *testing.T) {
 	}
 	eq(t, x.api.jira.Fields.Status.Name, "In Progress")
 	eq(t, agreedOption(s), "In Progress")
+}
+
+// A Jira issue just created from GitHub sits in its workflow's initial status, and its
+// creation is newer than any card move. That status was never chosen, so the card's
+// option is carried to Jira instead of the card being moved back.
+func TestNewJiraIssueFollowsProjectStatus(t *testing.T) {
+	t.Parallel()
+	x := projectSyncer(t)
+	s := projectInSync(t, x)
+	pair := s.Pairs["1"]
+	pair.ProjectStatus = nil
+	s.Pairs["1"] = pair
+	x.setOption("In Progress")
+	x.setUpdated("2026-11-04T10:00:00Z")
+	x.api.jira.Fields.Created = "2026-11-10T18:30:00.000+0000"
+	x.api.jiraChanged = ""
+	s, entries := x.ok(s)
+	e := projectEntry(t, x, entries)
+	eq(t, []any{e.Kind, e.Destination, e.Status}, []any{KindSyncProjectStatus, SideJira, "In Progress"})
+	if !strings.Contains(e.Reason, "Jira's status has not changed since the issue was created, so Jira follows") {
+		t.Fatalf("reason: %s", e.Reason)
+	}
+	eq(t, x.api.project.optionName(x.api.project.Items[42].OptionID), "In Progress")
+	eq(t, x.api.jira.Fields.Status.Name, "In Progress")
+	eq(t, agreedOption(s), "In Progress")
+	_, entries = x.ok(s)
+	if projectEntry(t, x, entries) != nil {
+		t.Fatal("status planned again")
+	}
+}
+
+// Once both sides have agreed, a Jira status that never changed in the changelog still
+// settles by time, as before.
+func TestUnchangedJiraStatusWithAgreementUsesLatest(t *testing.T) {
+	t.Parallel()
+	x, s := conflictSyncer(t, "2026-11-04T10:00:00Z", "")
+	x.api.jira.Fields.Created = "2026-11-04T10:05:00.000+0000"
+	_, entries := x.ok(s)
+	e := projectEntry(t, x, entries)
+	eq(t, []any{e.Destination, e.Status}, []any{SideProject, "Done"})
+	if !strings.Contains(e.Reason, "Jira changed last") {
+		t.Fatalf("reason: %s", e.Reason)
+	}
 }
 
 func TestProjectConflictJiraWinsReopensGitHub(t *testing.T) {
