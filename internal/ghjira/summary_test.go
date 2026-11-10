@@ -69,13 +69,19 @@ func TestSummarizeReadsReportAndConfig(t *testing.T) {
 		"repository": "acme/test", "jira_url": "https://acme.atlassian.net",
 		"jira_project": "ENG", "jira_default_issue_type": "10001",
 	}), 0o600))
-	must(t, os.WriteFile(reportPath, []byte(`{"mode":"dry-run","exit_code":0,"entries":[{"github":3,"kind":"create_issue","operation":"x"}]}`), 0o600))
+	must(t, os.WriteFile(reportPath, []byte(`{"mode":"dry-run","exit_code":0,"entries":[{"github":3,"kind":"create_issue","operation":"x"},`+
+		`{"github":4,"kind":"sync_project_status","destination":"project","status":"Ready","operation":"y"}]}`), 0o600))
 	var out bytes.Buffer
 	if code := mainWith([]string{"-config", configPath, "-summarize", reportPath}, &out, nil); code != 0 {
 		t.Fatalf("exit %d", code)
 	}
 	got := out.String()
-	for _, want := range []string{"✅ In sync", "<summary>Planned changes (dry run) (1)</summary>", "| [#3](https://github.com/acme/test/issues/3) | Create Jira issue |"} {
+	// Regression: a report naming the project as a destination could not be read back.
+	for _, want := range []string{
+		"✅ In sync", "<summary>Planned changes (dry run) (2)</summary>",
+		"| [#3](https://github.com/acme/test/issues/3) | Create Jira issue |",
+		"| [#4](https://github.com/acme/test/issues/4) | Set project status to Ready |",
+	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("summary is missing %q:\n%s", want, got)
 		}

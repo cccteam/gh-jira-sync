@@ -31,6 +31,17 @@ var changeNames = map[Kind]string{
 	KindSyncContent:       "Update",
 }
 
+// reportFile is a report as written. Sides are plain strings here because a report
+// may name SideProject, which Side's decoding rejects to keep it out of state.
+type reportFile struct {
+	report
+	Entries []struct {
+		*Entry
+		Source      string `json:"source,omitempty"`
+		Destination string `json:"destination,omitempty"`
+	} `json:"entries"`
+}
+
 // summaryLinks builds links to issues from the deployment's config.
 type summaryLinks struct{ github, jira string }
 
@@ -62,9 +73,14 @@ func Summarize(configPath, reportPath string, out io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("read report: %w", err)
 	}
-	var rep report
-	if err := json.Unmarshal(raw, &rep); err != nil {
+	var file reportFile
+	if err := json.Unmarshal(raw, &file); err != nil {
 		return fmt.Errorf("parse report: %w", err)
+	}
+	rep := file.report
+	for _, row := range file.Entries {
+		row.Entry.Source, row.Entry.Destination = Side(row.Source), Side(row.Destination)
+		rep.Entries = append(rep.Entries, row.Entry)
 	}
 	web := strings.TrimSuffix(c.GitHubURL, "/api/v3")
 	if web == "https://api.github.com" {
