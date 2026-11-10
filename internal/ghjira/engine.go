@@ -35,6 +35,7 @@ type Entry struct {
 	Parent            string  `json:"parent,omitempty"`     // target parent, "#<number>" or "none", for parent entries
 	JiraKey           string  `json:"jira_key,omitempty"`   // Jira issue for create_github_issue and link_github_issue
 	Field             string  `json:"field,omitempty"`      // "title" or "description" for content entries
+	Assignee          string  `json:"assignee,omitempty"`   // target assignee, "@<login>" or "nobody", for assignee entries
 
 	issue       *GitHubIssue     // source issue as planned
 	comment     Comment          // source comment as planned
@@ -65,6 +66,9 @@ type Entry struct {
 	issueType   string       // GitHub issue type for a created issue
 	found       *GitHubIssue // GitHub issue a pending creation already made
 	content     fieldValues  // a content entry's field on both sides, as planned
+	assignee    string       // Jira account ID to apply or record ("" for nobody)
+	ghAccounts  []string     // mapped GitHub assignees as planned, as Jira account IDs
+	jiraAccount string       // Jira assignee as planned ("" for nobody)
 }
 
 func (e *Entry) block(reason string) { e.Kind, e.Reason = KindBlocked, reason }
@@ -466,6 +470,15 @@ func (p *pairPlanner) planPair(n string, pair Pair, source *GitHubIssue) ([]*Ent
 		}
 		if parentEntry != nil {
 			entries = append(entries, parentEntry)
+		}
+	}
+	if p.c.AssigneeMap != nil {
+		assigneeEntry, err := planAssignee(p.c, p.s, p.api, pair, source, jira)
+		if err != nil {
+			return nil, err
+		}
+		if assigneeEntry != nil {
+			entries = append(entries, assigneeEntry)
 		}
 	}
 	if p.c.SyncContent {
@@ -1161,6 +1174,10 @@ func applyEntry(c *Config, s *State, api API, e *Entry, save func(*State) error)
 		setAgreedParent(s, e.GitHub, e.parent)
 	case KindSyncParent:
 		return applyParent(s, api, e, save)
+	case KindAssigneeAgreed:
+		setAgreedAssignee(s, e.GitHub, e.assignee)
+	case KindSyncAssignee:
+		return applyAssignee(c, s, api, e, save)
 	case KindContentAgreed:
 		setCopied(s, e)
 	case KindSyncContent:
@@ -1222,6 +1239,11 @@ func applyCreatedIssue(c *Config, s *State, api API, e *Entry, save func(*State)
 	// one; a GitHub parent is applied next run.
 	if c.SyncParents {
 		setAgreedParent(s, e.GitHub, e.parent)
+	}
+	// A new issue created with an assignee agrees on it. One created without starts
+	// with no agreement, so a default assignee Jira gives it is not taken as a choice.
+	if account := c.newAssignee(e.issue); account != "" {
+		setAgreedAssignee(s, e.GitHub, account)
 	}
 
 	return nil

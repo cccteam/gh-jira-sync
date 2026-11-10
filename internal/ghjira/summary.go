@@ -29,6 +29,7 @@ var changeNames = map[Kind]string{
 	KindCreateGitHubIssue: "Create GitHub issue",
 	KindLinkGitHubIssue:   "Link existing GitHub issue",
 	KindSyncContent:       "Update",
+	KindSyncAssignee:      "Set assignee",
 }
 
 // reportFile is a report as written. Sides are plain strings here because a report
@@ -209,7 +210,7 @@ func changeDetail(e *Entry) string {
 	case hasSide && e.Kind != KindSyncProjectStatus && e.Kind != KindAddToProject:
 		text += " on " + side
 	}
-	for _, target := range []string{e.Status, e.Parent} {
+	for _, target := range []string{e.Status, e.Parent, e.Assignee} {
 		if target != "" {
 			text += " to " + target
 		}

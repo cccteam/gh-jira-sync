@@ -96,13 +96,16 @@ const (
 	// to its copy (sync_content); KindContentAgreed records that they already match.
 	KindSyncContent   Kind = "sync_content"
 	KindContentAgreed Kind = "content_agreed"
+	// KindSyncAssignee and KindAssigneeAgreed are assignee sync (assignee_map).
+	KindSyncAssignee   Kind = "sync_assignee"
+	KindAssigneeAgreed Kind = "assignee_agreed"
 )
 
 // writes reports kinds that perform a remote write and count against max_operations.
 func (k Kind) writes() bool {
 	switch k {
 	case KindCreateIssue, KindCreateComment, KindEditComment, KindSyncStatus, KindAddToProject, KindSyncProjectStatus,
-		KindSyncParent, KindCreateGitHubIssue, KindSyncContent:
+		KindSyncParent, KindCreateGitHubIssue, KindSyncContent, KindSyncAssignee:
 		return true
 	default:
 		return false
@@ -168,6 +171,9 @@ const OpProjectStatus OpKind = "project_status"
 // OpParent identifies a pair's parent decisions, like OpStatus.
 const OpParent OpKind = "parent"
 
+// OpAssignee identifies a pair's assignee decisions, like OpStatus.
+const OpAssignee OpKind = "assignee"
+
 // OpTitle and OpDescription identify a pair's content sync decisions, like OpStatus.
 const (
 	OpTitle       OpKind = "title"
@@ -230,6 +236,8 @@ type GitHubIssue struct {
 		Total int `json:"total"`
 	} `json:"sub_issues_summary"`
 	RepositoryURL string `json:"repository_url"`
+	// Assignees are read for assignee sync (assignee_map).
+	Assignees []gitHubUser `json:"assignees"`
 }
 
 func (i *GitHubIssue) idString() string { return strconv.FormatInt(i.ID, 10) }
@@ -291,6 +299,10 @@ type JiraIssue struct {
 		Parent  *struct {
 			Key string `json:"key"`
 		} `json:"parent"`
+		// Assignee is read for assignee sync (assignee_map); null when unassigned.
+		Assignee *struct {
+			AccountID string `json:"accountId"`
+		} `json:"assignee"`
 	} `json:"fields"`
 	Properties struct {
 		Identity *IssueIdentity `json:"gh-jira-sync"`
@@ -491,6 +503,15 @@ func (i apiProjectItem) item(fieldID int64) ProjectItem {
 	}
 
 	return item
+}
+
+// assignee returns the Jira issue's assignee account ID, or "" when unassigned.
+func (j *JiraIssue) assignee() string {
+	if j.Fields.Assignee == nil {
+		return ""
+	}
+
+	return j.Fields.Assignee.AccountID
 }
 
 func (i *GitHubIssue) typeName() string {

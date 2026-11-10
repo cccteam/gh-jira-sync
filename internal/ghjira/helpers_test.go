@@ -1,6 +1,7 @@
 package ghjira
 
 import (
+	"cmp"
 	"maps"
 	"slices"
 	"strconv"
@@ -71,6 +72,11 @@ type fakeAPI struct {
 	summaryChanged string      // when Jira's summary last changed
 	titleChanged   string      // when the GitHub title was last renamed
 	nextID         int
+	// Assignee sync.
+	assigneeChanged string          // when Jira's assignee last changed, as its changelog reads
+	defaultAssignee string          // Jira account a new issue gets when created without one
+	createConfig    *Config         // config whose assignee_map CreateIssue applies, as the real client does
+	unassignable    map[string]bool // GitHub logins GitHub silently drops when assigned
 }
 
 func newFake() *fakeAPI {
@@ -172,6 +178,11 @@ func (f *fakeAPI) CreateIssue(source *GitHubIssue, _ string) (*JiraIssue, error)
 	f.jira = &JiraIssue{ID: "200", Key: "ENG-1"}
 	f.jira.Properties.Identity = &IssueIdentity{Operation: token(fakeConfig, OpIssue, source.idString()), GitHubID: source.idString()}
 	f.jira.Fields.Status = jiraStatus("To Do", "new")
+	account := f.defaultAssignee
+	if f.createConfig != nil {
+		account = cmp.Or(f.createConfig.newAssignee(source), account)
+	}
+	f.setJiraAssignee(account)
 	f.writes = append(f.writes, write{"issue", source.Title})
 	if err := f.lost(); err != nil {
 		return nil, err
@@ -416,8 +427,11 @@ func (f *fakeAPI) workflowDone() {
 func (f *fakeAPI) LastStateChange(int) (StateChange, error) { return f.timeline, nil }
 
 func (f *fakeAPI) JiraFieldChanged(_, field string) (string, error) {
-	if field == "summary" {
+	switch field {
+	case "summary":
 		return f.summaryChanged, nil
+	case jiraAssigneeField:
+		return f.assigneeChanged, nil
 	}
 	return f.jiraChanged, nil
 }
@@ -479,3 +493,43 @@ func (f *fakeAPI) CreateGitHubIssue(string, string, []string, string) (*GitHubIs
 	return nil, syncErr("unexpected GitHub issue creation")
 }
 func (f *fakeAPI) FindGitHubIssue(string, string) (*GitHubIssue, error) { return nil, nil }
+
+func (f *fakeAPI) setJiraAssignee(account string) {
+	f.jira.Fields.Assignee = nil
+	if account != "" {
+		f.jira.Fields.Assignee = &struct {
+			AccountID string `json:"accountId"`
+		}{account}
+	}
+}
+
+func (f *fakeAPI) setGitHubAssignees(logins ...string) {
+	f.source.Assignees = nil
+	for _, login := range logins {
+		f.source.Assignees = append(f.source.Assignees, gitHubUser{Login: login})
+	}
+}
+
+func (f *fakeAPI) SetGitHubAssignees(_ int, logins []string) error {
+	if err := f.maybeRefuse(); err != nil {
+		return err
+	}
+	var kept []string
+	for _, login := range logins {
+		if !f.unassignable[login] {
+			kept = append(kept, login)
+		}
+	}
+	f.setGitHubAssignees(kept...)
+	f.writes = append(f.writes, write{"github_assignees", strings.Join(logins, ",")})
+	return f.lost()
+}
+
+func (f *fakeAPI) SetJiraAssignee(_, account string) error {
+	if err := f.maybeRefuse(); err != nil {
+		return err
+	}
+	f.setJiraAssignee(account)
+	f.writes = append(f.writes, write{"jira_assignee", account})
+	return f.lost()
+}

@@ -114,6 +114,9 @@ type Config struct {
 	// IgnoredJiraParents lists Jira issue keys, such as an initiative in another
 	// project, whose children skip parent sync instead of blocking for review.
 	IgnoredJiraParents []string
+	// AssigneeMap maps GitHub logins to Jira account IDs, one to one; nil turns
+	// assignee sync off. People missing from it are left alone on both sides.
+	AssigneeMap map[string]string
 }
 
 // ProjectStatus mirrors a GitHub Project's single-select field (normally Status)
@@ -304,7 +307,7 @@ var configKeys = map[string]bool{
 	"max_pages": true, "comments": true, "comments_since": true, "jira_create_fields": true,
 	"full_rescan_hours": true, "status_sync": true, "project_status": true, "jira_issue_types": true,
 	"sync_parents": true, "sync_content": true, "jira_selection_label": true, "jira_subtask_type": true, "jira_cloud_id": true,
-	"jira_owned_issue_types": true, "ignored_jira_parents": true,
+	"jira_owned_issue_types": true, "ignored_jira_parents": true, "assignee_map": true,
 }
 
 // jiraParentField is the Jira issue field that holds an issue's parent.
@@ -345,7 +348,7 @@ func ParseConfig(data []byte) (*Config, error) {
 	}
 	c := &Config{}
 	for _, step := range []func(configInput, *Config) error{
-		parseEndpoints, parseIssueTypes, parseSelection, parseLimits, parseToggles, parseCreateFields, parseStatusModes, parseOwnership,
+		parseEndpoints, parseIssueTypes, parseSelection, parseLimits, parseToggles, parseCreateFields, parseStatusModes, parseOwnership, parseAssignees,
 	} {
 		if err := step(configInput(raw), c); err != nil {
 			return nil, err
@@ -625,6 +628,100 @@ func parseOwnership(in configInput, c *Config) error {
 	}
 
 	return nil
+}
+
+// jiraAssigneeField is the Jira issue field that holds an issue's assignee.
+const jiraAssigneeField = "assignee"
+
+// parseAssignees reads assignee_map. Each GitHub login (matched ignoring case, as
+// GitHub does) maps to one Jira account ID, and no account ID is mapped twice, so
+// either side's assignee names exactly one person on the other.
+func parseAssignees(in configInput, c *Config) error {
+	raw := in.value("assignee_map", nil)
+	if raw == nil {
+		return nil
+	}
+	const shape = "assignee_map must map GitHub logins to distinct Jira account IDs, or be null"
+	people, ok := raw.(Object)
+	if !ok || len(people) == 0 {
+		return syncErr(shape)
+	}
+	c.AssigneeMap = make(map[string]string, len(people))
+	for _, login := range slices.Sorted(maps.Keys(people)) {
+		account, _ := people[login].(string)
+		if !githubLoginPattern.MatchString(login) || strings.TrimSpace(account) == "" || account != strings.TrimSpace(account) {
+			return syncErr(shape)
+		}
+		for other, otherAccount := range c.AssigneeMap {
+			if strings.EqualFold(other, login) {
+				return syncErr("assignee_map lists %q twice (logins ignore case)", login)
+			}
+			if otherAccount == account {
+				return syncErr("assignee_map maps %q and %q to the same Jira account", other, login)
+			}
+		}
+		c.AssigneeMap[login] = account
+	}
+	// Assignee sync sets a new issue's assignee itself; a fixed one would assign
+	// every new issue to the same person.
+	if _, present := c.JiraCreateFields[jiraAssigneeField]; present {
+		return syncErr("jira_create_fields cannot set assignee when assignee_map is set")
+	}
+
+	return nil
+}
+
+// githubLoginPattern matches a GitHub login: letters, digits, and single inner hyphens.
+var githubLoginPattern = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9]|-[A-Za-z0-9])*$`)
+
+// jiraAccount returns the Jira account ID mapped to a GitHub login, if any.
+func (c *Config) jiraAccount(login string) (string, bool) {
+	for l, account := range c.AssigneeMap {
+		if strings.EqualFold(l, login) {
+			return account, true
+		}
+	}
+
+	return "", false
+}
+
+// githubLogin returns the GitHub login mapped to a Jira account ID, if any.
+func (c *Config) githubLogin(account string) (string, bool) {
+	for login, a := range c.AssigneeMap {
+		if a == account {
+			return login, true
+		}
+	}
+
+	return "", false
+}
+
+// assignedAccounts returns the Jira account IDs of an issue's mapped GitHub
+// assignees, in GitHub's order, and the logins of its unmapped ones.
+func (c *Config) assignedAccounts(issue *GitHubIssue) (mapped, unmapped []string) {
+	for _, u := range issue.Assignees {
+		if account, ok := c.jiraAccount(u.Login); ok {
+			mapped = append(mapped, account)
+		} else {
+			unmapped = append(unmapped, u.Login)
+		}
+	}
+
+	return mapped, unmapped
+}
+
+// newAssignee is the Jira account a new issue is created with: its first mapped
+// GitHub assignee, or "" when assignee sync is off or it has none.
+func (c *Config) newAssignee(source *GitHubIssue) string {
+	if c.AssigneeMap == nil {
+		return ""
+	}
+	mapped, _ := c.assignedAccounts(source)
+	if len(mapped) == 0 {
+		return ""
+	}
+
+	return mapped[0]
 }
 
 // jiraOwned reports whether Jira alone decides this Jira issue's status and parent.

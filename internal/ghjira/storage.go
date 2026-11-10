@@ -48,6 +48,9 @@ type Pair struct {
 	// Parent is the parent both sides last agreed on, as a GitHub issue number (0 for
 	// none); nil until they first agree. It works like Closed.
 	Parent *int `json:"parent,omitempty"`
+	// Assignee is the Jira account ID both sides last agreed on ("" for nobody), in
+	// assignee sync; nil until they first agree. It works like Closed.
+	Assignee *string `json:"assignee,omitempty"`
 	// Title and Description record what content sync last copied or found matching;
 	// nil until then. A copy that differs from its record was edited in the copy.
 	Title       *Copied `json:"title,omitempty"`
