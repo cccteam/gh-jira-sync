@@ -206,7 +206,7 @@ func changeDetail(e *Entry) string {
 		text = "Set Jira status" // the project status is copied to Jira as a transition
 	case hasSide && (e.Kind == KindCreateComment || e.Kind == KindRecoverComment):
 		text += " to " + side
-	case hasSide && e.Kind != KindSyncProjectStatus:
+	case hasSide && e.Kind != KindSyncProjectStatus && e.Kind != KindAddToProject:
 		text += " on " + side
 	}
 	for _, target := range []string{e.Status, e.Parent} {
