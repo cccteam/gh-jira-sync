@@ -232,7 +232,7 @@ func TestUncopyableJiraIssuesBlock(t *testing.T) {
 	eq(t, len(w.github), 0)
 }
 
-func TestJiraIssueChangedAfterPlanAborts(t *testing.T) {
+func TestJiraIssueChangedAfterPlanRetries(t *testing.T) {
 	t.Parallel()
 	x, w := newReverseWorld(t)
 	j := w.addJira(5, "Before", "", "")
@@ -241,9 +241,8 @@ func TestJiraIssueChangedAfterPlanAborts(t *testing.T) {
 		t.Fatal(err)
 	}
 	j.Fields.Summary = "After"
-	if _, err := Apply(x.c, NewState(x.c), w, entries, x.save); err == nil {
-		t.Fatal("created from a Jira issue that changed after plan")
-	}
+	_, err = Apply(x.c, NewState(x.c), w, entries, x.save)
+	wantRetry(t, entries, err, "Jira issue changed")
 	eq(t, len(w.github), 0)
 }
 

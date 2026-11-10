@@ -113,7 +113,15 @@ func (h *HTTP) retryDelay(headers http.Header, attempt int) time.Duration {
 // Do sends body as JSON and decodes the response into out (unless out is nil).
 // A response that does not fit out's type is an error, never silently zero values.
 func (h *HTTP) Do(method, path string, body, out any) error {
-	_, err := h.exchange(method, path, body, out)
+	_, err := h.exchange(method, path, body, out, method == http.MethodGet)
+
+	return err
+}
+
+// Query is Do for a POST that only reads, such as a GraphQL query or Jira's
+// comment/list, so transient failures are retried like a GET. Never use it for a write.
+func (h *HTTP) Query(path string, body, out any) error {
+	_, err := h.exchange(http.MethodPost, path, body, out, true)
 
 	return err
 }
@@ -124,7 +132,7 @@ var nextLink = regexp.MustCompile(`<([^>]+)>;\s*rel="next"`)
 // next page from the Link header, or "" on the last page. The next page must be on
 // the same host, so credentials are never sent elsewhere.
 func (h *HTTP) DoPage(path string, out any) (string, error) {
-	headers, err := h.exchange(http.MethodGet, path, nil, out)
+	headers, err := h.exchange(http.MethodGet, path, nil, out, true)
 	if err != nil {
 		return "", err
 	}
@@ -173,7 +181,9 @@ func (h *HTTP) request(method, path string, data []byte) (*http.Request, error) 
 	return req, nil
 }
 
-func (h *HTTP) exchange(method, path string, body, out any) (http.Header, error) {
+// exchange sends one request. Only a read (readOnly) is retried: a write that failed
+// may still have happened, so its outcome is left to the journal and the next run.
+func (h *HTTP) exchange(method, path string, body, out any, readOnly bool) (http.Header, error) {
 	var data []byte
 	if body != nil {
 		var err error
@@ -193,7 +203,7 @@ func (h *HTTP) exchange(method, path string, body, out any) (http.Header, error)
 			_ = resp.Body.Close()
 		}
 		if err != nil {
-			if method == http.MethodGet && attempt < 3 {
+			if readOnly && attempt < 3 {
 				h.sleep(time.Duration(math.Pow(2, float64(attempt))) * time.Second)
 
 				continue
@@ -205,13 +215,18 @@ func (h *HTTP) exchange(method, path string, body, out any) (http.Header, error)
 			// GitHub signals primary and secondary rate limits with 403 plus these headers.
 			limited := code == 403 && (resp.Header.Get("Retry-After") != "" || resp.Header.Get("x-ratelimit-remaining") == "0")
 			transient := code == 429 || code == 500 || code == 502 || code == 503 || code == 504
-			if method == http.MethodGet && (transient || limited) && attempt < 3 {
+			if readOnly && (transient || limited) && attempt < 3 {
 				h.sleep(h.retryDelay(resp.Header, attempt))
 
 				continue
 			}
 			// API response bodies can contain issue text or credentials; never log them.
-			return nil, &HTTPStatusError{Status: code, Msg: h.describe(method, path) + " failed with HTTP " + strconv.Itoa(code) + "; writes are not retried"}
+			msg := h.describe(method, path) + " failed with HTTP " + strconv.Itoa(code)
+			if !readOnly {
+				msg += "; writes are not retried"
+			}
+
+			return nil, &HTTPStatusError{Status: code, Msg: msg}
 		}
 		// 204 No Content has no body to decode, whatever out expects.
 		if out == nil || resp.StatusCode == http.StatusNoContent {
@@ -940,7 +955,7 @@ func (a *Client) projectItems() (map[int64]ProjectItem, error) {
 				Message string `json:"message"`
 			} `json:"errors"`
 		}
-		if err := a.projects.Do("POST", "/graphql", body, &resp); err != nil {
+		if err := a.projects.Query("/graphql", body, &resp); err != nil {
 			return nil, err
 		}
 		if len(resp.Errors) > 0 {
@@ -1076,7 +1091,7 @@ func (a *Client) GitHubTitleChanged(number int) (string, error) {
 			Message string `json:"message"`
 		} `json:"errors"`
 	}
-	if err := a.github.Do("POST", "/graphql", body, &resp); err != nil {
+	if err := a.github.Query("/graphql", body, &resp); err != nil {
 		return "", err
 	}
 	if len(resp.Errors) > 0 || resp.Data.Repository == nil || resp.Data.Repository.Issue == nil {
@@ -1152,7 +1167,7 @@ func (a *Client) LastStateChange(number int) (StateChange, error) {
 			Message string `json:"message"`
 		} `json:"errors"`
 	}
-	if err := a.projects.Do("POST", "/graphql", body, &resp); err != nil {
+	if err := a.projects.Query("/graphql", body, &resp); err != nil {
 		return StateChange{}, err
 	}
 	if resp.Data.Repository == nil || resp.Data.Repository.Issue == nil {
@@ -1203,7 +1218,7 @@ func (a *Client) withProperties(comments []apiJiraComment) ([]Comment, error) {
 				Properties []jiraProperty `json:"properties"`
 			} `json:"values"`
 		}
-		if err := a.jira.Do("POST", "/rest/api/3/comment/list?expand=properties", map[string][]int64{"ids": ids}, &page); err != nil {
+		if err := a.jira.Query("/rest/api/3/comment/list?expand=properties", map[string][]int64{"ids": ids}, &page); err != nil {
 			return nil, err
 		}
 		if !page.IsLast || len(page.Values) != len(batch) {

@@ -77,11 +77,10 @@ func TestPlannedCreationShowsMappedType(t *testing.T) {
 	}
 	eq(t, []any{entries[0].Kind, entries[0].IssueType}, []any{KindCreateIssue, "10300"})
 
-	// A type change between plan and apply would create the wrong type, so it aborts.
+	// A type change between plan and apply would create the wrong type, so it waits a run.
 	x.api.source.Type = typed("Bug").Type
-	if _, err := Apply(x.c, NewState(x.c), x.api, entries, x.save); err == nil {
-		t.Fatal("created an issue whose GitHub type changed after plan")
-	}
+	_, err = Apply(x.c, NewState(x.c), x.api, entries, x.save)
+	wantRetry(t, entries, err, "GitHub issue changed")
 	eq(t, len(x.api.writes), 0)
 }
 

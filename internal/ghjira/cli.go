@@ -73,6 +73,7 @@ func count(entries []*Entry, match func(*Entry) bool) *int {
 // options are the parsed command-line flags.
 type options struct {
 	configPath, statePath, reportPath, gitBranch string
+	summarize                                    string
 	apply, initState                             bool
 	acknowledge                                  stringList
 }
@@ -92,6 +93,7 @@ func parseFlags(args []string, stdout io.Writer) (*options, int, bool) {
 	flags.BoolVar(&o.apply, "apply", false, "perform remote writes (otherwise dry-run)")
 	flags.BoolVar(&o.initState, "init-state", false, "permit a new journal; never use to replace lost production state")
 	flags.Var(&o.acknowledge, "acknowledge", "silence a reviewed blocked/unavailable `OPERATION` until its reason changes (saved with -apply; repeatable)")
+	flags.StringVar(&o.summarize, "summarize", "", "print a Markdown summary of the report `file` (links come from -config) and exit")
 	version := flags.Bool("version", false, "print the version and exit")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -123,6 +125,15 @@ func mainWith(args []string, stdout io.Writer, newAPI apiFactory) int {
 	o, code, ok := parseFlags(args, stdout)
 	if !ok {
 		return code
+	}
+	if o.summarize != "" {
+		if err := Summarize(o.configPath, o.summarize, stdout); err != nil {
+			_, _ = fmt.Fprintln(os.Stderr, "gh-jira-sync: "+reportError(err))
+
+			return 1
+		}
+
+		return 0
 	}
 	mode := "dry-run"
 	if o.apply {

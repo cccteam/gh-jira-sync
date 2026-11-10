@@ -89,6 +89,36 @@ func TestReadRetries(t *testing.T) {
 	eq(t, srv.sleeps, []time.Duration{time.Second, 2 * time.Second, 4 * time.Second})
 }
 
+// Regression: a Jira 500 on comment/list, a POST that only reads, failed a whole run.
+func TestReadOnlyPostRetriesServerErrors(t *testing.T) {
+	t.Parallel()
+	calls := 0
+	srv := newServer(t, func(*http.Request) (int, http.Header, any) {
+		calls++
+		if calls < 3 {
+			return 500, nil, nil
+		}
+
+		return 200, nil, Object{"isLast": true}
+	})
+	h := srv.http()
+	var out Object
+	must(t, h.Query("/rest/api/3/comment/list", Object{"ids": []int{1}}, &out))
+	eq(t, calls, 3)
+	eq(t, len(srv.sleeps), 2)
+}
+
+func TestWriteNotRetriedOnServerError(t *testing.T) {
+	t.Parallel()
+	calls := 0
+	srv := newServer(t, func(*http.Request) (int, http.Header, any) { calls++; return 500, nil, nil })
+	h := srv.http()
+	h.service = "Jira"
+	err := h.Do("POST", "/rest/api/3/issue", Object{}, nil)
+	eq(t, err.Error(), "Jira POST /rest/api/3/issue failed with HTTP 500; writes are not retried")
+	eq(t, calls, 1)
+}
+
 func TestIssueSelectionAndPRFilter(t *testing.T) {
 	t.Parallel()
 	srv := newServer(t, ok([]any{Object{"number": 1}, Object{"number": 2, "pull_request": Object{}}}))
@@ -434,7 +464,7 @@ func TestHTTPErrorsNameServiceAndPath(t *testing.T) {
 	if code, ok := refusedStatus(err); !ok || code != 401 {
 		t.Fatalf("got %v", err)
 	}
-	eq(t, err.Error(), "Jira GET /rest/api/3/search/jql failed with HTTP 401; writes are not retried")
+	eq(t, err.Error(), "Jira GET /rest/api/3/search/jql failed with HTTP 401")
 
 	garbled := newServer(t, func(*http.Request) (int, http.Header, any) { return 200, nil, []byte("not json") })
 	h = garbled.http()

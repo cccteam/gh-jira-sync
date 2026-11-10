@@ -185,11 +185,16 @@ no operation for it is unfinished, and `full_rescan_hours` has not passed, its
 comment lists are not read. The stamp uses plan-time timestamps, so activity during
 the run triggers a scan next time. The rescan bounds staleness for comment edits that
 may not bump issue timestamps.
-Transient GETs, including GitHub rate-limit 403s, have bounded retries that honor
-`Retry-After` and `x-ratelimit-reset` (capped at 60 seconds). POST/PATCH/PUT requests
-do not retry within a run. Apart from item-specific 4xx refusals, a failed request
-stops subsequent writes; confirmed earlier results remain durable. Blocked comments
-may coexist with independent eligible operations, and produce exit code 2.
+Transient reads, including GitHub rate-limit 403s, have bounded retries that honor
+`Retry-After` and `x-ratelimit-reset` (capped at 60 seconds). Reads are GETs plus the
+POSTs that only read: GraphQL queries and Jira's `comment/list`. Writes
+(POST/PATCH/PUT/DELETE) do not retry within a run. Apart from item-specific 4xx
+refusals, a failed request stops subsequent writes; confirmed earlier results remain
+durable. An entry whose sides changed between plan and apply (the pre-write re-check
+fails before anything is recorded), or whose idempotent parent write is not yet
+visible, is reported with `outcome: retry` and the run continues with the next entry;
+the next run plans it again. Blocked comments may coexist with independent eligible
+operations, and produce exit code 2.
 
 Reviewed `blocked` or `unavailable` entries can be acknowledged by operation. State
 stores the acknowledged reason (an optional `acknowledged` key, so existing version 2
@@ -342,7 +347,11 @@ both sides last agreed on, as a GitHub issue number (0 for none). GitHub parents
 read by listing the children of linked issues whose `sub_issues_summary` is non-zero;
 Jira parents come with the issue fields already read. Only linked issues count, so an
 unlinked GitHub parent reads as no parent until it is linked, letting creation order
-not matter. A Jira parent that is not linked has no GitHub counterpart and blocks.
+not matter. The one exception is removing a Jira parent: before that is planned, the
+GitHub issue's own parent is read, and if it has an unlinked parent the entry is
+deferred until that parent is linked, so moving an issue under a parent that is not
+synced yet never strips its Jira parent. A Jira parent that is not linked has no
+GitHub counterpart and blocks.
 Writes use GitHub's sub-issue endpoints (`replace_parent` to move, the sub-issue's ID
 rather than its number) and Jira's issue edit (`fields.parent` to set,
 `update.parent.set.none` to remove). Hierarchy refusals are item-level rejections.

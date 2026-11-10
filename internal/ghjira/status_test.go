@@ -174,7 +174,7 @@ func TestRejectedStatusChangeIsRetried(t *testing.T) {
 	eq(t, agreed(t, s), "closed")
 }
 
-func TestStatusChangedAfterPlanAborts(t *testing.T) {
+func TestStatusChangedAfterPlanRetries(t *testing.T) {
 	t.Parallel()
 	x := newSyncer(t)
 	enableStatus(x)
@@ -185,9 +185,8 @@ func TestStatusChangedAfterPlanAborts(t *testing.T) {
 		t.Fatal(err)
 	}
 	x.api.source.State = "open" // reopened again: no longer what was planned, nor the target
-	if _, err := Apply(x.c, s, x.api, entries, x.save); err == nil {
-		t.Fatal("expected abort")
-	}
+	_, err = Apply(x.c, s, x.api, entries, x.save)
+	wantRetry(t, entries, err, "Issue status changed")
 	eq(t, len(x.api.writes), 1)
 }
 
