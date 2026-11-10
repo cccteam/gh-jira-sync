@@ -25,7 +25,7 @@ func TestSummaryGroupsEntriesForReaders(t *testing.T) {
 	got := renderSummary(rep, testLinks)
 	for _, want := range []string{
 		"## GitHub ↔ Jira sync: ⚠️ Needs review (1)",
-		"Mode: **apply** · planned writes: 3 · deferred to later runs (max_operations): 1",
+		"Mode: **apply** · planned writes: 3 · deferred to a later run: 1",
 		"| [#7](https://github.com/acme/test/issues/7) | Unsupported \\| content here | `abc` |",
 		"### Retried next run",
 		"| [#8](https://github.com/acme/test/issues/8) | Set parent on Jira to #2 | Parent changed after plan; retried next run |",

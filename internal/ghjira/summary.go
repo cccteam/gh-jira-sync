@@ -175,7 +175,7 @@ func summaryHeadline(rep *report, review int) string {
 		line += " · planned writes: " + strconv.Itoa(*rep.PlannedWrites)
 	}
 	if rep.DeferredWrites != nil && *rep.DeferredWrites > 0 {
-		line += " · deferred to later runs (max_operations): " + strconv.Itoa(*rep.DeferredWrites)
+		line += " · deferred to a later run: " + strconv.Itoa(*rep.DeferredWrites)
 	}
 
 	return line + "\n"
