@@ -781,10 +781,23 @@ func laterSide(githubAt, jiraAt string) (later Side, why string) {
 // later: the project's field update against the last status change in Jira's
 // changelog (or the issue's creation, if it never changed). Changes too close to tell
 // apart, or times that cannot be read, still block for a person to align.
+//
+// With no agreed status, a Jira status that never changed is only the workflow's
+// initial status, which nobody chose, so the project's option wins whatever the times.
+// Otherwise a Jira issue this tool just created from GitHub would count as the later
+// change and move every card it copied back to the initial status.
 func planLatest(api API, ps *ProjectStatus, e *Entry, current string, setProject func(), conflict string) error {
 	jiraAt, err := api.JiraFieldChanged(e.pair.JiraID, "status")
 	if err != nil {
 		return err
+	}
+	if jiraAt == "" && e.pair.ProjectStatus == nil {
+		if err := planJiraMove(api, ps, e, current); err != nil || e.Kind == KindBlocked {
+			return err
+		}
+		e.Reason = conflict + "; Jira's status has not changed since the issue was created, so Jira follows"
+
+		return nil
 	}
 	jiraAt = cmp.Or(jiraAt, e.jira.Fields.Created)
 	// The project stands in for GitHub here.

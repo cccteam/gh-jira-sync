@@ -288,7 +288,11 @@ stores the last agreed option (`project_status` on the pair). Unlike open/closed
 both sides can now change to different values. That case, and disagreement with
 nothing recorded, goes to whichever side changed later: the project field's
 `updatedAt` (read with the items) against the last status entry in the Jira issue's
-changelog, or its creation if it never changed. The changelog is read only for such
+changelog, or its creation if it never changed. One exception: with nothing agreed,
+a Jira status that never changed is only the workflow's initial status, so the
+project's option is carried to Jira whatever the times. Without it, a Jira issue the
+tool had just created from GitHub counted as the later change, and every card it
+copied was moved back to the initial status. The changelog is read only for such
 conflicts. Changes less than a minute apart, or a time that cannot be read, still
 block for a person, since server clocks and run timing make the order uncertain. When
 Jira wins, its open/closed state wins too: GitHub's is recorded as agreed, so the next
