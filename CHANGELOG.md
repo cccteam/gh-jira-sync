@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.5](https://github.com/cccteam/gh-jira-sync/compare/v0.2.4...v0.2.5) (2026-11-10)
+
+
+### Features
+
+* add a readable job summary, and keep sync runs going through stale items ([#32](https://github.com/cccteam/gh-jira-sync/issues/32)) ([ae97f3d](https://github.com/cccteam/gh-jira-sync/commit/ae97f3d071bacb25a482fd1ee70bc753484c0f1c))
+
 ## [0.2.4](https://github.com/cccteam/gh-jira-sync/compare/v0.2.3...v0.2.4) (2026-11-09)
 
 
