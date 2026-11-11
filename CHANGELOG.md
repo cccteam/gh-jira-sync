@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.8](https://github.com/cccteam/gh-jira-sync/compare/v0.2.7...v0.2.8) (2026-11-11)
+
+
+### Bug Fixes
+
+* accept Enterprise Managed User logins in assignee_map ([#38](https://github.com/cccteam/gh-jira-sync/issues/38)) ([065201d](https://github.com/cccteam/gh-jira-sync/commit/065201d6ab57306d439f0d7b6eb8dd6261b0d076))
+
 ## [0.2.7](https://github.com/cccteam/gh-jira-sync/compare/v0.2.6...v0.2.7) (2026-11-11)
 
 
