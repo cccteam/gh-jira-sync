@@ -671,8 +671,11 @@ func parseAssignees(in configInput, c *Config) error {
 	return nil
 }
 
-// githubLoginPattern matches a GitHub login: letters, digits, and single inner hyphens.
-var githubLoginPattern = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9]|-[A-Za-z0-9])*$`)
+// githubLoginPattern matches a GitHub login: letters, digits, hyphens, and the
+// underscore that Enterprise Managed User logins put before their short code (as in
+// octocat_acme). It only catches typos such as spaces or a leading @; GitHub decides
+// whether a login can be assigned.
+var githubLoginPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]*$`)
 
 // jiraAccount returns the Jira account ID mapped to a GitHub login, if any.
 func (c *Config) jiraAccount(login string) (string, bool) {
