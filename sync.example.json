@@ -19,6 +19,7 @@
   "project_status": null,
   "jira_owned_issue_types": [],
   "ignored_jira_parents": [],
+  "assignee_map": null,
   "max_operations": 20,
   "max_pages": 100,
   "full_rescan_hours": 24

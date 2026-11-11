@@ -232,6 +232,7 @@ syncing, even if the issue later closes or loses its label.
 | `status_sync` | `null` | Mirror open/closed: `{"close_transition": "Done", "reopen_transition": "Reopen"}` names the Jira transitions applied when the GitHub issue closes or reopens. Jira's Done category closes the GitHub issue. |
 | `project_status` | `null` | Mirror a GitHub Project's Status field and the Jira status instead; see [Project status](#features). Use either this or `status_sync`, not both. |
 | `jira_owned_issue_types` | `[]` | Jira issue types, by name or ID, that only Jira decides, such as `["Epic"]`. Their open/closed state, project status, and parent flow from Jira to GitHub only; see [Jira-owned issue types](#features). Needs `status_sync`, `project_status`, or `sync_parents`. |
+| `assignee_map` | `null` | Mirror assignees for the people listed, as `{"github-login": "jira-account-id"}`. `null` turns assignee sync off. See [Assignees](#features). |
 | `ignored_jira_parents` | `[]` | Jira issue keys, such as `["ITP-2019"]`, whose children skip parent sync instead of blocking for review. Use it for a parent that will never be in GitHub, such as an initiative in another project. Needs `sync_parents`. |
 
 ### Run limits
@@ -306,6 +307,29 @@ are mirrored between linked issues. Add an Epic issue type in GitHub and map it 
 `rejected`. Set `jira_subtask_type` so an issue nested under a Task is created as a
 Jira sub-task; it waits until its parent is in Jira.
 
+**Assignees.** With `assignee_map`, an issue's assignee is mirrored between GitHub and
+Jira for the people it lists:
+
+```json
+"assignee_map": {
+  "octocat": "712020:2c5f3e6a-1b2c-4d5e-8f90-123456789abc"
+}
+```
+
+Keys are GitHub logins (case is ignored); values are Jira account IDs, which appear in
+the URL of the person's Jira profile. Each person is listed once. Whoever changed the
+assignee since the last run wins, as for parents; changes on both sides are `blocked`.
+A Jira issue has one assignee and a GitHub issue can have several: GitHub agrees with
+Jira while Jira's assignee is among its listed assignees, and a GitHub change sends
+its first listed assignee to Jira. A change from Jira replaces GitHub's listed
+assignees and keeps anyone unlisted. A Jira assignee not in the map is `excluded`.
+New Jira issues are created with the GitHub assignee, so `jira_create_fields` cannot
+set `assignee` too. A Jira issue created from GitHub with no assignee is unassigned
+again if the Jira project gave it a default assignee. When the map is first added,
+an unassigned side is filled from the assigned one, and two different people are
+`blocked`. GitHub ignores a login that cannot be assigned issues in the repository,
+which is reported as `rejected`.
+
 **Jira-owned issue types.** List issue types in `jira_owned_issue_types` when Jira is
 where they are planned, for example Epics. For those issues GitHub always follows Jira:
 a GitHub close or reopen, a project status change (even to an unmapped option), or a
@@ -364,8 +388,8 @@ summary. It holds IDs and decisions, never issue or comment text.
 
 Each entry has a `kind`. Writes are `create_issue`, `create_github_issue`,
 `create_comment`, `edit_comment`, `sync_status`, `add_to_project`,
-`sync_project_status`, `sync_parent`, and `sync_content` (with `field` set to `title`
-or `description`); an `outcome` of `rejected` means the service
+`sync_project_status`, `sync_parent`, `sync_assignee`, and `sync_content` (with `field`
+set to `title` or `description`); an `outcome` of `rejected` means the service
 refused it and it is retried next run, and an `outcome` of `retry` means one side
 changed while the run was writing, so the entry was skipped and is planned again next
 run. The kinds that need a person are:

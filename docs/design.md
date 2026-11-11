@@ -8,11 +8,13 @@
   GitHub issue type when `jira_issue_types` maps it. Jira issue types are configured by
   name or ID; each run resolves names against the project's issue types before planning.
   Optionally copy later title and description edits from the original issue to its
-  copy (`sync_content`). Do not sync other issue fields, labels, assignees, or deletions.
+  copy (`sync_content`). Optionally mirror assignees for mapped people
+  (`assignee_map`). Do not sync other issue fields, labels, or deletions.
 * Optionally create GitHub issues from Jira issues with `jira_selection_label`.
 * Optionally mirror open/closed status in both directions (`status_sync`).
 * Optionally mirror parent links: GitHub sub-issues and Jira parents (`sync_parents`).
 * Or mirror a GitHub Project's Status field and Jira statuses (`project_status`).
+* Optionally mirror assignees for people mapped in `assignee_map`.
 * Copy original comments in both directions, including later edits to originals.
 * Report edits to copied comments; preserve them for human review.
 * Never delete comments or recreate a known deleted copy.
@@ -376,6 +378,36 @@ cannot change afterwards. CheckProject verifies the ID is a sub-task type.
 `ignored_jira_parents` names Jira parents that will never be linked, such as an
 initiative in another project. A child whose Jira parent is listed gets an `excluded`
 parent entry instead of a block, and nothing about its parent is recorded or written.
+
+## Assignees
+
+`assignee_map` lists the people assignee sync covers, each a GitHub login and a Jira
+account ID. Nothing on either side can match the two reliably: GitHub does not show
+users' email addresses to apps, and Jira hides them by default. The map is one to
+one, so each side's assignee names one person on the other. People not in it are
+never written: unmapped GitHub assignees are ignored and kept, and a Jira assignee
+not in it excludes the pair, since GitHub could not show who it is.
+
+It reuses the agreed-value design of parent sync, storing a Jira account ID (`""`
+for nobody) as `assignee` on the pair. A Jira issue has one assignee and a GitHub
+issue can have several, so GitHub holds an account when it is among GitHub's mapped
+assignees (or, for nobody, when it has none). A GitHub change carries its first mapped
+assignee to Jira; a Jira change replaces GitHub's mapped assignees with Jira's and
+keeps the unmapped ones.
+
+Creation sets the Jira assignee from the GitHub issue's first mapped assignee and
+records it as agreed. A Jira issue created with nobody records nothing, because Jira
+may give it the project's default assignee, and that is not a choice; read as a
+Jira change, it would assign the GitHub issue. With nothing agreed, an unassigned
+side is filled from the assigned one, except that a pair started on GitHub whose Jira
+assignee has no changelog entry follows GitHub, so the default is removed. Two
+different people with nothing agreed block for review. The changelog is read only in
+that case.
+
+Writes are the GitHub issue update (`assignees`, the whole list) and Jira's assign
+endpoint (`accountId`, null to unassign). GitHub drops logins that cannot be assigned
+instead of refusing them, so the write is confirmed by reading the issue back, and a
+missing login is reported as rejected.
 
 ## Jira-owned issue types
 

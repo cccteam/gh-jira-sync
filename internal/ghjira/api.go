@@ -62,6 +62,10 @@ type API interface {
 	SetGitHubParent(childID int64, parent, oldParent int) error
 	// SetJiraParent sets a Jira issue's parent by key, or removes it when key is "".
 	SetJiraParent(id, key string) error
+	// Assignee sync. SetGitHubAssignees replaces the issue's assignees; SetJiraAssignee
+	// sets the Jira assignee by account ID, or unassigns it when account is "".
+	SetGitHubAssignees(number int, logins []string) error
+	SetJiraAssignee(id, account string) error
 	// Jira → GitHub creation.
 	SelectedJiraIssues() ([]JiraIssue, error)
 	CreateGitHubIssue(title, body string, labels []string, issueType string) (*GitHubIssue, error)
@@ -567,7 +571,7 @@ func httpStatus(err error) (int, bool) {
 // JiraIssue reads the Jira fields the sync uses, or nil when the issue is gone or moved.
 func (a *Client) JiraIssue(id string) (*JiraIssue, error) {
 	issue := &JiraIssue{}
-	err := a.jira.Do("GET", "/rest/api/3/issue/"+id+"?fields=project,labels,updated,status,parent,summary,description,issuetype,created&properties=gh-jira-sync", nil, issue)
+	err := a.jira.Do("GET", "/rest/api/3/issue/"+id+"?fields=project,labels,updated,status,parent,summary,description,issuetype,created,assignee&properties=gh-jira-sync", nil, issue)
 	if status, ok := httpStatus(err); ok && status == 404 {
 		return nil, nil
 	}
@@ -691,6 +695,9 @@ func (a *Client) CreateIssue(source *GitHubIssue, parentKey string) (*JiraIssue,
 	if parentKey != "" {
 		fields["issuetype"] = Object{"id": a.c.JiraSubtaskType}
 		fields[jiraParentField] = Object{"key": parentKey}
+	}
+	if account := a.c.newAssignee(source); account != "" {
+		fields[jiraAssigneeField] = Object{"accountId": account}
 	}
 	fields["summary"] = source.Title
 	fields["description"] = markdownADF(issueDescription(source))
@@ -1300,6 +1307,28 @@ func (a *Client) SetJiraParent(id, key string) error {
 	return a.jira.Do("PUT", "/rest/api/3/issue/"+id, body, nil)
 }
 
+// SetGitHubAssignees replaces a GitHub issue's assignees. GitHub silently drops
+// logins that cannot be assigned, so callers confirm by reading the issue back.
+func (a *Client) SetGitHubAssignees(number int, logins []string) error {
+	// An empty list unassigns everyone; GitHub refuses null with 422.
+	if logins == nil {
+		logins = []string{}
+	}
+
+	return a.github.Do("PATCH", a.ghPath(number), map[string][]string{"assignees": logins}, nil)
+}
+
+// SetJiraAssignee sets a Jira issue's assignee by account ID, or unassigns it when
+// account is "".
+func (a *Client) SetJiraAssignee(id, account string) error {
+	var body any = map[string]any{"accountId": nil}
+	if account != "" {
+		body = map[string]string{"accountId": account}
+	}
+
+	return a.jira.Do("PUT", "/rest/api/3/issue/"+id+"/assignee", body, nil)
+}
+
 // SelectedJiraIssues lists the project's Jira issues carrying jira_selection_label.
 // issue_state applies as for GitHub: open excludes Jira's Done category, closed keeps
 // only it. Every page is read or the run fails.
@@ -1317,7 +1346,7 @@ func (a *Client) SelectedJiraIssues() ([]JiraIssue, error) {
 	for range a.c.MaxPages {
 		query := url.Values{
 			"jql": {jql}, "maxResults": {"100"},
-			"fields": {"project,summary,description,issuetype,status,created,updated,parent"}, "properties": {identityKey},
+			"fields": {"project,summary,description,issuetype,status,created,updated,parent,assignee"}, "properties": {identityKey},
 		}
 		if next != "" {
 			query.Set("nextPageToken", next)
