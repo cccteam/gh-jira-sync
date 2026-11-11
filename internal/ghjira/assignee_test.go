@@ -62,15 +62,19 @@ func TestAssigneeMapValidation(t *testing.T) {
 	t.Parallel()
 	base := `{"repository": "acme/test", "jira_url": "https://acme.atlassian.net", "jira_project": "ENG",
 		"jira_default_issue_type": "10001", `
-	c, err := ParseConfig([]byte(base + `"assignee_map": {"alice": "a1", "bob": "b1"}}`))
+	c, err := ParseConfig([]byte(base + `"assignee_map": {"alice": "a1", "bob": "b1", "mary-jane_Acme": "m1"}}`))
 	must(t, err)
 	account, ok := c.jiraAccount("ALICE")
 	eq(t, []any{account, ok}, []any{"a1", true})
+	// Enterprise Managed User logins end in _<shortcode>.
+	account, ok = c.jiraAccount("Mary-Jane_acme")
+	eq(t, []any{account, ok}, []any{"m1", true})
 	for name, tail := range map[string]string{
 		"not an object":      `"assignee_map": ["alice"]}`,
 		"empty":              `"assignee_map": {}}`,
 		"empty account":      `"assignee_map": {"alice": ""}}`,
 		"bad login":          `"assignee_map": {"al ice": "a1"}}`,
+		"leading @":          `"assignee_map": {"@alice": "a1"}}`,
 		"login twice":        `"assignee_map": {"alice": "a1", "Alice": "a2"}}`,
 		"account twice":      `"assignee_map": {"alice": "a1", "bob": "a1"}}`,
 		"fixed assignee too": `"assignee_map": {"alice": "a1"}, "jira_create_fields": {"assignee": {"accountId": "a1"}}}`,
