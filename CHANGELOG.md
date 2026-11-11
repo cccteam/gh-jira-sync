@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.7](https://github.com/cccteam/gh-jira-sync/compare/v0.2.6...v0.2.7) (2026-11-11)
+
+
+### Features
+
+* sync assignees for people listed in assignee_map ([#36](https://github.com/cccteam/gh-jira-sync/issues/36)) ([4273048](https://github.com/cccteam/gh-jira-sync/commit/42730486b6d0b0925048809ed4a4729f8f9e19e3))
+
 ## [0.2.6](https://github.com/cccteam/gh-jira-sync/compare/v0.2.5...v0.2.6) (2026-11-10)
 
 
